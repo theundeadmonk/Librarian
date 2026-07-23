@@ -18,11 +18,21 @@ $expected = [ordered]@{
 }
 
 function Add-KnownToolDirectories {
-    $directories = @(
-        (Join-Path $env:ProgramFiles "nodejs")
-        (Join-Path $env:USERPROFILE ".cargo\bin")
-        (Join-Path $env:ProgramFiles "Git\cmd")
-    ) | Where-Object { Test-Path $_ }
+    $directories = @()
+
+    if (-not (Get-Command "node.exe" -ErrorAction SilentlyContinue)) {
+        $directories += Join-Path $env:ProgramFiles "nodejs"
+    }
+
+    if (-not (Get-Command "cargo.exe" -ErrorAction SilentlyContinue)) {
+        $directories += Join-Path $env:USERPROFILE ".cargo\bin"
+    }
+
+    if (-not (Get-Command "git.exe" -ErrorAction SilentlyContinue)) {
+        $directories += Join-Path $env:ProgramFiles "Git\cmd"
+    }
+
+    $directories = $directories | Where-Object { Test-Path $_ }
 
     if ($directories.Count -gt 0) {
         $env:Path = (($directories + ($env:Path -split ";")) | Select-Object -Unique) -join ";"
