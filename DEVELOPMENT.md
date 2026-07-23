@@ -24,7 +24,13 @@ The manifests and lockfiles in source control are authoritative. Preview, releas
 
 ## First-time setup
 
-Install Git for Windows, the required Visual Studio workloads, Node.js 24.18.0, and Rustup. Visual Studio may install a Windows SDK, but the build obtains the exact 10.0.28000.2270 Build Tools from the locked NuGet package. From a PowerShell terminal at the repository root, let the pinned `rust-toolchain.toml` install Rust and then validate the complete environment:
+Install Git for Windows, the required Visual Studio workloads, Node.js 24.18.0, Rustup, and the Windows SDK:
+
+```powershell
+winget install Microsoft.WindowsSDK.10.0.28000
+```
+
+Visual Studio's C++ workload does not install SDK 10.0.28000. The build uses its installed platform headers and libraries together with the exact 10.0.28000.2270 Build Tools from the locked NuGet package. From a PowerShell terminal at the repository root, let the pinned `rust-toolchain.toml` install Rust and then validate the complete environment:
 
 ```powershell
 powershell.exe -NoProfile -File .\scripts\bootstrap.ps1

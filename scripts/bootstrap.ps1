@@ -226,11 +226,13 @@ if ($msbuildVersion.Major -lt 17 -or ($msbuildVersion.Major -eq 17 -and $msbuild
 
 $windowsSdkRoot = Join-Path ${env:ProgramFiles(x86)} "Windows Kits\10"
 $windowsSdkHeader = Join-Path $windowsSdkRoot "Include\$($expected.WindowsSdk)\um\Windows.h"
-$windowsSdkSource = if (Test-Path $windowsSdkHeader) {
-    "installed SDK and locked NuGet Build Tools"
-} else {
-    "locked NuGet Build Tools"
+if (-not (Test-Path $windowsSdkHeader)) {
+    throw (
+        "Windows SDK $($expected.WindowsSdk) is required. " +
+        "Install it with 'winget install Microsoft.WindowsSDK.10.0.28000' and run bootstrap again."
+    )
 }
+$windowsSdkSource = "installed SDK and locked NuGet Build Tools"
 
 $windowsProject = Join-Path $repoRoot "apps\windows\Librarian.Windows\Librarian.Windows.vcxproj"
 Assert-FileContains -Path $windowsProject -ExpectedText ('Include="Microsoft.WindowsAppSDK" Version="' + $expected.WindowsAppSdk + '"')

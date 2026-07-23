@@ -38,6 +38,10 @@ jobs:
           --component clippy
           --component rustfmt
 
+      - name: Install pinned Windows SDK
+        shell: pwsh
+        run: ./scripts/install-windows-sdk.ps1
+
       - name: Validate development environment
         shell: pwsh
         run: ./scripts/bootstrap.ps1
