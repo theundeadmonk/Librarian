@@ -1,0 +1,18 @@
+flowchart LR
+    Password["Master password"]
+    Recovery["Recovery key"]
+    Wrappers["Argon2id and HKDF<br/>VRK wrappers"]
+    Agent["Vault agent"]
+    Counter["Durable nonce counter<br/>single failure-sensitive owner"]
+    Records["AES-256-GCM<br/>encrypted records"]
+    Manifest["Encrypted manifest"]
+    Backup["Encrypted backup"]
+
+    Password --> Wrappers
+    Recovery --> Wrappers
+    Wrappers --> Agent
+    Agent --> Counter
+    Counter --> Records
+    Agent --> Manifest
+    Agent --> Backup
+    Records --> Manifest

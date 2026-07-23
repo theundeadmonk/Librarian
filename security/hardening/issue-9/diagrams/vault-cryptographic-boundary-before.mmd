@@ -1,0 +1,13 @@
+flowchart LR
+    Input["Master password or future recovery input"]
+    Agent["Vault agent scaffold"]
+    Readiness["FormatReadiness::ScaffoldOnly"]
+    SQLite["SQLite direction<br/>format not approved"]
+    Backup["Backup direction<br/>format not approved"]
+    Hello["Windows Hello<br/>mechanism unresolved"]
+
+    Input -. "disabled" .-> Agent
+    Agent --> Readiness
+    Readiness -. "blocks credential storage" .-> SQLite
+    Readiness -. "blocks credential storage" .-> Backup
+    Hello -. "unproven key release" .-> Agent

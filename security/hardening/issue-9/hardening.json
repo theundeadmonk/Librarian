@@ -1,0 +1,437 @@
+{
+  "documentType": "codex-security.hardening-analysis",
+  "schemaVersion": "1.0",
+  "analysisId": "hardening_20260723_librarian_issue_9",
+  "sourceEvidence": {
+    "kind": "document_collection",
+    "label": "Librarian Slice 1 threat model, architecture, and disabled vault scaffold",
+    "collectionSha256": "39dbfa6b7ab66a8af7bbd846e8d5a232066543fd0d61c1aae865cf648fe4779d",
+    "artifactCount": 5,
+    "sourceDrift": "none",
+    "targetRevision": "6416e0bfb72f3d02c2676ba09483eff1822fa087"
+  },
+  "assessment": {
+    "outcome": "opportunities_identified",
+    "summary": "The evidence supports one foundational opportunity: define a single agent-owned, versioned cryptographic boundary before credential storage is enabled."
+  },
+  "constraints": {
+    "profile": "balanced",
+    "changeHorizons": [
+      "incremental",
+      "foundational"
+    ],
+    "nonNegotiables": [
+      "The vault agent is the only long-lived plaintext and key owner.",
+      "Master-password and recovery-key restore each work without the original device.",
+      "Windows Hello remains device-local convenience unlock.",
+      "Hostile files and unsupported versions fail closed.",
+      "Credential storage remains disabled until independent review."
+    ],
+    "assumptions": [
+      "No measured latency or memory budget was supplied.",
+      "Windows 11 is the only MVP implementation and acceptance platform.",
+      "Cloud storage can replay, corrupt, delete, and observe backup metadata.",
+      "Dependency state must be refreshed when implementation begins."
+    ]
+  },
+  "opportunities": [
+    {
+      "opportunityId": "vault-cryptographic-boundary",
+      "title": "Establish one versioned vault cryptographic boundary",
+      "summary": "Make the agent own one explicit key hierarchy, nonce strategy, record and backup format, integrity manifest, migration policy, and review gate.",
+      "diagnosis": "The scaffold correctly disables credential storage, but later features would otherwise decide wrappers, nonces, row integrity, rollback, and migration through dispersed conventions.",
+      "evidence": [
+        {
+          "claimType": "observed",
+          "sourceKind": "threat_model",
+          "evidenceId": "E-01",
+          "path": "Threat Model.md",
+          "claim": "The threat model requires agent-owned keys, hostile-file authentication, rollback awareness, independent recovery, device-local Hello, and secret-free diagnostics."
+        },
+        {
+          "claimType": "observed",
+          "sourceKind": "document",
+          "evidenceId": "E-02",
+          "path": "Architecture.md",
+          "claim": "The accepted architecture places SQLite below vault-layer authenticated encryption and blocks exact cryptography on issue #9."
+        },
+        {
+          "claimType": "observed",
+          "sourceKind": "source",
+          "evidenceId": "E-04",
+          "path": "crates/vault-format/src/lib.rs",
+          "claim": "The vault format exposes only ScaffoldOnly readiness and defines no credential schema or cryptographic construction."
+        },
+        {
+          "claimType": "observed",
+          "sourceKind": "source",
+          "evidenceId": "E-05",
+          "path": "crates/vault-core/src/lib.rs",
+          "claim": "The core explicitly reports that credential storage is not approved."
+        },
+        {
+          "claimType": "inferred",
+          "sourceKind": "source",
+          "evidenceId": "E-15",
+          "path": "crates/vault-format/src/lib.rs",
+          "claim": "Without a single versioned specification, future unlock, record, backup, and migration paths could independently own cryptographic invariants."
+        }
+      ],
+      "desiredInvariants": [
+        "One random VRK is the portable data root and every protector wraps that same root.",
+        "Master-password and recovery-key restore each work alone; Hello never becomes recovery.",
+        "Every derived key has a versioned purpose label.",
+        "Every AEAD invocation has a unique nonce under its key without timestamp or process-local state.",
+        "The authenticated manifest commits to the exact active record set.",
+        "Unknown versions, corruption, rollback, and migration failure yield no partial unlock.",
+        "Cloud storage receives one opaque authenticated backup payload.",
+        "The readiness guard remains until implementation and independent review complete."
+      ],
+      "proposalPath": "proposals/vault-cryptographic-boundary.md",
+      "options": [
+        {
+          "optionId": "aes-gcm-counters",
+          "title": "AES-256-GCM with durable nonce counters",
+          "kind": "structural",
+          "summary": "Use standardized audited AES-GCM and make a crash-safe authenticated counter allocator part of every encryption path.",
+          "diagramPaths": {
+            "before": "diagrams/vault-cryptographic-boundary-before.mmd",
+            "after": "diagrams/vault-cryptographic-boundary-aes-gcm-after.mmd"
+          },
+          "evidenceCoverage": [
+            {
+              "evidenceId": "E-01",
+              "effect": "mitigates",
+              "tacticalFixRequired": true,
+              "rationale": "The hierarchy and manifest address the threat-model boundary, but nonce rollback needs a dedicated durable state machine."
+            },
+            {
+              "evidenceId": "E-04",
+              "effect": "addresses",
+              "tacticalFixRequired": true,
+              "rationale": "It supplies an explicit format while retaining the readiness guard until review."
+            },
+            {
+              "evidenceId": "E-05",
+              "effect": "addresses",
+              "tacticalFixRequired": true,
+              "rationale": "The core can remain disabled until the format and counter allocator are independently approved."
+            }
+          ],
+          "tradeoffs": [
+            {
+              "dimension": "security",
+              "direction": "improves",
+              "confidence": "high",
+              "basis": "source-derived",
+              "assessment": "AES-GCM is standardized and the selected Rust implementation publishes an audit, but nonce reuse would be catastrophic.",
+              "validationPlan": "Run primitive vectors and model-check counter reservation, epoch rotation, restore, and rollback."
+            },
+            {
+              "dimension": "performance",
+              "direction": "improves",
+              "confidence": "medium",
+              "basis": "analogous",
+              "assessment": "AES hardware should make record and backup encryption fast, but no Librarian benchmark exists.",
+              "validationPlan": "Benchmark record operations and 10 MiB and 512 MiB backups on minimum Windows hardware."
+            },
+            {
+              "dimension": "memory",
+              "direction": "neutral",
+              "confidence": "medium",
+              "basis": "source-derived",
+              "assessment": "AEAD state is small relative to the fixed Argon2 workspace and one bounded record or backup buffer.",
+              "validationPlan": "Measure peak working set during unlock, mutation, backup, and restore."
+            },
+            {
+              "dimension": "reliability",
+              "direction": "regresses",
+              "confidence": "high",
+              "basis": "source-derived",
+              "assessment": "Nonce safety depends on crash-consistent counter reservation across writes, migration, backup, and restored snapshots.",
+              "validationPlan": "Terminate at every reservation and commit stage and prove no key/nonce pair can repeat."
+            },
+            {
+              "dimension": "operability",
+              "direction": "regresses",
+              "confidence": "medium",
+              "basis": "source-derived",
+              "assessment": "Every restore and migration requires permanent review of counter and epoch continuity.",
+              "validationPlan": "Review all encryption call sites and document counter ownership in release checklists."
+            },
+            {
+              "dimension": "migration",
+              "direction": "regresses",
+              "confidence": "high",
+              "basis": "source-derived",
+              "assessment": "Adoption or removal requires a full rewrite, and uncertain counter history cannot be reused safely.",
+              "validationPlan": "Exercise copy-on-write migration and downgrade with retained old encrypted artifacts."
+            }
+          ],
+          "residualRisks": [
+            "Counter rollback or reuse can defeat confidentiality and integrity.",
+            "Clean-device backup freshness remains unprovable.",
+            "Windows Hello and rollback-anchor protection remain unresolved."
+          ],
+          "implementationReadiness": {
+            "affectedComponents": [
+              "crates/vault-format",
+              "crates/vault-core",
+              "crates/vault-agent",
+              "tests/test-vectors"
+            ],
+            "workPackages": [
+              "Implement key hierarchy and strict formats.",
+              "Implement authenticated durable nonce allocation.",
+              "Implement manifest, backup, rollback, migration, and vectors."
+            ],
+            "acceptanceCriteria": [
+              "No repeated AES-GCM key/nonce pair is possible under crash, rollback, restore, or migration tests.",
+              "Independent review approves the exact counter state machine."
+            ],
+            "migrationNotes": [
+              "Use a new key epoch and full copy-on-write rewrite."
+            ],
+            "rollback": "Restore the retained pre-migration encrypted artifact; never reuse uncertain counter state."
+          }
+        },
+        {
+          "optionId": "xchacha-envelopes",
+          "title": "XChaCha20-Poly1305 envelopes and encrypted manifest",
+          "kind": "foundational",
+          "summary": "Use random 192-bit nonces, purpose-derived keys, strict record envelopes, an encrypted row-set manifest, and an outer-encrypted backup.",
+          "diagramPaths": {
+            "before": "diagrams/vault-cryptographic-boundary-before.mmd",
+            "after": "diagrams/vault-cryptographic-boundary-xchacha-envelopes-after.mmd"
+          },
+          "evidenceCoverage": [
+            {
+              "evidenceId": "E-01",
+              "effect": "mitigates",
+              "tacticalFixRequired": true,
+              "rationale": "The hierarchy, strict parser, manifest, backup, and rollback anchor make the threat-model invariants explicit; #15 and negative tests remain required."
+            },
+            {
+              "evidenceId": "E-02",
+              "effect": "addresses",
+              "tacticalFixRequired": true,
+              "rationale": "Cryptography and database ownership remain inside the agent boundary."
+            },
+            {
+              "evidenceId": "E-04",
+              "effect": "addresses",
+              "tacticalFixRequired": true,
+              "rationale": "It defines the missing versioned format while keeping ScaffoldOnly until final approval."
+            },
+            {
+              "evidenceId": "E-05",
+              "effect": "addresses",
+              "tacticalFixRequired": true,
+              "rationale": "The core continues to deny credential storage throughout implementation."
+            }
+          ],
+          "tradeoffs": [
+            {
+              "dimension": "security",
+              "direction": "improves",
+              "confidence": "high",
+              "basis": "source-derived",
+              "assessment": "Large random nonces avoid a durable allocator, the Rust crate publishes an audit statement, and the encrypted manifest authenticates the complete row set.",
+              "validationPlan": "Run RFC and published vectors, libsodium differential tests, mutation tests, fuzzing, and independent composition review."
+            },
+            {
+              "dimension": "performance",
+              "direction": "unknown",
+              "confidence": "medium",
+              "basis": "analogous",
+              "assessment": "Small record operations should be inexpensive, while Argon2 and full-vault verification likely dominate unlock; no Librarian measurements exist.",
+              "validationPlan": "Measure median and p95 unlock, 1/1k/10k/100k record verification, mutations, and 10 MiB/512 MiB backup."
+            },
+            {
+              "dimension": "memory",
+              "direction": "neutral",
+              "confidence": "medium",
+              "basis": "source-derived",
+              "assessment": "The design needs the fixed Argon2 workspace plus one bounded record or backup buffer, not a plaintext copy of the entire vault.",
+              "validationPlan": "Measure peak working set and verify buffers zeroize on all exits."
+            },
+            {
+              "dimension": "reliability",
+              "direction": "improves",
+              "confidence": "high",
+              "basis": "source-derived",
+              "assessment": "Random nonces remove counter reservation from the crash path; SQLite transactions and copy-on-write files contain ordinary interruption.",
+              "validationPlan": "Crash or cancel at every commit, backup, restore, migration, and anchor-update boundary."
+            },
+            {
+              "dimension": "operability",
+              "direction": "neutral",
+              "confidence": "medium",
+              "basis": "source-derived",
+              "assessment": "No new service is introduced, but dependency, vector, corruption, anchor, and review evidence become release obligations.",
+              "validationPlan": "Add dependency review, fuzz, canary, and review receipts to the release gate."
+            },
+            {
+              "dimension": "migration",
+              "direction": "regresses",
+              "confidence": "medium",
+              "basis": "source-derived",
+              "assessment": "The first format is new; future schema, suite, schedule, or root-key changes require explicit copy-on-write migration.",
+              "validationPlan": "Exercise no-op and synthetic-version migrations, interruption, readback, retained old artifact, and downgrade."
+            }
+          ],
+          "residualRisks": [
+            "XChaCha20-Poly1305 is broadly deployed but not itself a final IETF RFC.",
+            "A clean device cannot prove backup freshness.",
+            "Windows Hello and rollback-anchor protection remain unresolved.",
+            "Best-effort memory erasure cannot defeat administrator or kernel access."
+          ],
+          "implementationReadiness": {
+            "affectedComponents": [
+              "crates/vault-format",
+              "crates/vault-core",
+              "crates/vault-agent",
+              "tests/test-vectors",
+              "platform/windows-hello"
+            ],
+            "workPackages": [
+              "Implement strict deterministic formats and secret types.",
+              "Implement key schedule, portable wrappers, records, manifest, and SQLite transactions.",
+              "Implement backup, restore, rollback anchor, and copy-on-write migration.",
+              "Integrate the #15 device protector.",
+              "Run benchmarks, vectors, fuzzing, canary scans, and independent review."
+            ],
+            "acceptanceCriteria": [
+              "Master-password and recovery-key clean-device restores both pass.",
+              "All primitive and complete-format vectors pass through independent verification.",
+              "All corruption, rollback, crash, migration, fuzz, and secret-canary tests pass.",
+              "A non-author reviewer approves the exact revision.",
+              "FormatReadiness remains ScaffoldOnly until the final gate."
+            ],
+            "migrationNotes": [
+              "All format changes are copy-on-write with retained authenticated source artifacts.",
+              "KDF parameter changes rewrap the VRK; suite or root changes rewrite the complete vault."
+            ],
+            "rollback": "Before enablement, revert code. After enablement, explicitly restore the retained pre-migration encrypted artifact and warn about post-migration data loss."
+          }
+        },
+        {
+          "optionId": "aes-gcm-siv-envelopes",
+          "title": "AES-256-GCM-SIV envelopes",
+          "kind": "foundational",
+          "summary": "Keep the selected hierarchy, manifest, backup, and migration structure while using RFC 8452 misuse-resistant AEAD.",
+          "diagramPaths": {
+            "before": "diagrams/vault-cryptographic-boundary-before.mmd",
+            "after": "diagrams/vault-cryptographic-boundary-gcm-siv-after.mmd"
+          },
+          "evidenceCoverage": [
+            {
+              "evidenceId": "E-01",
+              "effect": "mitigates",
+              "tacticalFixRequired": true,
+              "rationale": "The structural design meets the same threat-model goals as the selected option, but implementation review is more demanding."
+            },
+            {
+              "evidenceId": "E-04",
+              "effect": "addresses",
+              "tacticalFixRequired": true,
+              "rationale": "It supplies an explicit format while preserving the readiness gate."
+            },
+            {
+              "evidenceId": "E-05",
+              "effect": "addresses",
+              "tacticalFixRequired": true,
+              "rationale": "Credential storage remains disabled until crate and composition review pass."
+            }
+          ],
+          "tradeoffs": [
+            {
+              "dimension": "security",
+              "direction": "improves",
+              "confidence": "medium",
+              "basis": "source-derived",
+              "assessment": "RFC 8452 limits damage from accidental nonce reuse, but the current stable Rust crate states it has never received a security audit.",
+              "validationPlan": "Run RFC vectors, an independent implementation, and commission crate and composition review."
+            },
+            {
+              "dimension": "performance",
+              "direction": "unknown",
+              "confidence": "medium",
+              "basis": "source-derived",
+              "assessment": "Two-pass encryption can add CPU cost, especially for backup payloads; no product benchmark exists.",
+              "validationPlan": "Benchmark record and 10 MiB/512 MiB backup encryption against the selected option."
+            },
+            {
+              "dimension": "memory",
+              "direction": "neutral",
+              "confidence": "medium",
+              "basis": "source-derived",
+              "assessment": "In-place APIs can keep memory bounded, with Argon2 still the dominant fixed workspace.",
+              "validationPlan": "Measure peak working set for unlock, mutation, backup, and restore."
+            },
+            {
+              "dimension": "reliability",
+              "direction": "improves",
+              "confidence": "high",
+              "basis": "source-derived",
+              "assessment": "Random nonces avoid durable counters and misuse resistance contains accidental duplicate-nonce damage better than GCM.",
+              "validationPlan": "Exercise deliberate duplicate-nonce fixtures plus every crash and migration boundary."
+            },
+            {
+              "dimension": "operability",
+              "direction": "regresses",
+              "confidence": "high",
+              "basis": "source-derived",
+              "assessment": "The unaudited crate adds a material independent-review and monitoring obligation.",
+              "validationPlan": "Obtain a scoped review and record crate revision, dependencies, findings, and disposition."
+            },
+            {
+              "dimension": "migration",
+              "direction": "regresses",
+              "confidence": "medium",
+              "basis": "source-derived",
+              "assessment": "Adoption or replacement requires a full cipher-suite rewrite even though the envelope structure is reusable.",
+              "validationPlan": "Exercise copy-on-write suite migration, readback, interruption, and downgrade."
+            }
+          ],
+          "residualRisks": [
+            "Current stable Rust implementation lacks its own security audit.",
+            "Clean-device backup freshness remains unprovable.",
+            "Windows Hello and rollback-anchor protection remain unresolved."
+          ],
+          "implementationReadiness": {
+            "affectedComponents": [
+              "crates/vault-format",
+              "crates/vault-core",
+              "crates/vault-agent",
+              "tests/test-vectors"
+            ],
+            "workPackages": [
+              "Implement the shared hierarchy, strict format, manifest, backup, and migration.",
+              "Validate RFC 8452 against an independent implementation.",
+              "Commission crate and composition review."
+            ],
+            "acceptanceCriteria": [
+              "Independent review covers the selected crate and complete Librarian composition.",
+              "RFC and complete-format vectors agree across independent paths.",
+              "Backup performance meets the recorded threshold."
+            ],
+            "migrationNotes": [
+              "Use a new AEAD suite identifier and full copy-on-write rewrite."
+            ],
+            "rollback": "Restore the retained pre-migration encrypted artifact or migrate under a newly reviewed suite."
+          }
+        }
+      ],
+      "recommendedOptionId": "xchacha-envelopes",
+      "recommendation": "Use XChaCha20-Poly1305 envelopes for the MVP because the random-nonce crash model and current independent implementation evidence best fit a small local vault; reconsider AES-GCM-SIV after equivalent review evidence exists."
+    }
+  ],
+  "openQuestions": [
+    "Which Windows primitive proves the device-local, user-verification-gated Hello protector required by issue #15?",
+    "Where can the rollback anchor live with the strongest practical integrity and ACL protection?",
+    "What measured unlock latency and peak-memory thresholds define acceptable Windows UX?",
+    "Who will perform the independent review and what exact revision will it cover?",
+    "Does a future compliance target require an AES cipher suite?"
+  ]
+}

@@ -23,6 +23,7 @@ Android, macOS, iPhone, iPad, Linux, non-Chromium browsers, family features, and
 - [Accepted architecture baseline](Architecture.md)
 - [Slice 1 threat model](Threat%20Model.md)
 - [Architecture decision records](ADRs)
+- [Issue #9 vault-cryptography hardening review](security/hardening/issue-9/hardening.md)
 - [Settled product decisions](Decisions.md)
 - [Open questions and decision gates](Open%20Questions.md)
 - [Research index](Research.md)

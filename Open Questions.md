@@ -21,13 +21,24 @@ These items are intentionally unresolved. They should be answered through feasib
 
 ## Cryptography and secret handling
 
-- Select vetted libraries, algorithms, record format, key hierarchy, and versioning. Do not invent cryptographic primitives.
-- Specify how the master password, Windows Hello, vault key, backup key, and recovery key relate to one another.
-- Decide whether either the master password or recovery key can restore a backup alone, or whether both are required.
-- Calibrate password-based key derivation for supported Windows hardware.
-- Specify sensitive-memory handling across native and extension process boundaries.
-- Define database integrity, rollback detection, corruption handling, and crash recovery.
-- Commission an independent review before storing real family credentials or distributing publicly.
+[[ADRs/0005 Vault Key Hierarchy and Encrypted Record Format]] proposes the
+algorithms, libraries, key hierarchy, record and backup formats, master and
+recovery restore semantics, metadata, integrity manifest, rollback limits,
+migrations, sensitive-memory rules, and validation gate. The proposal does not
+become accepted merely because it is documented.
+
+The remaining blocking questions are:
+
+- Prove the exact Windows Hello protector and rollback-anchor mechanism through
+  [issue #15](https://github.com/theundeadmonk/Librarian/issues/15).
+- Measure the proposed Argon2id profile and full authenticated-open path on the
+  slowest supported Windows 11 hardware; record an explicit UX and memory
+  threshold rather than silently weakening the KDF.
+- Define the recovery kit's human-readable, error-detecting representation and
+  confirmation experience without changing its specified 256-bit binary key.
+- Name an independent reviewer and record an approve/block result for the exact
+  implementation revision, dependencies, vectors, parsing, failure behavior,
+  Windows integration, logs, and crash artifacts.
 
 ## Backup and recovery
 
@@ -50,7 +61,10 @@ These items are intentionally unresolved. They should be answered through feasib
 - The initial monorepo, portable Rust core, native Windows shells, vault-agent boundary, and technology direction are accepted in [[Architecture]] and its linked ADRs. Material changes require an amended or superseding ADR.
 - Validate the repository skeleton, exact stable toolchain versions, bootstrap, and build policy in [issue #7](https://github.com/theundeadmonk/Librarian/issues/7).
 - Accept and maintain the [[Threat Model|Slice 1 data-flow and threat model]] through [issue #8](https://github.com/theundeadmonk/Librarian/issues/8); every secret-bearing implementation must preserve its invariants and negative-test obligations.
-- Select the key hierarchy, record format, SQLite binding and schema, vault-layer encryption, migrations, and corruption behavior in [issue #9](https://github.com/theundeadmonk/Librarian/issues/9).
+- Review and accept, amend, or reject the proposed key hierarchy, record format,
+  SQLite binding and schema, vault-layer encryption, migrations, and corruption
+  behavior in [[ADRs/0005 Vault Key Hierarchy and Encrypted Record Format]]
+  through [issue #9](https://github.com/theundeadmonk/Librarian/issues/9).
 - Select and threat-model the authenticated local IPC transport, peer verification, protocol versioning, client authorization, agent lifecycle, and incompatible-state behavior in [issue #12](https://github.com/theundeadmonk/Librarian/issues/12).
 - Define and validate signed application, provider, native-host, and extension update behavior through [issue #19](https://github.com/theundeadmonk/Librarian/issues/19).
 - Prove the deterministic and real-browser acceptance strategy without production credentials or external production services in [issue #20](https://github.com/theundeadmonk/Librarian/issues/20).

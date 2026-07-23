@@ -100,16 +100,19 @@ The product specification and decision notes remain at the repository root so th
 
 ## Key and data model
 
-The following remains a design direction, not an approved cryptographic specification. [Issue #9](https://github.com/theundeadmonk/Librarian/issues/9) owns the implementation-ready key hierarchy and encrypted-record decision.
+[[ADRs/0005 Vault Key Hierarchy and Encrypted Record Format]] is the proposed
+implementation-ready resolution for
+[issue #9](https://github.com/theundeadmonk/Librarian/issues/9). It selects a
+random vault root key, independent master-password and recovery wrappers,
+device-local Windows Hello convenience protection, purpose-separated derived
+keys, XChaCha20-Poly1305 record envelopes, an encrypted active-record manifest,
+and an outer-encrypted backup.
 
-- Generate a random vault key rather than deriving the data-encryption key directly from the master password.
-- Protect that vault key with separate wrappers for master-password unlock, local Windows Hello convenience unlock, and recovery.
-- Encrypt and authenticate records with explicit format and key versions.
-- Store portable passkey private material inside the encrypted vault so a validated backup can restore it.
-- Treat Windows Hello as a device-local key-release mechanism, never as the only recovery mechanism.
-- Minimize unencrypted metadata and document every field that remains visible while the vault is locked.
-
-Algorithms, libraries, password-derivation parameters, nonce construction, key rotation, rollback detection, memory clearing, and recovery authorization remain unresolved. They require a threat model, an accepted cryptography ADR, deterministic test vectors, and independent review before real credentials are stored.
+The ADR also specifies locked metadata, deterministic encoding, KDF parameters,
+corruption behavior, rollback limits, copy-on-write migration, sensitive-memory
+rules, vectors, and the independent review gate. It remains **Proposed** until
+that review is complete. The current code therefore stays
+`FormatReadiness::ScaffoldOnly` and cannot store credentials.
 
 ## Local protocols
 
@@ -166,3 +169,7 @@ The Rust core should expose a narrow C-compatible or generated binding surface r
 - [[ADRs/0002 Portable Rust Core and Native Platform Shells]]
 - [[ADRs/0003 Windows MVP Component Boundaries]]
 - [[ADRs/0004 Windows MVP Technology Baseline]]
+
+## Proposed decisions under review
+
+- [[ADRs/0005 Vault Key Hierarchy and Encrypted Record Format]]
