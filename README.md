@@ -21,6 +21,7 @@ Android, macOS, iPhone, iPad, Linux, non-Chromium browsers, family features, and
 
 - [MVP specification](MVP.md)
 - [Accepted architecture baseline](Architecture.md)
+- [Slice 1 threat model](Threat%20Model.md)
 - [Architecture decision records](ADRs)
 - [Settled product decisions](Decisions.md)
 - [Open questions and decision gates](Open%20Questions.md)

@@ -12,6 +12,7 @@ The current project is the single-user, Windows-only MVP. The implementation and
 
 - [[MVP]] — canonical scope and acceptance criteria
 - [[Architecture]] — accepted Windows-first technical architecture and implementation order
+- [[Threat Model]] — Slice 1 assets, boundaries, invariants, threats, and release gates
 - [[ADRs/0001 Monorepo|Architecture decisions]] — accepted baseline and its rationale
 - [[Decisions]] — choices already made and why
 - [[Open Questions]] — unresolved work that must not be mistaken for a decision

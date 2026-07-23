@@ -6,6 +6,8 @@ Librarian is pre-production software. Its cryptographic design, key hierarchy, l
 
 Do not use the project to store real passwords, passkeys, authentication secrets, recovery codes, or recovery material.
 
+The [Slice 1 threat model](Threat%20Model.md) defines the current assets, attacker capabilities, trust boundaries, invariants, negative-test obligations, residual risks, and release gates. The model is a design baseline, not authorization to use real credentials.
+
 ## Reporting a vulnerability
 
 Report suspected vulnerabilities privately through this repository's GitHub private vulnerability reporting feature. Do not open a public issue for a vulnerability that could expose credentials, bypass authorization, weaken cryptography, or compromise recovery material.
