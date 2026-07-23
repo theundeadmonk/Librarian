@@ -65,6 +65,7 @@ The **local vault agent** is the trust center. It is the only long-lived process
 Use one modular monorepo so protocol definitions, security-critical changes, test vectors, packaging, and end-to-end tests can evolve in a single reviewed change.
 
 ```text
+ADRs/
 apps/
   windows/
   browser-extension/
@@ -80,11 +81,9 @@ packaging/
 tests/
   e2e/
   test-vectors/
-docs/
-  adr/
 ```
 
-The repository should not contain empty Android or Apple projects during the MVP. Those projects should be added only when their implementation is authorized and staffed. See [[ADRs/0001 Monorepo]].
+The product specification and decision notes remain at the repository root so the repository is also a directly usable Obsidian vault. The repository should not contain empty Android or Apple projects during the MVP. Those projects should be added only when their implementation is authorized and staffed. See [[ADRs/0001 Monorepo]].
 
 ## Trust boundaries and invariants
 

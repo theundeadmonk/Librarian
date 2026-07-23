@@ -1,0 +1,14 @@
+[package]
+name = "librarian-vault-core"
+description = "Portable security-core boundary for Librarian"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+librarian-vault-format = { path = "../vault-format" }
+
+[lints]
+workspace = true
