@@ -11,19 +11,22 @@ The MVP needs direct Windows passkey and Hello integration, a small portable sec
 
 ## Decision
 
-Start the repository with the following baseline, then pin exact versions and lockfiles in source control:
+Start the repository with the following baseline. These exact stable versions were verified and pinned when the repository was scaffolded on 2026-07-22:
 
 | Area | Baseline |
 |---|---|
-| Windows UI | C++/WinRT with WinUI 3 and Windows App SDK 2.2, the current stable release at the time of this decision. |
-| Windows APIs | Windows SDK 10.0.28000.0, already proven by the local passkey feasibility spike. |
-| Portable core and agent | Stable Rust 1.97.1 at the time of this decision, pinned with `rust-toolchain.toml`. |
-| Browser extension | TypeScript targeting Chromium Manifest V3, with checked-in package-manager lockfile. |
+| Windows UI | C++/WinRT with WinUI 3 and Windows App SDK 2.3.1. |
+| Windows APIs | Windows SDK target 10.0.28000.0 with Build Tools 10.0.28000.2270, already proven by the local passkey feasibility spike. |
+| Windows C++ support | C++/WinRT 3.0.260715.1 and Windows Implementation Library 1.0.260126.7. |
+| Portable core and agent | Rust 1.97.1 for `x86_64-pc-windows-msvc`, pinned with `rust-toolchain.toml`. |
+| Browser extension | Node.js 24.18.0 LTS, npm 11.16.0, and TypeScript 7.0.2 targeting Chromium Manifest V3. |
 | Native browser bridge | Chromium native messaging through a small Rust host. |
 | Local database | SQLite used transactionally beneath vault-layer authenticated encryption; the encryption construction is a separate security decision. |
 | Windows packaging | MSIX for the native product components and registration manifests. |
 
-Use the latest stable patch versions available when the repository is scaffolded and record them in the first build manifest. Preview SDKs, experimental browser APIs, and unpinned dependencies require an explicit exception and rollback plan.
+The version evidence is the official [Windows App SDK downloads](https://learn.microsoft.com/en-us/windows/apps/windows-app-sdk/downloads), [Windows SDK downloads](https://learn.microsoft.com/en-us/windows/apps/windows-sdk/downloads), [Rust release announcement](https://blog.rust-lang.org/releases/latest/), and [Node.js release schedule](https://nodejs.org/en/about/previous-releases). Package manifests and checked-in lockfiles are the reproducibility boundary.
+
+Use the latest stable patch versions available when an intentional maintenance update is approved. Preview SDKs, experimental browser APIs, and unpinned dependencies require an explicit exception and rollback plan.
 
 ## Consequences
 

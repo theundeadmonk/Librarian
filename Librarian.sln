@@ -1,0 +1,32 @@
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 18
+VisualStudioVersion = 18.8.36215.9
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "Librarian.Windows", "apps\windows\Librarian.Windows\Librarian.Windows.vcxproj", "{1C47A235-053A-4F08-9FB1-8CE3349509F6}"
+EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "Librarian.WindowsPasskey", "platform\windows-passkey\Librarian.WindowsPasskey.vcxproj", "{A01FD8E8-0BE6-4B76-8A50-3DFB0A7D96A7}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|x64 = Debug|x64
+		Release|x64 = Release|x64
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{1C47A235-053A-4F08-9FB1-8CE3349509F6}.Debug|x64.ActiveCfg = Debug|x64
+		{1C47A235-053A-4F08-9FB1-8CE3349509F6}.Debug|x64.Build.0 = Debug|x64
+		{1C47A235-053A-4F08-9FB1-8CE3349509F6}.Debug|x64.Deploy.0 = Debug|x64
+		{1C47A235-053A-4F08-9FB1-8CE3349509F6}.Release|x64.ActiveCfg = Release|x64
+		{1C47A235-053A-4F08-9FB1-8CE3349509F6}.Release|x64.Build.0 = Release|x64
+		{1C47A235-053A-4F08-9FB1-8CE3349509F6}.Release|x64.Deploy.0 = Release|x64
+		{A01FD8E8-0BE6-4B76-8A50-3DFB0A7D96A7}.Debug|x64.ActiveCfg = Debug|x64
+		{A01FD8E8-0BE6-4B76-8A50-3DFB0A7D96A7}.Debug|x64.Build.0 = Debug|x64
+		{A01FD8E8-0BE6-4B76-8A50-3DFB0A7D96A7}.Release|x64.ActiveCfg = Release|x64
+		{A01FD8E8-0BE6-4B76-8A50-3DFB0A7D96A7}.Release|x64.Build.0 = Release|x64
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ExtensibilityGlobals) = postSolution
+		SolutionGuid = {3B5D1D21-7F1B-46B4-9D46-3C06BB2FB361}
+	EndGlobalSection
+EndGlobal

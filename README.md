@@ -34,6 +34,8 @@ The MVP will be delivered as four complete Windows vertical slices. The first sl
 
 The existing passkey-provider feasibility spike is intentionally maintained separately from this production repository because it contains disposable Microsoft sample code and mock credential storage.
 
+The production repository now has a Windows-only foundation for the accepted component boundaries. It deliberately implements no credential handling before the threat model and security decisions are complete. See [Windows development](DEVELOPMENT.md) for the pinned toolchain and single-command build.
+
 ## Security
 
 Read [SECURITY.md](SECURITY.md) before testing or reporting a vulnerability. Do not submit real credentials, recovery material, passkey private material, or authentication secrets in an issue, discussion, test fixture, or log.

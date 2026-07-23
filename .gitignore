@@ -10,6 +10,7 @@ Desktop.ini
 # Editor state
 .idea/
 .vscode/
+.vs/
 *.user
 *.suo
 
@@ -20,6 +21,8 @@ Desktop.ini
 *.pem
 *.pfx
 *.key
+*.cer
+*.p12
 
 # Build output
 target/
@@ -27,4 +30,17 @@ node_modules/
 dist/
 build/
 out/
+obj/
+artifacts/
+AppPackages/
+Generated Files/
+packages/
+x64/
+Debug/
+Release/
+*.appx
+*.appxbundle
+*.appxsym
+*.msix
+*.msixbundle
 *.log

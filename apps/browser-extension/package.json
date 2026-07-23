@@ -1,0 +1,15 @@
+{
+  "name": "@librarian/browser-extension",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Chrome and Edge integration boundary for Librarian",
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "build": "tsc --project tsconfig.json",
+    "check": "tsc --project tsconfig.json --noEmit"
+  },
+  "devDependencies": {
+    "typescript": "7.0.2"
+  }
+}
