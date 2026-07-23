@@ -83,9 +83,11 @@ function Get-ToolOutput {
             -RedirectStandardOutput $standardOutput `
             -RedirectStandardError $standardError
 
-        $output = (Get-Content -Raw $standardOutput) + (Get-Content -Raw $standardError)
+        $output = [string](Get-Content -Raw $standardOutput)
+        $errorOutput = [string](Get-Content -Raw $standardError)
         if ($process.ExitCode -ne 0) {
-            throw "'$FilePath $($Arguments -join ' ')' failed with exit code $($process.ExitCode): $($output.Trim())"
+            $diagnostics = (@($output, $errorOutput) | Where-Object { $_ }) -join [Environment]::NewLine
+            throw "'$FilePath $($Arguments -join ' ')' failed with exit code $($process.ExitCode): $($diagnostics.Trim())"
         }
 
         return $output.Trim()

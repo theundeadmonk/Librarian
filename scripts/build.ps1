@@ -4,7 +4,9 @@ param(
     [string]$Configuration = "Release",
 
     [ValidateSet("x64")]
-    [string]$Platform = "x64"
+    [string]$Platform = "x64",
+
+    [string]$DiffBase = $env:LIBRARIAN_DIFF_BASE
 )
 
 Set-StrictMode -Version Latest
@@ -241,8 +243,26 @@ if ($usesWslWorktreeMetadata) {
     Write-Host "==> Git whitespace validation"
     Write-Host "Skipped for this WSL-attached worktree; Windows Git cannot resolve its /mnt gitdir pointer."
 } else {
+    $committedDiffBase = if ($DiffBase -and $DiffBase -notmatch "^0+$") {
+        $DiffBase
+    } else {
+        "origin/main"
+    }
+
     Invoke-CheckedProcess `
-        -Label "Git whitespace validation" `
+        -Label "Committed diff whitespace validation" `
+        -FilePath $toolchain.Git `
+        -Arguments @("diff", "--check", "$committedDiffBase...HEAD") `
+        -WorkingDirectory $repoRoot
+
+    Invoke-CheckedProcess `
+        -Label "Staged diff whitespace validation" `
+        -FilePath $toolchain.Git `
+        -Arguments @("diff", "--cached", "--check") `
+        -WorkingDirectory $repoRoot
+
+    Invoke-CheckedProcess `
+        -Label "Working-tree diff whitespace validation" `
         -FilePath $toolchain.Git `
         -Arguments @("diff", "--check") `
         -WorkingDirectory $repoRoot
