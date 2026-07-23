@@ -49,7 +49,7 @@ These items are intentionally unresolved. They should be answered through feasib
 
 - The initial monorepo, portable Rust core, native Windows shells, vault-agent boundary, and technology direction are accepted in [[Architecture]] and its linked ADRs. Material changes require an amended or superseding ADR.
 - Validate the repository skeleton, exact stable toolchain versions, bootstrap, and build policy in [issue #7](https://github.com/theundeadmonk/Librarian/issues/7).
-- Complete the Slice 1 data-flow and threat model in [issue #8](https://github.com/theundeadmonk/Librarian/issues/8).
+- Accept and maintain the [[Threat Model|Slice 1 data-flow and threat model]] through [issue #8](https://github.com/theundeadmonk/Librarian/issues/8); every secret-bearing implementation must preserve its invariants and negative-test obligations.
 - Select the key hierarchy, record format, SQLite binding and schema, vault-layer encryption, migrations, and corruption behavior in [issue #9](https://github.com/theundeadmonk/Librarian/issues/9).
 - Select and threat-model the authenticated local IPC transport, peer verification, protocol versioning, client authorization, agent lifecycle, and incompatible-state behavior in [issue #12](https://github.com/theundeadmonk/Librarian/issues/12).
 - Define and validate signed application, provider, native-host, and extension update behavior through [issue #19](https://github.com/theundeadmonk/Librarian/issues/19).

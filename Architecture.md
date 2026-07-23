@@ -8,6 +8,8 @@
 
 This note defines the accepted technical shape of Librarian for the Windows MVP. The linked architecture decision records are authoritative for the choices they cover. Cryptography, recovery authorization, exact local IPC, database encryption, signing, and production security remain explicit follow-up decisions; accepting this baseline does not silently resolve them.
 
+[[Threat Model]] defines the security assets, attacker capabilities, boundary ownership, invariants, and negative-test obligations that every Slice 1 implementation must preserve.
+
 ## Scope guardrail
 
 The MVP is a Windows 11 product. Implementation, testing, packaging, continuous integration, and release acceptance cover only the Windows desktop app, the Windows passkey provider, and the Chrome/Edge extension.
@@ -131,7 +133,7 @@ The initial implementation baseline is documented in [[ADRs/0004 Windows MVP Tec
 
 ## Recommended implementation order
 
-1. Complete the Slice 1 threat model in [issue #8](https://github.com/theundeadmonk/Librarian/issues/8) and scaffold the pinned Windows monorepo in [issue #7](https://github.com/theundeadmonk/Librarian/issues/7).
+1. Accept the [[Threat Model|Slice 1 threat model]] through [issue #8](https://github.com/theundeadmonk/Librarian/issues/8) and scaffold the pinned Windows monorepo through [issue #7](https://github.com/theundeadmonk/Librarian/issues/7).
 2. Resolve the key hierarchy and encrypted-record design in [issue #9](https://github.com/theundeadmonk/Librarian/issues/9) and the authenticated local IPC design in [issue #12](https://github.com/theundeadmonk/Librarian/issues/12).
 3. Implement vault creation, lock, master-password unlock, and one encrypted test record in the Rust core.
 4. Add the vault agent and authenticated local protocol; verify crash, cancellation, and lock behavior.
