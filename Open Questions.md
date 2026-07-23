@@ -45,15 +45,15 @@ These items are intentionally unresolved. They should be answered through feasib
 - Define supported authentication parameters, clock-drift handling, and validation behavior.
 - Decide how and when stored recovery codes appear in the account interface.
 
-## Architecture decision gates
+## Architecture follow-up gates
 
-- Review and accept, revise, or reject the proposals in [[Architecture]] and its linked ADRs before treating the monorepo, Rust core, WinUI shell, agent boundary, or storage baseline as final.
-- Build a small Rust/C++ boundary spike and measure ownership, cancellation, error propagation, crash behavior, debugging, and handling of secret-bearing buffers.
-- Select and threat-model the authenticated local IPC transport, peer verification, protocol versioning, agent lifecycle, and behavior while locked, missing, updating, or incompatible.
-- Choose the exact SQLite binding, schema, vault-layer encryption construction, transaction model, migrations, and corruption-recovery behavior.
-- Define signed application, provider, native-host, and extension update mechanisms.
-- Define a toolchain pinning and stable-update policy, including how security updates are reviewed and rolled forward.
-- Create a deterministic test strategy that does not require real production credentials or external services.
+- The initial monorepo, portable Rust core, native Windows shells, vault-agent boundary, and technology direction are accepted in [[Architecture]] and its linked ADRs. Material changes require an amended or superseding ADR.
+- Validate the repository skeleton, exact stable toolchain versions, bootstrap, and build policy in [issue #7](https://github.com/theundeadmonk/Librarian/issues/7).
+- Complete the Slice 1 data-flow and threat model in [issue #8](https://github.com/theundeadmonk/Librarian/issues/8).
+- Select the key hierarchy, record format, SQLite binding and schema, vault-layer encryption, migrations, and corruption behavior in [issue #9](https://github.com/theundeadmonk/Librarian/issues/9).
+- Select and threat-model the authenticated local IPC transport, peer verification, protocol versioning, client authorization, agent lifecycle, and incompatible-state behavior in [issue #12](https://github.com/theundeadmonk/Librarian/issues/12).
+- Define and validate signed application, provider, native-host, and extension update behavior through [issue #19](https://github.com/theundeadmonk/Librarian/issues/19).
+- Prove the deterministic and real-browser acceptance strategy without production credentials or external production services in [issue #20](https://github.com/theundeadmonk/Librarian/issues/20).
 
 ## Future platform constraints — not MVP work
 

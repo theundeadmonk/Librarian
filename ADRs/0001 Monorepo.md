@@ -1,8 +1,9 @@
 # ADR 0001: Monorepo
 
-**Status:** Proposed
+**Status:** Accepted
 **Date:** 2026-07-22
 **Scope:** Product source, protocols, packaging, and tests
+**Decision issue:** [#6](https://github.com/theundeadmonk/Librarian/issues/6)
 
 ## Context
 
@@ -10,13 +11,15 @@ The Windows MVP contains a desktop app, passkey provider, local agent, browser e
 
 Changes to credentials, protocols, or vault formats frequently cross component boundaries. Splitting those components into independent repositories would make compatible changes, security review, and test-vector updates harder to coordinate at this stage.
 
-## Proposed decision
+## Decision
 
 Use a modular monorepo with explicit component ownership and dependency boundaries.
 
 The repository will contain only active Windows MVP components and shared code. Android and Apple projects will be added when those products enter implementation; empty future-platform directories and build pipelines are prohibited during the MVP.
 
 Root-level automation should provide a small set of consistent developer and CI entry points while allowing Rust, C++/WinRT, and TypeScript to retain their native build systems and lockfiles.
+
+[Issue #7](https://github.com/theundeadmonk/Librarian/issues/7) validates the initial repository structure and pinned toolchains. If implementation evidence invalidates this decision, supersede this ADR explicitly rather than allowing the repository to drift.
 
 ## Consequences
 

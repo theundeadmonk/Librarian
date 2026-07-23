@@ -1,6 +1,6 @@
 # Research
 
-This is the initial evidence index behind the MVP direction and proposed [[Architecture]]. Sources were reviewed on 2026-07-22. They inform the design; they do not substitute for the formal threat model, architecture decisions, implementation validation, or independent review still listed in [[Open Questions]].
+This is the initial evidence index behind the MVP direction and accepted [[Architecture]] baseline. Sources were reviewed on 2026-07-22. They inform the design; they do not substitute for the formal threat model, unresolved security decisions, implementation validation, or independent review still listed in [[Open Questions]].
 
 ## Usability
 
@@ -46,7 +46,7 @@ This is the initial evidence index behind the MVP direction and proposed [[Archi
 ## Shared core and native platform boundaries
 
 - [Rust 1.97.1 release — The Rust Programming Language](https://blog.rust-lang.org/releases/latest/)
-  - Records the current stable Rust release used for the proposed initial toolchain baseline when this note was reviewed.
+  - Records the current stable Rust release used for the accepted initial toolchain baseline when this note was reviewed.
 
 - [Rust for Windows — Microsoft](https://github.com/microsoft/windows-rs)
   - Provides official Rust language projections for Windows APIs and demonstrates an actively supported Rust/Windows boundary.
@@ -87,4 +87,4 @@ This is the initial evidence index behind the MVP direction and proposed [[Archi
 - [Providing one-time passcodes to AutoFill — Apple Developer Documentation](https://developer.apple.com/documentation/authenticationservices/providing-one-time-passcodes-to-autofill)
   - A future Apple-platform application can provide authentication codes through the operating system's native credential-provider experience.
 
-These platform APIs influence the proposed portable-core boundary only. They do not authorize Android, macOS, iPhone, or iPad implementation during the Windows MVP.
+These platform APIs influence the accepted portable-core boundary only. They do not authorize Android, macOS, iPhone, or iPad implementation during the Windows MVP.

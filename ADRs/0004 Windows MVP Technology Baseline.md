@@ -1,14 +1,15 @@
 # ADR 0004: Windows MVP Technology Baseline
 
-**Status:** Proposed
+**Status:** Accepted
 **Date:** 2026-07-22
 **Scope:** Initial implementation toolchain
+**Decision issue:** [#6](https://github.com/theundeadmonk/Librarian/issues/6)
 
 ## Context
 
 The MVP needs direct Windows passkey and Hello integration, a small portable security core, a Chromium extension, transactional local storage, and one coherent Windows package. The project should begin on current stable software rather than obsolete or preview toolchains.
 
-## Proposed decision
+## Decision
 
 Start the repository with the following baseline, then pin exact versions and lockfiles in source control:
 
@@ -31,6 +32,8 @@ Use the latest stable patch versions available when the repository is scaffolded
 - Updating to newer stable releases is an intentional maintenance change with release-note review, build verification, and regression testing.
 - Exact cryptographic crates, SQLite binding, test framework, package manager, local IPC transport, and signing service remain undecided; this ADR must not be read as approving them.
 
-## Exit criteria
+## Validation and follow-up
 
-Accept this baseline only after a clean Windows developer environment can bootstrap, build, test, package, install, upgrade, and uninstall the Slice 1 skeleton using documented commands.
+[Issue #7](https://github.com/theundeadmonk/Librarian/issues/7) must verify the exact stable versions available at scaffolding time and prove that a clean Windows developer environment can bootstrap, build, and test the Slice 1 skeleton using documented commands. Packaging, installation, upgrade, repair, and removal are validated by [issue #19](https://github.com/theundeadmonk/Librarian/issues/19).
+
+If the accepted baseline cannot pass those checks, amend or supersede this ADR before dependent implementation proceeds. Acceptance records the technology direction; it does not waive implementation validation.

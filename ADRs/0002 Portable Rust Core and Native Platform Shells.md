@@ -1,14 +1,15 @@
 # ADR 0002: Portable Rust Core and Native Platform Shells
 
-**Status:** Proposed
+**Status:** Accepted
 **Date:** 2026-07-22
 **Scope:** Security core and platform application strategy
+**Decision issue:** [#6](https://github.com/theundeadmonk/Librarian/issues/6)
 
 ## Context
 
 The MVP must integrate deeply with Windows WebAuthn, Windows Hello, Chromium native messaging, and Windows packaging. Later products are expected on Android, macOS, iPhone, and iPad. Vault formats, key management, passkey handling, and recovery rules should not be independently reimplemented for each operating system, but platform credential providers and user interfaces must behave like native applications.
 
-## Proposed decision
+## Decision
 
 Implement the portable vault, cryptographic, record-format, and policy core in stable, repository-pinned Rust. Keep its public interface narrow and free of Windows or UI concepts.
 
@@ -19,6 +20,8 @@ Use native platform shells and adapters:
 - Apple platforms later: Swift/SwiftUI and Authentication Services extensions.
 
 Do not build a shared cross-platform UI. C++ should remain limited to Windows integration code. Rust owns portable security rules; platform code owns lifecycle, presentation, accessibility, and operating-system APIs.
+
+For the Windows MVP, the C++/WinRT app and passkey provider communicate with the Rust vault agent through the accepted process boundary and the authenticated IPC design owned by [issue #12](https://github.com/theundeadmonk/Librarian/issues/12). Do not introduce an in-process C++/Rust FFI boundary unless measured evidence demonstrates that IPC cannot satisfy a required Windows transaction.
 
 For future Kotlin and Swift bindings, evaluate UniFFI in a bounded spike. Do not adopt it until cancellation, errors, concurrency, binary size, versioning, and secret-memory behavior have been measured and the version is pinned.
 
@@ -33,8 +36,8 @@ For future Kotlin and Swift bindings, evaluate UniFFI in a bounded spike. Do not
 
 ### Costs and controls
 
-- Foreign-function boundaries add failure modes; make them small, synchronous where practical, versioned, and covered by integration tests.
-- C++/Rust debugging and packaging require deliberate tooling and symbol management.
+- Cross-language and process boundaries add failure modes; make protocols small, versioned, fail-closed, and covered by integration tests.
+- C++/Rust diagnostics and packaging require deliberate tooling, compatible symbols, and version management.
 - Native UIs require separate implementations; share behavior specifications and tests rather than UI code.
 - Rust does not make cryptography automatically safe; use vetted libraries, explicit formats, test vectors, and external review.
 

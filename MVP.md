@@ -76,7 +76,7 @@ Import, family features, live cloud synchronization, and other platforms begin o
 
 ## System boundary
 
-The proposed component boundary is summarized below; [[Architecture]] contains the rationale, trust boundaries, repository shape, and implementation order. Product behavior in this specification is normative. Technology and process choices remain proposed until their architecture decision records are accepted.
+The accepted Slice 1 component boundary is summarized below; [[Architecture]] contains the rationale, trust boundaries, repository shape, and implementation order. Product behavior in this specification remains normative. Cryptography, recovery authorization, exact IPC, signing, and production-security choices remain separately gated.
 
 ```mermaid
 flowchart LR
@@ -106,7 +106,7 @@ The initial screen is an unlock screen whenever the vault is locked. The informa
 
 ### Local vault agent
 
-The local vault agent is the proposed trust center. It is the only long-lived process allowed to open the encrypted vault, hold the unlocked vault key, perform secret-bearing operations, and create backups. The desktop app, passkey provider, and browser integration make narrowly authorized requests rather than becoming independent vault implementations.
+The local vault agent is the accepted trust center. It is the only long-lived process allowed to open the encrypted vault, hold the unlocked vault key, perform secret-bearing operations, and create backups. The desktop app, passkey provider, and browser integration make narrowly authorized requests rather than becoming independent vault implementations.
 
 ### Windows passkey provider
 
