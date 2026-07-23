@@ -11,8 +11,8 @@ Its default behavior should be obvious, calm, and reversible. Advanced capabilit
 The current project is the single-user, Windows-only MVP. The implementation and acceptance boundary is Windows 11 with Google Chrome and Microsoft Edge. Other platforms and the broader family product begin only after the four Windows MVP slices have been proven.
 
 - [[MVP]] — canonical scope and acceptance criteria
-- [[Architecture]] — proposed Windows-first technical architecture and implementation order
-- [[ADRs/0001 Monorepo|Architecture decisions]] — proposals awaiting explicit acceptance
+- [[Architecture]] — accepted Windows-first technical architecture and implementation order
+- [[ADRs/0001 Monorepo|Architecture decisions]] — accepted baseline and its rationale
 - [[Decisions]] — choices already made and why
 - [[Open Questions]] — unresolved work that must not be mistaken for a decision
 - [[Research]] — evidence and platform references behind the direction

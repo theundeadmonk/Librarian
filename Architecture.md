@@ -1,10 +1,12 @@
 # Architecture
 
-**Status:** Proposed, version 0.1
+**Status:** Accepted Slice 1 baseline, version 0.2
+**Accepted:** 2026-07-22
 **Decision scope:** Windows-only MVP
 **Related product specification:** [[MVP]]
+**Decision issue:** [#6 — Accept the initial Windows MVP architecture baseline](https://github.com/theundeadmonk/Librarian/issues/6)
 
-This note defines the recommended technical shape of Librarian. It is an architecture proposal, not a record of settled decisions. The linked architecture decision records must be reviewed and accepted before implementation choices are treated as final.
+This note defines the accepted technical shape of Librarian for the Windows MVP. The linked architecture decision records are authoritative for the choices they cover. Cryptography, recovery authorization, exact local IPC, database encryption, signing, and production security remain explicit follow-up decisions; accepting this baseline does not silently resolve them.
 
 ## Scope guardrail
 
@@ -29,7 +31,7 @@ Android, macOS, iPhone, and iPad are future products. Their platform constraints
 - An extension-only vault.
 - A plugin framework or general-purpose secrets platform.
 
-## Proposed system
+## Accepted system boundary
 
 ```mermaid
 flowchart LR
@@ -48,7 +50,7 @@ The **local vault agent** is the trust center. It is the only long-lived process
 
 ## Component responsibilities
 
-| Component | Proposed technology | Responsibility |
+| Component | Technology | Responsibility |
 |---|---|---|
 | Vault agent and portable security core | Stable, repository-pinned Rust | Vault lifecycle, cryptographic operations, record validation, credential policy, backup creation, and authorization of client requests. |
 | Windows desktop app | C++/WinRT, WinUI 3, current stable Windows App SDK | Setup, unlock, account management, backup and recovery UI, notifications, and native Windows lifecycle. |
@@ -97,7 +99,7 @@ The repository should not contain empty Android or Apple projects during the MVP
 
 ## Key and data model
 
-The following is a design direction, not an approved cryptographic specification:
+The following remains a design direction, not an approved cryptographic specification. [Issue #9](https://github.com/theundeadmonk/Librarian/issues/9) owns the implementation-ready key hierarchy and encrypted-record decision.
 
 - Generate a random vault key rather than deriving the data-encryption key directly from the master password.
 - Protect that vault key with separate wrappers for master-password unlock, local Windows Hello convenience unlock, and recovery.
@@ -113,7 +115,7 @@ Algorithms, libraries, password-derivation parameters, nonce construction, key r
 Use two distinct, versioned protocols:
 
 - **Extension protocol:** Chromium native messaging between the extension and the native host. Requests include the verified browser origin, operation type, and a short-lived correlation identifier. Responses disclose no more than the selected operation requires.
-- **Trusted local protocol:** authenticated local IPC between the native clients and vault agent. The exact Windows transport, peer verification, process lifecycle, and authorization model remain an implementation decision.
+- **Trusted local protocol:** authenticated local IPC between the native clients and vault agent. The exact Windows transport, peer verification, process lifecycle, and authorization model remain an implementation decision owned by [issue #12](https://github.com/theundeadmonk/Librarian/issues/12).
 
 Do not expose the agent as a general local API. Unknown message versions, clients, operations, or fields must be rejected.
 
@@ -130,8 +132,8 @@ The initial implementation baseline is documented in [[ADRs/0004 Windows MVP Tec
 
 ## Recommended implementation order
 
-1. Accept the component-boundary ADRs and complete a repository threat model.
-2. Scaffold only the Windows MVP monorepo and pin its toolchains.
+1. Complete the Slice 1 threat model in [issue #8](https://github.com/theundeadmonk/Librarian/issues/8) and scaffold the pinned Windows monorepo in [issue #7](https://github.com/theundeadmonk/Librarian/issues/7).
+2. Resolve the key hierarchy and encrypted-record design in [issue #9](https://github.com/theundeadmonk/Librarian/issues/9) and the authenticated local IPC design in [issue #12](https://github.com/theundeadmonk/Librarian/issues/12).
 3. Implement vault creation, lock, master-password unlock, and one encrypted test record in the Rust core.
 4. Add the vault agent and authenticated local protocol; verify crash, cancellation, and lock behavior.
 5. Add the WinUI desktop shell and Windows Hello key release.
@@ -157,7 +159,7 @@ When the Windows MVP is proven, add native platform shells around the portable c
 
 The Rust core should expose a narrow C-compatible or generated binding surface rather than platform UI abstractions. UniFFI is a candidate for future Kotlin and Swift bindings, but its use is not decided; first validate its lifecycle, error, cancellation, and secret-memory behavior in a small spike. See [[ADRs/0002 Portable Rust Core and Native Platform Shells]].
 
-## Proposed decisions
+## Accepted decisions
 
 - [[ADRs/0001 Monorepo]]
 - [[ADRs/0002 Portable Rust Core and Native Platform Shells]]

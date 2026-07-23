@@ -1,14 +1,15 @@
 # ADR 0003: Windows MVP Component Boundaries
 
-**Status:** Proposed
+**Status:** Accepted
 **Date:** 2026-07-22
 **Scope:** Local processes, vault ownership, and browser integration
+**Decision issue:** [#6](https://github.com/theundeadmonk/Librarian/issues/6)
 
 ## Context
 
 Librarian must connect three different trust environments: untrusted websites and extension content scripts, Windows credential-provider APIs, and an unlocked local vault. Letting every component open the database or hold the vault key would multiply the secret-bearing attack surface and make locking, upgrades, and crash behavior inconsistent.
 
-## Proposed decision
+## Decision
 
 Use a local vault agent as the only long-lived owner of unlocked keys, decrypted records, database writes, and backup operations.
 
@@ -18,7 +19,7 @@ Use a local vault agent as the only long-lived owner of unlocked keys, decrypted
 - The native host validates the extension protocol and relays authorized requests to the agent.
 - Only the agent opens the encrypted SQLite vault.
 
-All boundaries use explicit protocol versions, schemas, size limits, timeouts, cancellation, and least-privilege operations. The exact local IPC transport and client-authentication mechanism require a follow-up ADR and threat-model validation.
+All boundaries use explicit protocol versions, schemas, size limits, timeouts, cancellation, and least-privilege operations. The exact local IPC transport and client-authentication mechanism remain blocked on the threat model in [issue #8](https://github.com/theundeadmonk/Librarian/issues/8) and the decision in [issue #12](https://github.com/theundeadmonk/Librarian/issues/12).
 
 ## Required invariants
 

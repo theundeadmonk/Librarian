@@ -20,13 +20,13 @@ Android, macOS, iPhone, iPad, Linux, non-Chromium browsers, family features, and
 ## Documentation
 
 - [MVP specification](MVP.md)
-- [Proposed architecture](Architecture.md)
+- [Accepted architecture baseline](Architecture.md)
 - [Architecture decision records](ADRs)
 - [Settled product decisions](Decisions.md)
 - [Open questions and decision gates](Open%20Questions.md)
 - [Research index](Research.md)
 
-These Markdown files also form an Obsidian vault. Product behavior in the MVP specification is normative; architecture records marked **Proposed** are not settled implementation decisions.
+These Markdown files also form an Obsidian vault. Product behavior in the MVP specification is normative. Architecture records marked **Accepted** define the Slice 1 baseline; unresolved cryptography, IPC, recovery, signing, and production-security decisions remain explicitly tracked.
 
 ## Development approach
 
