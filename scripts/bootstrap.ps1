@@ -32,7 +32,7 @@ function Add-KnownToolDirectories {
         $directories += Join-Path $env:ProgramFiles "Git\cmd"
     }
 
-    $directories = $directories | Where-Object { Test-Path $_ }
+    $directories = @($directories | Where-Object { Test-Path $_ })
 
     if ($directories.Count -gt 0) {
         $env:Path = (($directories + ($env:Path -split ";")) | Select-Object -Unique) -join ";"
