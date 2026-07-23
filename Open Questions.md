@@ -1,0 +1,80 @@
+# Open Questions
+
+These items are intentionally unresolved. They should be answered through feasibility work, security design, or user testing rather than silently assumed.
+
+## MVP design
+
+- Define the first-run onboarding flow and what “setup complete” means.
+- Design the desktop app's post-unlock home screen and account-management navigation.
+- Define the exact auto-lock behavior and default inactivity duration.
+- Define accessible wording for passkeys, authentication codes, recovery, and backup without security jargon.
+- Define the smallest useful set of settings; everything else should have an opinionated default.
+- Decide how to communicate that storing a password and its authentication secret together trades factor separation for simplicity.
+
+## Windows and browser feasibility
+
+- Confirm packaging, registration, upgrades, and removal of the native passkey component.
+- Define and authenticate the native messaging protocol between the extension and desktop app.
+- Decide what the extension should do when the native app is missing, locked, updating, or incompatible.
+- Test form detection against multi-step, dynamically rendered, embedded, and unusual sign-in forms.
+- Define strict origin-matching rules and the UI for suspicious or ambiguous matches.
+
+## Cryptography and secret handling
+
+- Select vetted libraries, algorithms, record format, key hierarchy, and versioning. Do not invent cryptographic primitives.
+- Specify how the master password, Windows Hello, vault key, backup key, and recovery key relate to one another.
+- Decide whether either the master password or recovery key can restore a backup alone, or whether both are required.
+- Calibrate password-based key derivation for supported Windows hardware.
+- Specify sensitive-memory handling across native and extension process boundaries.
+- Define database integrity, rollback detection, corruption handling, and crash recovery.
+- Commission an independent review before storing real family credentials or distributing publicly.
+
+## Backup and recovery
+
+- Design the recovery kit and a simple way to confirm that the user stored it separately.
+- Define backup frequency, retention count, rotation, and behavior when the synchronized folder is unavailable.
+- Decide how the app detects stale backups without becoming noisy.
+- Test restoring passwords, passkeys, authentication secrets, history, and metadata on a clean computer.
+- Define a recovery path when the user remembers neither the master password nor the recovery key; permanent loss may be the only secure answer for the MVP.
+
+## Password and authentication behavior
+
+- Define password-generator defaults and compatibility behavior for websites with unusual rules.
+- Define how registration and password-change success is detected without incorrectly saving failed attempts.
+- Define the pending-credential lifetime and recovery interface.
+- Define supported authentication parameters, clock-drift handling, and validation behavior.
+- Decide how and when stored recovery codes appear in the account interface.
+
+## Architecture decision gates
+
+- Review and accept, revise, or reject the proposals in [[Architecture]] and its linked ADRs before treating the monorepo, Rust core, WinUI shell, agent boundary, or storage baseline as final.
+- Build a small Rust/C++ boundary spike and measure ownership, cancellation, error propagation, crash behavior, debugging, and handling of secret-bearing buffers.
+- Select and threat-model the authenticated local IPC transport, peer verification, protocol versioning, agent lifecycle, and behavior while locked, missing, updating, or incompatible.
+- Choose the exact SQLite binding, schema, vault-layer encryption construction, transaction model, migrations, and corruption-recovery behavior.
+- Define signed application, provider, native-host, and extension update mechanisms.
+- Define a toolchain pinning and stable-update policy, including how security updates are reviewed and rolled forward.
+- Create a deterministic test strategy that does not require real production credentials or external services.
+
+## Future platform constraints — not MVP work
+
+- After the Windows MVP, validate Android Credential Manager and Apple Authentication Services provider lifecycles against the portable vault-core boundary.
+- Decide whether future Kotlin and Swift bindings should use UniFFI only after a bounded interoperability and secret-memory spike.
+- Define which record-format and recovery guarantees must remain identical across platforms before implementing mobile applications.
+- Do not create Android, macOS, iPhone, or iPad applications, placeholder directories, or CI jobs during the Windows MVP.
+
+## Fast follow
+
+- Import 1Password exports.
+- Import LastPass exports.
+- Provide clear duplicate detection and an import preview before committing records.
+- Evaluate encrypted interoperable export without normalizing plaintext CSV as a backup format.
+
+## Later product questions
+
+- Extension-only or temporary access on public and employer-managed computers.
+- Multi-device encrypted synchronization.
+- Family organizer and adult-member roles.
+- Sharing, revocation, family recovery, emergency access, and notifications.
+- Children and dependent family members.
+- Native macOS, iPhone, iPad, and Android applications.
+- Broader item types beyond credentials.

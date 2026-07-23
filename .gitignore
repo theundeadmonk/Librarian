@@ -1,0 +1,30 @@
+# Obsidian local state
+.obsidian/
+.trash/
+
+# Operating-system files
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Editor state
+.idea/
+.vscode/
+*.user
+*.suo
+
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+*.pem
+*.pfx
+*.key
+
+# Build output
+target/
+node_modules/
+dist/
+build/
+out/
+*.log
