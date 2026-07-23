@@ -1,0 +1,100 @@
+name: Implementation
+description: Define a scoped, testable unit of MVP implementation work.
+title: "[Component] "
+labels:
+  - "kind:implementation"
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not include real passwords, passkeys, authentication secrets, recovery material, or personal data.
+
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Outcome
+      description: Describe the observable user, security, or engineering outcome.
+      placeholder: When this issue is complete...
+    validations:
+      required: true
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Why this matters
+      description: Explain why this work is necessary now and link the relevant specification or ADR.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Primary area
+      options:
+        - Vault core
+        - Agent and IPC
+        - Windows app
+        - Passkey provider
+        - Browser extension
+        - Packaging and release
+        - Security
+        - Documentation and testing
+    validations:
+      required: true
+
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope
+      description: State both what is included and what is explicitly excluded.
+      placeholder: |
+        In scope:
+        -
+
+        Out of scope:
+        -
+    validations:
+      required: true
+
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: Use observable, independently verifiable checks.
+      placeholder: |
+        - [ ] ...
+        - [ ] ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: dependencies
+    attributes:
+      label: Dependencies and blockers
+      description: Link blocking issues or state that there are none.
+
+  - type: textarea
+    id: validation
+    attributes:
+      label: Validation
+      description: Identify required unit, integration, security, packaging, or end-to-end tests.
+    validations:
+      required: true
+
+  - type: textarea
+    id: security
+    attributes:
+      label: Security considerations
+      description: Identify secrets, trust boundaries, failure modes, and logging restrictions affected by this work.
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: readiness
+    attributes:
+      label: Readiness
+      options:
+        - label: This issue contains no real credentials or sensitive recovery material.
+          required: true
+        - label: The outcome is small enough to review and validate in one pull request.
+          required: true

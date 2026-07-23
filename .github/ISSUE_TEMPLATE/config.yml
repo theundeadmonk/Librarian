@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/theundeadmonk/Librarian/security/advisories/new
+    about: Report credential exposure, authorization bypass, cryptographic weakness, or recovery compromise privately.
