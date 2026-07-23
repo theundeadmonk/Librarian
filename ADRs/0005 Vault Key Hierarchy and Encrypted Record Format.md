@@ -56,21 +56,32 @@ version after independent review.
    versions, interrupted migration, and unsafe resource requests never produce
    a partially unlocked vault.
 
-## Cryptographic suites and pinned implementations
+## Serialized suites and pinned implementations
 
-The following identifiers are on-disk protocol values, not Rust enum
-discriminants. Unknown identifiers are rejected.
+### Serialized suite identifiers
 
-| Identifier | Version 1 value | Construction | Initial Rust implementation |
+The following identifiers are serialized in the vault and backup formats. They
+are protocol values, not Rust enum discriminants, and readers reject unknown
+values.
+
+| On-disk identifier | Version 1 value | Construction | Initial Rust implementation |
 |---|---:|---|---|
 | `kdf_suite` | `1` | Argon2id version `0x13` | `argon2` 0.5.3 with `zeroize` |
 | `key_schedule` | `1` | HKDF-SHA-256 | `hkdf` 0.13.0 and `sha2` 0.11.0 |
 | `aead_suite` | `1` | XChaCha20-Poly1305, 256-bit key, 192-bit nonce, 128-bit tag | `chacha20poly1305` 0.11.0 with `zeroize` |
 | `encoding` | `1` | Deterministic CBOR profile defined below | `minicbor` 2.2.3 |
-| `rng` | `1` | Windows operating-system CSPRNG through `getrandom` | `getrandom` 0.4.3 |
-| `digest` | `1` | SHA-256 | `sha2` 0.11.0 |
-| `database` | `1` | SQLite with application-layer encrypted envelopes | `rusqlite` 0.40.1, no default features, with `bundled`, `backup`, and `limits` |
-| `secret erasure` | `1` | Best-effort zeroization on scope exit | `zeroize` 1.9.0 |
+| `digest_suite` | `1` | SHA-256 | `sha2` 0.11.0 |
+
+### Non-serialized implementation pins
+
+These choices are required by version 1 but do not add fields to the on-disk
+format:
+
+| Area | Version 1 requirement | Initial Rust implementation |
+|---|---|---|
+| Randomness | Windows operating-system CSPRNG | `getrandom` 0.4.3 |
+| Database | SQLite with application-layer encrypted envelopes | `rusqlite` 0.40.1, no default features, with `bundled`, `backup`, and `limits` |
+| Secret erasure | Best-effort zeroization on scope exit | `zeroize` 1.9.0 |
 
 Cargo.lock is the exact dependency boundary. A dependency update is a security
 change: review release notes and advisories, run conformance and negative
@@ -130,10 +141,18 @@ flowchart TD
   mechanism that releases or unwraps the VRK for the current agent unlock
   attempt. It is never copied into a portable vault or backup.
 
-Master-password change and recovery-key rotation replace only their VRK
-wrappers. They do not re-encrypt every record. VRK rotation is a separate,
-copy-on-write migration that increments the key epoch and re-encrypts the
-manifest, every active record, and the backup payload.
+Master-password change and recovery-key rotation replace only the affected VRK
+wrapper, but the wrapper bytes are part of the manifest AAD. The same SQLite
+transaction therefore writes the new wrapper and re-encrypts the unchanged
+manifest with a fresh nonce under the unchanged VRK; records are not
+re-encrypted.
+
+VRK rotation is a separate copy-on-write migration. It generates a new VRK and
+key epoch, requires a confirmed master password for a fresh master wrapper,
+generates a new recovery unlock key and fresh recovery wrapper, and
+re-encrypts the manifest, every active record, and the backup payload. The
+rotation never commits unless both new wrappers and the new recovery kit are
+available and the complete destination authenticates successfully.
 
 [#15](https://github.com/theundeadmonk/Librarian/issues/15) may choose the
 Windows primitive and local storage encoding, but it cannot change this
@@ -232,6 +251,11 @@ CREATE TABLE vault_header (
     header BLOB NOT NULL
 ) STRICT;
 
+CREATE TABLE vault_manifest (
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+    envelope BLOB NOT NULL
+) STRICT;
+
 CREATE TABLE encrypted_records (
     record_id BLOB PRIMARY KEY NOT NULL CHECK (length(record_id) = 16),
     envelope BLOB NOT NULL
@@ -240,9 +264,11 @@ CREATE TABLE encrypted_records (
 
 `record_id` is 16 random bytes. It is not a timestamped UUID and has no
 semantic meaning. The agent rejects more than 100,000 records, an envelope
-larger than 1 MiB, a header larger than 64 KiB, or a database larger than
-512 MiB in the Windows MVP. Arithmetic overflow and values outside these
-limits fail before allocation.
+larger than 1 MiB, a header larger than 64 KiB, a manifest envelope larger than
+8 MiB, or a database larger than 512 MiB in the Windows MVP. The 8 MiB
+manifest bound accommodates 100,000 fixed-size record commitments plus
+deterministic CBOR and AEAD overhead. Arithmetic overflow and values outside
+these limits fail before allocation.
 
 ### Clear vault header
 
@@ -256,6 +282,7 @@ The singleton header is deterministic CBOR:
   1,                         ; key_schedule
   1,                         ; aead_suite
   1,                         ; encoding
+  1,                         ; digest_suite
   vault_id,                  ; 16 bytes
   key_epoch,                 ; u32
   [
@@ -268,22 +295,32 @@ The singleton header is deterministic CBOR:
     1,                       ; recovery_wrapper_version
     recovery_wrap_nonce,     ; 24 bytes
     wrapped_vrk              ; 48 bytes
-  ],
-  manifest_nonce,            ; 24 bytes
-  encrypted_manifest         ; bounded ciphertext
+  ]
 ]
 ```
 
 The wrapper AEAD associated data is deterministic CBOR containing the magic,
-container version, vault ID, key epoch, wrapper type, wrapper version, and, for
-the master wrapper, the complete KDF tuple and salt. A field cannot be changed
+container and minimum-reader versions, key schedule, AEAD suite, encoding,
+digest suite, vault ID, key epoch, wrapper type, wrapper version, and, for the
+master wrapper, the complete KDF tuple and salt. A field cannot be changed
 without making unwrap fail.
 
-The manifest AEAD associated data is the complete clear header prefix through
-both wrapper arrays plus the manifest nonce. It excludes only
-`encrypted_manifest`. This makes the manifest authenticate the wrappers and
-all algorithm-selection metadata even when the VRK arrived through Windows
-Hello.
+The manifest is stored separately so the bounded header does not grow with the
+record count. Its clear envelope is deterministic CBOR:
+
+```text
+[
+  1,                         ; manifest_envelope_version
+  manifest_nonce,            ; 24 bytes
+  encrypted_manifest         ; plaintext length + 16-byte tag
+]
+```
+
+The manifest AEAD associated data is deterministic CBOR containing the complete
+clear header, the manifest envelope version, and the manifest nonce. This makes
+the manifest authenticate both wrappers and all algorithm-selection metadata
+even when the VRK arrived through Windows Hello. Any wrapper change therefore
+requires manifest re-encryption in the same transaction.
 
 ### Encrypted manifest
 
@@ -387,6 +424,7 @@ A `.lbrbak` file is deterministic CBOR:
   key_schedule,
   aead_suite,
   encoding,
+  digest_suite,
   vault_id,
   key_epoch,
   master_wrapper,            ; same schema and values as the vault header
@@ -410,8 +448,10 @@ The encrypted payload is:
 
 The payload uses `BackupKey(key_epoch)`. Associated data is the complete clear
 backup header through `payload_nonce`. Windows Hello metadata is never present.
-The outer encryption hides SQLite structure, record count, record IDs, and
-individual ciphertext sizes from the sync provider.
+The outer encryption hides exact SQLite structure, record IDs, and individual
+record ciphertext sizes from the sync provider. Version 1 adds no padding or
+size buckets: total backup size and changes in that size remain visible and can
+reveal coarse vault growth or support estimates of record count.
 
 The agent creates a consistent database image through SQLite's backup API,
 wraps it in the encrypted payload, writes a new file in the destination
@@ -425,10 +465,19 @@ Backup cadence and retention are owned by the recovery slice, but every
 retained generation must be independently complete.
 
 Restore parses and validates into quarantine. It unwraps the VRK with either
-the master password or recovery key, authenticates the outer payload, verifies
-the embedded database through the normal vault-open path, and checks that
-vault ID, epoch, wrapper bytes, generation, and manifest digest agree across
-both layers. Only then may an explicit restore operation replace a live vault.
+the master password or recovery key, authenticates the outer payload, performs
+the normal header, manifest, row-set, and record authentication checks **without
+consulting or changing the device rollback anchor**, and checks that vault ID,
+epoch, wrapper bytes, generation, and manifest digest agree across both layers.
+
+Only after cryptographic verification does the recovery flow compare the
+candidate generation with the live vault and device anchor. Restoring an older
+candidate requires explicit confirmation that newer local changes will be
+lost. The agent writes a new live image whose generation is one greater than
+the maximum authenticated candidate, live, and anchor generation, re-encrypts
+its manifest with a fresh nonce, fully verifies the temporary image, atomically
+replaces the live vault, and then advances the anchor. It never lowers or
+bypasses the anchor and never opens the quarantined candidate as live state.
 
 ## Locked-state metadata
 
@@ -446,24 +495,32 @@ The following is visible without unlocking and no more:
 - for backup files, clear wrapper metadata, total ciphertext size, filename,
   and provider-observed timestamps.
 
-The outer backup encryption intentionally hides per-record metadata. No origin,
-service name, username, record type, password, authentication secret, passkey
-metadata, note, recovery value, or user-authored label is clear.
+The outer backup encryption intentionally hides exact per-record structure but
+does not hide aggregate size or growth. No origin, service name, username,
+record type, password, authentication secret, passkey metadata, note, recovery
+value, or user-authored label is clear.
 
 ## Transaction, corruption, and rollback behavior
 
 ### Vault writes
 
-Every logical mutation uses one SQLite immediate transaction:
+Every record mutation uses one SQLite immediate transaction:
 
 1. validate the proposed plaintext record and authorization epoch;
 2. encrypt the new envelope with a fresh nonce;
 3. compute the new sorted manifest and increment `generation` exactly once;
 4. re-encrypt the manifest with a fresh nonce;
-5. write the record and header;
+5. write the record and manifest envelope;
 6. commit with `synchronous=FULL`;
 7. update the device-local rollback anchor only after commit succeeds; and
 8. release success only if the authorization epoch is still current.
+
+Master-password change or recovery-key rotation also uses one SQLite immediate
+transaction. It derives the new wrapper, increments manifest generation,
+re-encrypts the manifest under fresh nonce and AAD containing the new complete
+header, writes the header and manifest envelope together, commits, and only
+then updates the anchor. It never publishes a wrapper whose matching manifest
+has not committed.
 
 Cancellation, lock, process termination, disk full, or any error before commit
 produces no logical mutation. A crash after SQLite commit but before anchor
@@ -522,17 +579,23 @@ explicit workflow and must never overwrite the source.
 - Record-schema changes decrypt, validate, transform, and re-encrypt every
   affected record into a new database image.
 - Cipher-suite, key-schedule, or VRK changes require a full database and backup
-  migration.
+  migration. VRK rotation also creates fresh master-password and recovery
+  wrappers for the new root before the destination can commit.
 - A failed or interrupted migration leaves the old vault authoritative.
 - Application downgrade never writes a newer vault. If an older application
   cannot read the new version, it fails closed. Product rollback requires an
   explicit restore of the pre-migration artifact and warns that post-migration
   changes will be lost.
 
-Recovery-key rotation does not retroactively revoke old recovery keys from
-already published backup generations. The backup workflow must create and
-verify a new generation, then retire old generations under the retention
-policy. This residual risk must be disclosed during rotation.
+Master-password change and recovery-key rotation do not retroactively remove
+the old wrapper from already published backup generations. After either
+change, the backup workflow creates and verifies a new generation with the new
+wrapper, then retires old generations from storage it controls under the
+retention policy. If publication or retirement is incomplete, the UI explicitly
+warns that the old password or recovery key can still unlock those older
+backups. Provider version history, offline copies, and attacker-retained copies
+may remain outside Librarian's control; changing a protector cannot revoke
+them.
 
 ## Sensitive-memory rules
 
@@ -577,6 +640,10 @@ Positive vectors must cover:
 - one record of every approved type, multi-record ordering, update, delete,
   master-password change, recovery-key rotation, backup, and clean-device
   restore;
+- wrapper rotation with manifest re-encryption, full VRK rotation with fresh
+  master and recovery wrappers, and older-backup restore rebased above the
+  existing rollback anchor;
+- the maximum supported record count fitting within the 8 MiB manifest bound;
 - byte-exact deterministic CBOR, key labels, associated data, envelopes,
   manifests, and complete backup containers;
 - the exact Argon2 profile and a future parameter-profile fixture.
@@ -593,7 +660,9 @@ Negative vectors must cover:
   arithmetic overflow;
 - missing, extra, duplicate, reordered, replayed, or cross-vault record rows;
 - unsupported old and future container, schema, key-schedule, KDF, AEAD, and
-  encoding identifiers;
+  encoding or digest identifiers;
+- a manifest envelope one byte over its bound and wrapper changes paired with
+  an old manifest nonce, ciphertext, or AAD;
 - whole-vault and backup rollback with no anchor, an older anchor, a newer
   anchor, and a matching anchor;
 - transaction interruption, WAL recovery, disk full, file replacement,
@@ -642,8 +711,8 @@ Green CI alone is not approval.
   independently testable.
 - The encrypted manifest detects database-level deletion, insertion,
   substitution, and partial replay.
-- The outer backup container hides the live SQLite access pattern from cloud
-  providers.
+- The outer backup container hides exact SQLite structure, record identifiers,
+  and individual record ciphertext sizes from cloud providers.
 - Explicit suite identifiers and copy-on-write migrations give future clients
   a narrow, testable compatibility path.
 
@@ -651,8 +720,9 @@ Green CI alone is not approval.
 
 - Unlock verifies every record before success, adding work proportional to the
   vault size; this must be measured.
-- SQLite still reveals access patterns and random record counts locally, though
-  backups hide them from cloud storage.
+- SQLite reveals access patterns and random record counts locally. Backups hide
+  exact row structure but their total size and size changes reveal coarse vault
+  growth and may support record-count estimates.
 - XChaCha20-Poly1305 is broadly deployed but is not itself a final IETF RFC;
   interoperability vectors and independent review are therefore mandatory.
 - A clean device cannot prove backup freshness without an external trusted
@@ -662,8 +732,9 @@ Green CI alone is not approval.
 - Best-effort memory zeroization cannot defeat an administrator, kernel
   compromise, debugger-equivalent access, or all operating-system crash and
   paging behavior.
-- Recovery-key rotation cannot revoke copies of older encrypted backups that
-  remain accessible to an attacker holding the old recovery key.
+- Master-password change or recovery-key rotation cannot revoke attacker-held,
+  offline, or provider-retained copies of older backups carrying the old
+  wrapper.
 
 ## Sources
 

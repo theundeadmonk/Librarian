@@ -53,9 +53,10 @@ Evidence collection digest:
 4. **Implement root creation and portable unlock.** Generate VRK/RUK, create
    independent master and recovery wrappers, and prove both restore the same
    empty vault. Do not implement Hello yet.
-5. **Implement SQLite ownership.** Create the two-table strict schema, configure
-   limits/defensive mode, and deny database handles outside the agent storage
-   module.
+5. **Implement SQLite ownership.** Create the three-table strict schema for the
+   bounded header, separately bounded manifest envelope, and encrypted records;
+   configure limits/defensive mode; and deny database handles outside the agent
+   storage module.
 6. **Implement record and manifest transactions.** Authenticate the complete
    row set, increment generation once, use fresh nonces, commit atomically, and
    make lock/cancellation win before success is released.
@@ -63,8 +64,10 @@ Evidence collection digest:
    quarantine, uniform authentication failure, resource limits, mutation
    tests, fuzzing, and post-open file-change handling.
 8. **Implement backup and restore.** Use SQLite's backup API, outer encryption,
-   safe temporary writes, full readback verification, quarantine restore, and
-   independent master/recovery paths.
+   safe temporary writes, full readback verification, and independent
+   master/recovery paths. Candidate verification ignores the rollback anchor;
+   an explicitly authorized restore is rewritten above the highest
+   authenticated generation before publication and anchor advancement.
 9. **Implement copy-on-write migration.** Start with a no-op v1-to-v1 fixture
    and synthetic unsupported versions; exercise crash points and application
    downgrade behavior before a real v2 exists.
@@ -110,9 +113,13 @@ Evidence collection digest:
 - Property tests for encode/decode stability, sorted unique manifests, bounds,
   generation monotonicity, and cross-vault rejection.
 - Mutation and truncation tests for every field and representative byte.
+- Wrapper-change tests prove the header and freshly encrypted manifest commit
+  together; VRK-rotation tests require fresh master and recovery wrappers.
 - Fuzz targets with allocation, time, and nesting limits.
 - Crash/cancellation tests at every transaction, backup, restore, and migration
   durability boundary.
+- Restore tests cover older authenticated candidates, explicit data-loss
+  confirmation, generation rebasing, and refusal to lower the anchor.
 - Wrong key, wrong AAD, rollback-anchor, file replacement, WAL recovery, disk
   full, and application downgrade tests.
 - Disposable canary scans of logs, events, temporary files, and crash artifacts.

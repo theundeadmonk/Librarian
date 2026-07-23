@@ -270,7 +270,7 @@ Source: [Option 2 Mermaid file](../diagrams/vault-cryptographic-boundary-xchacha
 | Data root | No approved key | Random VRK with master, recovery, and device-local protectors | Clear recovery semantics and cheap password change | Root-key lifecycle requires focused review |
 | AEAD | None | XChaCha20-Poly1305 | Authenticated encryption with practical random-nonce safety | Not a final IETF RFC for XChaCha itself |
 | Database | No format | Strict record envelopes plus encrypted manifest | Detects partial row manipulation and replay | Full manifest update and unlock verification |
-| Backup | Direction only | Outer-encrypted authenticated SQLite image | Hides row-level metadata from cloud storage | Full-file encryption and rotation |
+| Backup | Direction only | Outer-encrypted authenticated SQLite image | Hides exact row structure and individual sizes; aggregate size still leaks | Full-file encryption and rotation |
 | Rollback | Undefined | Generation plus device-local last-seen anchor | Detects stale state previously seen on that device | Cannot prove freshness on a clean device |
 
 The expected performance is more than adequate for small credential records,
