@@ -1,0 +1,58 @@
+name: Architecture or product decision
+description: Resolve a consequential choice with evidence and explicit exit criteria.
+title: "[Decision] "
+labels:
+  - "kind:decision"
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Decisions affecting cryptography, trust boundaries, recovery, or credential handling require threat-model review. Do not include real secrets.
+
+  - type: textarea
+    id: decision
+    attributes:
+      label: Decision to make
+      description: State the exact question this issue must resolve.
+    validations:
+      required: true
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Context and constraints
+      description: Include the user outcome, Windows-only MVP boundary, and relevant specification or ADR links.
+    validations:
+      required: true
+
+  - type: textarea
+    id: options
+    attributes:
+      label: Options
+      description: Describe credible alternatives and their meaningful tradeoffs.
+    validations:
+      required: true
+
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence required
+      description: Identify research, prototypes, benchmarks, test vectors, or reviews needed to decide.
+    validations:
+      required: true
+
+  - type: textarea
+    id: exit
+    attributes:
+      label: Exit criteria
+      description: Define what must be true before the decision can be recorded as accepted.
+    validations:
+      required: true
+
+  - type: textarea
+    id: security
+    attributes:
+      label: Security and reversibility
+      description: Explain the security impact, migration cost, and how the decision could later be changed safely.
+    validations:
+      required: true
