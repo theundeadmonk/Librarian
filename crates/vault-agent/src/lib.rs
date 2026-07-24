@@ -7,9 +7,15 @@
 
 #![forbid(unsafe_code)]
 
+#[cfg(any(windows, not(any(unix, windows))))]
+use std::env;
+#[cfg(not(unix))]
+use std::fs::OpenOptions;
+#[cfg(unix)]
+use std::path::Component;
 use std::{
-    env, fmt,
-    fs::{self, File, OpenOptions},
+    fmt,
+    fs::{self, File},
     io,
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
@@ -33,6 +39,13 @@ const MAX_SQLITE_VALUE_BYTES: i32 = 8 * 1024 * 1024;
 const MAX_PAGE_COUNT: u32 = 131_072;
 const MAX_SQLITE_SHM_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_STAGING_ATTEMPTS: u64 = 128;
+const SQLITE_HEADER_BYTES: usize = 20;
+const SQLITE_MAGIC: &[u8; 16] = b"SQLite format 3\0";
+const SQLITE_READ_VERSION_OFFSET: usize = 18;
+const SQLITE_WRITE_VERSION_OFFSET: usize = 19;
+#[cfg(unix)]
+const SQLITE_ROLLBACK_VERSION: u8 = 1;
+const SQLITE_WAL_VERSION: u8 = 2;
 
 #[cfg(windows)]
 const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
@@ -127,25 +140,34 @@ impl VaultAgent {
         let session_id = next_session_id().ok_or(CreateError::Failed)?;
 
         initialize_database(&mut staging, &header, &manifest).map_err(|_| CreateError::Failed)?;
-        ensure_sidecars_absent(staging.path()).map_err(|()| CreateError::Failed)?;
+        ensure_sidecars_absent_with_ancestor_guards(staging.ancestor_guards(), staging.path())
+            .map_err(|()| CreateError::Failed)?;
         let published_guard = publish_staged_vault(&mut staging, &path)?;
         if staging.remove_name().is_err() {
             drop(published_guard);
-            let _ = fs::remove_file(&path);
+            let _ = remove_file_with_ancestor_guards(staging.ancestor_guards(), &path);
             return Err(CreateError::Failed);
         }
-        let sealed_guard = match seal_published_vault(&published_guard, &path) {
+        let sealed_guard = match seal_published_vault_with_ancestor_guards(
+            &published_guard,
+            &path,
+            staging.ancestor_guards(),
+        ) {
             Ok(guard) => guard,
             Err(error) => {
-                remove_target_if_guarded_matches(&published_guard, &path);
+                remove_target_if_guarded_matches(
+                    &published_guard,
+                    &path,
+                    staging.ancestor_guards(),
+                );
                 return Err(error);
             }
         };
         drop(published_guard);
-        if sync_parent_directory(&path).is_err() {
+        if sync_parent_directory_with_ancestor_guards(&path, staging.ancestor_guards()).is_err() {
             drop(sealed_guard);
-            let _ = fs::remove_file(&path);
-            let _ = sync_parent_directory(&path);
+            let _ = remove_file_with_ancestor_guards(staging.ancestor_guards(), &path);
+            let _ = sync_parent_directory_with_ancestor_guards(&path, staging.ancestor_guards());
             return Err(CreateError::Failed);
         }
         drop(sealed_guard);
@@ -265,26 +287,33 @@ impl VaultAgent {
 }
 
 fn validate_new_target(path: &Path) -> Result<(), CreateError> {
-    let _ancestor_guards = acquire_ancestor_guards(path).map_err(|_| CreateError::Failed)?;
-    validate_new_target_with_guarded_ancestors(path)
+    let ancestor_guards = acquire_ancestor_guards(path).map_err(|_| CreateError::Failed)?;
+    validate_new_target_with_guarded_ancestors(path, &ancestor_guards)
 }
 
-fn validate_new_target_with_guarded_ancestors(path: &Path) -> Result<(), CreateError> {
-    match fs::symlink_metadata(path) {
-        Ok(metadata) if is_reparse_point(&metadata) => return Err(CreateError::Failed),
-        Ok(_) => return Err(CreateError::AlreadyExists),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-        Err(_) => return Err(CreateError::Failed),
-    }
+fn validate_new_target_with_guarded_ancestors(
+    path: &Path,
+    ancestor_guards: &AncestorGuards,
+) -> Result<(), CreateError> {
     if path.file_name().is_none() {
         return Err(CreateError::Failed);
+    }
+    match open_existing_guard_with_ancestor_guards(ancestor_guards, path, true, true) {
+        Ok(file) => {
+            if is_reparse_point(&file.metadata().map_err(|_| CreateError::Failed)?) {
+                return Err(CreateError::Failed);
+            }
+            return Err(CreateError::AlreadyExists);
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(_) => return Err(CreateError::Failed),
     }
     Ok(())
 }
 
 fn reserve_staging_file(target: &Path) -> Result<StagedVault, CreateError> {
     let ancestor_guards = acquire_ancestor_guards(target).map_err(|_| CreateError::Failed)?;
-    validate_new_target_with_guarded_ancestors(target)?;
+    validate_new_target_with_guarded_ancestors(target, &ancestor_guards)?;
     let parent = parent_directory(target);
     let target_name = target.file_name().ok_or(CreateError::Failed)?;
     for _ in 0..MAX_STAGING_ATTEMPTS {
@@ -299,12 +328,12 @@ fn reserve_staging_file(target: &Path) -> Result<StagedVault, CreateError> {
             std::process::id()
         ));
         let staging_path = parent.join(staging_name);
-        match create_staging_reservation(&staging_path) {
+        match create_staging_reservation(&ancestor_guards, &staging_path) {
             Ok(reservation) => {
                 return Ok(StagedVault {
                     path: staging_path,
                     reservation: Some(reservation),
-                    _ancestor_guards: ancestor_guards,
+                    ancestor_guards,
                 });
             }
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
@@ -315,28 +344,45 @@ fn reserve_staging_file(target: &Path) -> Result<StagedVault, CreateError> {
 }
 
 fn publish_staged_vault(staging: &mut StagedVault, target: &Path) -> Result<File, CreateError> {
-    reject_reparse_ancestors(target).map_err(|_| CreateError::Failed)?;
-    ensure_sidecars_absent(target).map_err(|()| CreateError::Failed)?;
+    publish_staged_vault_with_before_link(staging, target, || {})
+}
+
+fn publish_staged_vault_with_before_link(
+    staging: &mut StagedVault,
+    target: &Path,
+    before_link: impl FnOnce(),
+) -> Result<File, CreateError> {
+    ensure_sidecars_absent_with_ancestor_guards(staging.ancestor_guards(), target)
+        .map_err(|()| CreateError::Failed)?;
     let reservation = staging
         .try_clone_reservation()
         .map_err(|_| CreateError::Failed)?;
-    guarded_file_matches_path(&reservation, staging.path()).map_err(|()| CreateError::Failed)?;
-    match fs::hard_link(staging.path(), target) {
+    guarded_file_matches_path_with_ancestor_guards(
+        &reservation,
+        staging.path(),
+        staging.ancestor_guards(),
+    )
+    .map_err(|()| CreateError::Failed)?;
+    before_link();
+    match hard_link_with_ancestor_guards(staging.ancestor_guards(), staging.path(), target) {
         Ok(()) => {
-            let published_guard = open_regular_file_guard(target, true, true);
+            let published_guard = open_regular_file_guard_with_ancestor_guards(
+                staging.ancestor_guards(),
+                target,
+                true,
+                true,
+            );
             let publication_is_valid = published_guard
                 .as_ref()
                 .is_ok_and(|published| guarded_files_match(&reservation, published).is_ok());
-            if !publication_is_valid || ensure_sidecars_absent(target).is_err() {
-                let target_is_reserved_file = published_guard
-                    .as_ref()
-                    .is_ok_and(|published| guarded_files_match(&reservation, published).is_ok());
+            if !publication_is_valid
+                || ensure_sidecars_absent_with_ancestor_guards(staging.ancestor_guards(), target)
+                    .is_err()
+            {
                 drop(published_guard);
                 staging.release_reservation();
                 drop(reservation);
-                if target_is_reserved_file {
-                    let _ = fs::remove_file(target);
-                }
+                let _ = remove_file_with_ancestor_guards(staging.ancestor_guards(), target);
                 return Err(CreateError::Failed);
             }
             published_guard.map_err(|_| CreateError::Failed)
@@ -348,22 +394,41 @@ fn publish_staged_vault(staging: &mut StagedVault, target: &Path) -> Result<File
     }
 }
 
+#[cfg(all(test, windows))]
 fn seal_published_vault(published: &File, target: &Path) -> Result<File, CreateError> {
-    let sealed = open_regular_file_guard(target, false, false).map_err(|_| CreateError::Failed)?;
+    let ancestor_guards = acquire_ancestor_guards(target).map_err(|_| CreateError::Failed)?;
+    seal_published_vault_with_ancestor_guards(published, target, &ancestor_guards)
+}
+
+fn seal_published_vault_with_ancestor_guards(
+    published: &File,
+    target: &Path,
+    ancestor_guards: &AncestorGuards,
+) -> Result<File, CreateError> {
+    let sealed =
+        open_regular_file_guard_with_ancestor_guards(ancestor_guards, target, false, false)
+            .map_err(|_| CreateError::Failed)?;
     guarded_files_match(published, &sealed).map_err(|()| CreateError::Failed)?;
-    ensure_sidecars_absent(target).map_err(|()| CreateError::Failed)?;
+    ensure_sidecars_absent_with_ancestor_guards(ancestor_guards, target)
+        .map_err(|()| CreateError::Failed)?;
     Ok(sealed)
 }
 
-fn remove_target_if_guarded_matches(published: &File, target: &Path) {
-    let Ok(current) = open_regular_file_guard(target, true, true) else {
+fn remove_target_if_guarded_matches(
+    published: &File,
+    target: &Path,
+    ancestor_guards: &AncestorGuards,
+) {
+    let Ok(current) =
+        open_regular_file_guard_with_ancestor_guards(ancestor_guards, target, true, true)
+    else {
         return;
     };
     if guarded_files_match(published, &current).is_err() {
         return;
     }
     drop(current);
-    let _ = fs::remove_file(target);
+    let _ = remove_file_with_ancestor_guards(ancestor_guards, target);
 }
 
 #[cfg(windows)]
@@ -377,9 +442,15 @@ fn sync_parent_directory(path: &Path) -> io::Result<()> {
         .sync_all()
 }
 
-#[cfg(not(windows))]
+#[cfg(all(test, unix))]
 fn sync_parent_directory(path: &Path) -> io::Result<()> {
-    fs::File::open(parent_directory(path))?.sync_all()
+    let ancestor_guards = acquire_ancestor_guards(path)?;
+    sync_parent_directory_with_ancestor_guards(path, &ancestor_guards)
+}
+
+#[cfg(all(not(unix), not(windows)))]
+fn sync_parent_directory(path: &Path) -> io::Result<()> {
+    File::open(parent_directory(path))?.sync_all()
 }
 
 #[cfg(not(any(unix, windows)))]
@@ -414,7 +485,8 @@ fn initialize_database(
 ) -> rusqlite::Result<()> {
     let mut connection = Connection::open_in_memory()?;
     initialize_connection(&mut connection, header, manifest, false)?;
-    let image = connection.serialize(MAIN_DB)?;
+    let mut image = connection.serialize(MAIN_DB)?.to_vec();
+    mark_database_image_as_wal(&mut image)?;
     let reservation = staging
         .reservation
         .as_mut()
@@ -425,6 +497,16 @@ fn initialize_database(
         .and_then(|()| reservation.set_len(u64::try_from(image.len()).map_err(io::Error::other)?))
         .and_then(|()| reservation.sync_all())
         .map_err(|_| rusqlite::Error::InvalidQuery)?;
+    Ok(())
+}
+
+#[cfg(any(unix, windows))]
+fn mark_database_image_as_wal(image: &mut [u8]) -> rusqlite::Result<()> {
+    if image.len() < SQLITE_HEADER_BYTES || &image[..SQLITE_MAGIC.len()] != SQLITE_MAGIC {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
+    image[SQLITE_READ_VERSION_OFFSET] = SQLITE_WAL_VERSION;
+    image[SQLITE_WRITE_VERSION_OFFSET] = SQLITE_WAL_VERSION;
     Ok(())
 }
 
@@ -477,17 +559,28 @@ fn initialize_connection(
 }
 
 fn read_empty_vault(path: &Path) -> Result<(Vec<u8>, Vec<u8>), ()> {
-    read_empty_vault_with_connection_hooks(path, || {}, || {})
+    read_empty_vault_with_hooks(path, || {}, || {}, || {})
 }
 
+#[cfg(all(test, unix))]
 fn read_empty_vault_with_connection_hooks(
     path: &Path,
     before_connection: impl FnOnce(),
     after_connection: impl FnOnce(),
 ) -> Result<(Vec<u8>, Vec<u8>), ()> {
-    let mut input_guards = acquire_sqlite_input_guards(path)?;
+    read_empty_vault_with_hooks(path, || {}, before_connection, after_connection)
+}
+
+fn read_empty_vault_with_hooks(
+    path: &Path,
+    after_ancestor_guards: impl FnOnce(),
+    before_connection: impl FnOnce(),
+    after_connection: impl FnOnce(),
+) -> Result<(Vec<u8>, Vec<u8>), ()> {
+    let mut input_guards = acquire_sqlite_input_guards_with_hook(path, after_ancestor_guards)?;
     validate_guarded_sqlite_input_sizes(&input_guards)?;
     validate_guarded_sqlite_input_paths(path, &input_guards)?;
+    validate_wal_database_header(&mut input_guards.database)?;
 
     before_connection();
     let connection = open_guarded_read_connection(path, &mut input_guards)?;
@@ -500,11 +593,10 @@ fn read_empty_vault_with_connection_hooks(
         .pragma_update(None, "trusted_schema", false)
         .map_err(|_| ())?;
     refresh_sqlite_sidecar_guards(path, &mut input_guards)?;
+    if !snapshot_sidecars_are_absent(&input_guards) {
+        return Err(());
+    }
     validate_guarded_sqlite_input_sizes(&input_guards)?;
-    validate_sqlite_input_sizes(
-        path,
-        input_guards.database.metadata().map_err(|_| ())?.len(),
-    )?;
     validate_guarded_sqlite_input_paths(path, &input_guards)?;
     verify_application_schema(&connection)?;
 
@@ -542,13 +634,38 @@ fn read_empty_vault_with_connection_hooks(
         return Err(());
     }
     reacquire_sqlite_sidecar_guards(path, &mut input_guards)?;
+    if !snapshot_sidecars_are_absent(&input_guards) {
+        return Err(());
+    }
     validate_guarded_sqlite_input_sizes(&input_guards)?;
-    validate_sqlite_input_sizes(
-        path,
-        input_guards.database.metadata().map_err(|_| ())?.len(),
-    )?;
     validate_guarded_sqlite_input_paths(path, &input_guards)?;
     Ok((header, manifest))
+}
+
+fn validate_wal_database_header(database: &mut File) -> Result<(), ()> {
+    use std::io::Read as _;
+
+    let mut header = [0_u8; SQLITE_HEADER_BYTES];
+    database.seek(SeekFrom::Start(0)).map_err(|_| ())?;
+    database.read_exact(&mut header).map_err(|_| ())?;
+    database.seek(SeekFrom::Start(0)).map_err(|_| ())?;
+    if &header[..SQLITE_MAGIC.len()] != SQLITE_MAGIC
+        || header[SQLITE_READ_VERSION_OFFSET] != SQLITE_WAL_VERSION
+        || header[SQLITE_WRITE_VERSION_OFFSET] != SQLITE_WAL_VERSION
+    {
+        return Err(());
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn snapshot_sidecars_are_absent(input: &SqliteInputGuards) -> bool {
+    input.wal.is_none() && input.shm.is_none()
+}
+
+#[cfg(not(unix))]
+fn snapshot_sidecars_are_absent(_input: &SqliteInputGuards) -> bool {
+    true
 }
 
 #[cfg(unix)]
@@ -565,15 +682,16 @@ fn open_guarded_read_connection(
         .database
         .seek(SeekFrom::Start(0))
         .map_err(|_| ())?;
+    let mut image = vec![0_u8; database_bytes];
+    input_guards
+        .database
+        .read_exact(&mut image)
+        .map_err(|_| ())?;
+    image[SQLITE_READ_VERSION_OFFSET] = SQLITE_ROLLBACK_VERSION;
+    image[SQLITE_WRITE_VERSION_OFFSET] = SQLITE_ROLLBACK_VERSION;
     let mut connection = Connection::open_in_memory().map_err(|_| ())?;
     connection
-        .deserialize_read_exact(
-            MAIN_DB,
-            Read::by_ref(&mut input_guards.database)
-                .take(u64::try_from(database_bytes).map_err(|_| ())?),
-            database_bytes,
-            true,
-        )
+        .deserialize_read_exact(MAIN_DB, io::Cursor::new(image), database_bytes, true)
         .map_err(|_| ())?;
     Ok(connection)
 }
@@ -665,65 +783,55 @@ fn configure_limits(connection: &Connection) -> rusqlite::Result<()> {
     Ok(())
 }
 
-fn validate_sqlite_input_sizes(path: &Path, database_bytes: u64) -> Result<(), ()> {
-    let wal_bytes =
-        optional_sidecar_size(path, "-wal", librarian_vault_format::MAX_DATABASE_BYTES)?;
-    let shm_bytes = optional_sidecar_size(path, "-shm", MAX_SQLITE_SHM_BYTES)?;
-    let total_bytes = database_bytes
-        .checked_add(wal_bytes)
-        .and_then(|value| value.checked_add(shm_bytes))
-        .ok_or(())?;
-    if total_bytes > librarian_vault_format::MAX_DATABASE_BYTES {
-        return Err(());
-    }
-    Ok(())
-}
-
-fn optional_sidecar_size(path: &Path, suffix: &str, maximum_bytes: u64) -> Result<u64, ()> {
-    let sidecar_path = sqlite_sidecar(path, suffix);
-    match reject_reparse(&sidecar_path) {
-        Ok(metadata) if metadata.is_file() && metadata.len() <= maximum_bytes => Ok(metadata.len()),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(0),
-        Ok(_) | Err(_) => Err(()),
-    }
-}
-
-fn ensure_sidecars_absent(path: &Path) -> Result<(), ()> {
-    for suffix in ["-wal", "-shm"] {
-        match fs::symlink_metadata(sqlite_sidecar(path, suffix)) {
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            _ => return Err(()),
-        }
-    }
-    Ok(())
-}
-
 struct SqliteInputGuards {
     database: File,
     wal: Option<File>,
     shm: Option<File>,
-    _ancestor_guards: AncestorGuards,
+    ancestor_guards: AncestorGuards,
 }
 
+#[cfg(all(test, windows))]
 fn acquire_sqlite_input_guards(path: &Path) -> Result<SqliteInputGuards, ()> {
+    acquire_sqlite_input_guards_with_hook(path, || {})
+}
+
+fn acquire_sqlite_input_guards_with_hook(
+    path: &Path,
+    after_ancestor_guards: impl FnOnce(),
+) -> Result<SqliteInputGuards, ()> {
     let ancestor_guards = acquire_ancestor_guards(path).map_err(|_| ())?;
-    let database = open_regular_file_guard(path, false, false).map_err(|_| ())?;
-    let wal = open_optional_regular_file_guard(&sqlite_sidecar(path, "-wal"))?;
-    let shm = open_optional_regular_file_guard(&sqlite_sidecar(path, "-shm"))?;
+    after_ancestor_guards();
+    let database =
+        open_regular_file_guard_with_ancestor_guards(&ancestor_guards, path, false, false)
+            .map_err(|_| ())?;
+    let wal = open_optional_regular_file_guard_with_ancestor_guards(
+        &ancestor_guards,
+        &sqlite_sidecar(path, "-wal"),
+    )?;
+    let shm = open_optional_regular_file_guard_with_ancestor_guards(
+        &ancestor_guards,
+        &sqlite_sidecar(path, "-shm"),
+    )?;
     Ok(SqliteInputGuards {
         database,
         wal,
         shm,
-        _ancestor_guards: ancestor_guards,
+        ancestor_guards,
     })
 }
 
 fn refresh_sqlite_sidecar_guards(path: &Path, input: &mut SqliteInputGuards) -> Result<(), ()> {
     if input.wal.is_none() {
-        input.wal = open_optional_regular_file_guard(&sqlite_sidecar(path, "-wal"))?;
+        input.wal = open_optional_regular_file_guard_with_ancestor_guards(
+            &input.ancestor_guards,
+            &sqlite_sidecar(path, "-wal"),
+        )?;
     }
     if input.shm.is_none() {
-        input.shm = open_optional_regular_file_guard(&sqlite_sidecar(path, "-shm"))?;
+        input.shm = open_optional_regular_file_guard_with_ancestor_guards(
+            &input.ancestor_guards,
+            &sqlite_sidecar(path, "-shm"),
+        )?;
     }
     Ok(())
 }
@@ -752,16 +860,28 @@ fn validate_guarded_sqlite_input_sizes(input: &SqliteInputGuards) -> Result<(), 
 }
 
 fn validate_guarded_sqlite_input_paths(path: &Path, input: &SqliteInputGuards) -> Result<(), ()> {
-    guarded_file_matches_path(&input.database, path)?;
-    guarded_optional_file_matches_path(input.wal.as_ref(), &sqlite_sidecar(path, "-wal"))?;
-    guarded_optional_file_matches_path(input.shm.as_ref(), &sqlite_sidecar(path, "-shm"))?;
+    guarded_file_matches_path_with_ancestor_guards(&input.database, path, &input.ancestor_guards)?;
+    guarded_optional_file_matches_path_with_ancestor_guards(
+        input.wal.as_ref(),
+        &sqlite_sidecar(path, "-wal"),
+        &input.ancestor_guards,
+    )?;
+    guarded_optional_file_matches_path_with_ancestor_guards(
+        input.shm.as_ref(),
+        &sqlite_sidecar(path, "-shm"),
+        &input.ancestor_guards,
+    )?;
     Ok(())
 }
 
-fn guarded_optional_file_matches_path(file: Option<&File>, path: &Path) -> Result<(), ()> {
+fn guarded_optional_file_matches_path_with_ancestor_guards(
+    file: Option<&File>,
+    path: &Path,
+    ancestor_guards: &AncestorGuards,
+) -> Result<(), ()> {
     match file {
-        Some(file) => guarded_file_matches_path(file, path),
-        None => match fs::symlink_metadata(path) {
+        Some(file) => guarded_file_matches_path_with_ancestor_guards(file, path, ancestor_guards),
+        None => match open_existing_guard_with_ancestor_guards(ancestor_guards, path, true, true) {
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
             Ok(_) | Err(_) => Err(()),
         },
@@ -801,36 +921,14 @@ fn guarded_files_match(left: &File, right: &File) -> Result<(), ()> {
     Ok(())
 }
 
-#[cfg(unix)]
-fn guarded_file_matches_path(file: &File, path: &Path) -> Result<(), ()> {
-    use std::os::unix::fs::MetadataExt;
-
-    let guarded = file.metadata().map_err(|_| ())?;
-    let current = fs::symlink_metadata(path).map_err(|_| ())?;
-    if is_reparse_point(&current)
-        || !current.is_file()
-        || guarded.dev() != current.dev()
-        || guarded.ino() != current.ino()
-    {
-        return Err(());
-    }
-    Ok(())
-}
-
-#[cfg(windows)]
-fn guarded_file_matches_path(file: &File, path: &Path) -> Result<(), ()> {
-    let current = open_regular_file_guard(path, true, true).map_err(|_| ())?;
+fn guarded_file_matches_path_with_ancestor_guards(
+    file: &File,
+    path: &Path,
+    ancestor_guards: &AncestorGuards,
+) -> Result<(), ()> {
+    let current = open_regular_file_guard_with_ancestor_guards(ancestor_guards, path, true, true)
+        .map_err(|_| ())?;
     guarded_files_match(file, &current)
-}
-
-#[cfg(not(any(unix, windows)))]
-fn guarded_file_matches_path(file: &File, path: &Path) -> Result<(), ()> {
-    let guarded = file.metadata().map_err(|_| ())?;
-    let current = reject_reparse(path).map_err(|_| ())?;
-    if !guarded.is_file() || !current.is_file() || guarded.len() != current.len() {
-        return Err(());
-    }
-    Ok(())
 }
 
 fn guarded_file_size(file: Option<&File>, maximum_bytes: u64) -> Result<u64, ()> {
@@ -844,20 +942,29 @@ fn guarded_file_size(file: Option<&File>, maximum_bytes: u64) -> Result<u64, ()>
     Ok(metadata.len())
 }
 
-fn open_optional_regular_file_guard(path: &Path) -> Result<Option<File>, ()> {
-    match open_regular_file_guard(path, true, true) {
+fn open_optional_regular_file_guard_with_ancestor_guards(
+    ancestor_guards: &AncestorGuards,
+    path: &Path,
+) -> Result<Option<File>, ()> {
+    match open_regular_file_guard_with_ancestor_guards(ancestor_guards, path, true, true) {
         Ok(file) => Ok(Some(file)),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
         Err(_) => Err(()),
     }
 }
 
-fn open_regular_file_guard(
+fn open_regular_file_guard_with_ancestor_guards(
+    ancestor_guards: &AncestorGuards,
     path: &Path,
     share_writes: bool,
     share_deletes: bool,
 ) -> io::Result<File> {
-    let file = open_existing_guard(path, share_writes, share_deletes)?;
+    let file = open_existing_guard_with_ancestor_guards(
+        ancestor_guards,
+        path,
+        share_writes,
+        share_deletes,
+    )?;
     let metadata = file.metadata()?;
     if !metadata.is_file() || is_reparse_point(&metadata) {
         return Err(io::Error::new(
@@ -866,6 +973,34 @@ fn open_regular_file_guard(
         ));
     }
     Ok(file)
+}
+
+#[cfg(unix)]
+fn open_existing_guard_with_ancestor_guards(
+    ancestor_guards: &AncestorGuards,
+    path: &Path,
+    _share_writes: bool,
+    _share_deletes: bool,
+) -> io::Result<File> {
+    use rustix::fs::{Mode, OFlags, openat};
+
+    let name = child_name(path)?;
+    Ok(File::from(openat(
+        &ancestor_guards.directory,
+        name,
+        OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::NONBLOCK,
+        Mode::empty(),
+    )?))
+}
+
+#[cfg(not(unix))]
+fn open_existing_guard_with_ancestor_guards(
+    _ancestor_guards: &AncestorGuards,
+    path: &Path,
+    share_writes: bool,
+    share_deletes: bool,
+) -> io::Result<File> {
+    open_existing_guard(path, share_writes, share_deletes)
 }
 
 #[cfg(windows)]
@@ -886,16 +1021,6 @@ fn open_existing_guard(path: &Path, share_writes: bool, share_deletes: bool) -> 
         .open(path)
 }
 
-#[cfg(unix)]
-fn open_existing_guard(path: &Path, _share_writes: bool, _share_deletes: bool) -> io::Result<File> {
-    use std::os::unix::fs::OpenOptionsExt;
-
-    OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
-        .open(path)
-}
-
 #[cfg(not(any(unix, windows)))]
 fn open_existing_guard(path: &Path, _share_writes: bool, _share_deletes: bool) -> io::Result<File> {
     reject_reparse(path)?;
@@ -903,7 +1028,7 @@ fn open_existing_guard(path: &Path, _share_writes: bool, _share_deletes: bool) -
 }
 
 #[cfg(windows)]
-fn create_staging_reservation(path: &Path) -> io::Result<File> {
+fn create_staging_reservation(_ancestor_guards: &AncestorGuards, path: &Path) -> io::Result<File> {
     use std::os::windows::fs::OpenOptionsExt;
 
     OpenOptions::new()
@@ -916,19 +1041,24 @@ fn create_staging_reservation(path: &Path) -> io::Result<File> {
 }
 
 #[cfg(unix)]
-fn create_staging_reservation(path: &Path) -> io::Result<File> {
-    use std::os::unix::fs::OpenOptionsExt;
+fn create_staging_reservation(ancestor_guards: &AncestorGuards, path: &Path) -> io::Result<File> {
+    use rustix::fs::{Mode, OFlags, openat};
 
-    OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(path)
+    Ok(File::from(openat(
+        &ancestor_guards.directory,
+        child_name(path)?,
+        OFlags::RDWR
+            | OFlags::CREATE
+            | OFlags::EXCL
+            | OFlags::CLOEXEC
+            | OFlags::NOFOLLOW
+            | OFlags::NONBLOCK,
+        Mode::RUSR | Mode::WUSR,
+    )?))
 }
 
 #[cfg(not(any(unix, windows)))]
-fn create_staging_reservation(path: &Path) -> io::Result<File> {
+fn create_staging_reservation(_ancestor_guards: &AncestorGuards, path: &Path) -> io::Result<File> {
     OpenOptions::new()
         .read(true)
         .write(true)
@@ -939,6 +1069,8 @@ fn create_staging_reservation(path: &Path) -> io::Result<File> {
 struct AncestorGuards {
     #[cfg(windows)]
     _handles: Vec<File>,
+    #[cfg(unix)]
+    directory: File,
 }
 
 #[cfg(windows)]
@@ -975,12 +1107,147 @@ fn acquire_ancestor_guards(path: &Path) -> io::Result<AncestorGuards> {
     Ok(AncestorGuards { _handles: handles })
 }
 
-#[cfg(not(windows))]
+#[cfg(unix)]
+fn acquire_ancestor_guards(path: &Path) -> io::Result<AncestorGuards> {
+    use rustix::fs::{Mode, OFlags, open, openat};
+
+    if path.file_name().is_none() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "vault path must have a file name",
+        ));
+    }
+
+    let directory_flags =
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::NONBLOCK;
+    let mut directory = if path.is_absolute() {
+        File::from(open("/", directory_flags, Mode::empty())?)
+    } else {
+        File::from(open(".", directory_flags, Mode::empty())?)
+    };
+    for component in parent_directory(path).components() {
+        let name = match component {
+            Component::RootDir | Component::CurDir => continue,
+            Component::ParentDir => Path::new("..").as_os_str(),
+            Component::Normal(name) => name,
+            Component::Prefix(_) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "unsupported Unix path prefix",
+                ));
+            }
+        };
+        directory = File::from(openat(&directory, name, directory_flags, Mode::empty())?);
+        let metadata = directory.metadata()?;
+        if !metadata.is_dir() || is_reparse_point(&metadata) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "redirected ancestor rejected",
+            ));
+        }
+    }
+    Ok(AncestorGuards { directory })
+}
+
+#[cfg(all(not(unix), not(windows)))]
 fn acquire_ancestor_guards(path: &Path) -> io::Result<AncestorGuards> {
     reject_reparse_ancestors(path)?;
     Ok(AncestorGuards {})
 }
 
+#[cfg(unix)]
+fn child_name(path: &Path) -> io::Result<&std::ffi::OsStr> {
+    path.file_name().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "vault path must have a file name",
+        )
+    })
+}
+
+#[cfg(unix)]
+fn hard_link_with_ancestor_guards(
+    ancestor_guards: &AncestorGuards,
+    source: &Path,
+    target: &Path,
+) -> io::Result<()> {
+    use rustix::fs::{AtFlags, linkat};
+
+    Ok(linkat(
+        &ancestor_guards.directory,
+        child_name(source)?,
+        &ancestor_guards.directory,
+        child_name(target)?,
+        AtFlags::empty(),
+    )?)
+}
+
+#[cfg(not(unix))]
+fn hard_link_with_ancestor_guards(
+    _ancestor_guards: &AncestorGuards,
+    source: &Path,
+    target: &Path,
+) -> io::Result<()> {
+    fs::hard_link(source, target)
+}
+
+#[cfg(unix)]
+fn remove_file_with_ancestor_guards(
+    ancestor_guards: &AncestorGuards,
+    path: &Path,
+) -> io::Result<()> {
+    use rustix::fs::{AtFlags, unlinkat};
+
+    Ok(unlinkat(
+        &ancestor_guards.directory,
+        child_name(path)?,
+        AtFlags::empty(),
+    )?)
+}
+
+#[cfg(not(unix))]
+fn remove_file_with_ancestor_guards(
+    _ancestor_guards: &AncestorGuards,
+    path: &Path,
+) -> io::Result<()> {
+    fs::remove_file(path)
+}
+
+#[cfg(unix)]
+fn sync_parent_directory_with_ancestor_guards(
+    _path: &Path,
+    ancestor_guards: &AncestorGuards,
+) -> io::Result<()> {
+    ancestor_guards.directory.sync_all()
+}
+
+#[cfg(not(unix))]
+fn sync_parent_directory_with_ancestor_guards(
+    path: &Path,
+    _ancestor_guards: &AncestorGuards,
+) -> io::Result<()> {
+    sync_parent_directory(path)
+}
+
+fn ensure_sidecars_absent_with_ancestor_guards(
+    ancestor_guards: &AncestorGuards,
+    path: &Path,
+) -> Result<(), ()> {
+    for suffix in ["-wal", "-shm"] {
+        match open_existing_guard_with_ancestor_guards(
+            ancestor_guards,
+            &sqlite_sidecar(path, suffix),
+            true,
+            true,
+        ) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Ok(_) | Err(_) => return Err(()),
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(any(unix, windows)))]
 fn reject_reparse(path: &Path) -> io::Result<fs::Metadata> {
     reject_reparse_ancestors(path)?;
     match fs::symlink_metadata(path) {
@@ -993,6 +1260,7 @@ fn reject_reparse(path: &Path) -> io::Result<fs::Metadata> {
     }
 }
 
+#[cfg(not(any(unix, windows)))]
 fn reject_reparse_ancestors(path: &Path) -> io::Result<()> {
     let absolute_path = if path.is_absolute() {
         path.to_path_buf()
@@ -1049,7 +1317,7 @@ fn unix_time_ms() -> Result<u64, ()> {
 struct StagedVault {
     path: PathBuf,
     reservation: Option<File>,
-    _ancestor_guards: AncestorGuards,
+    ancestor_guards: AncestorGuards,
 }
 
 impl StagedVault {
@@ -1061,6 +1329,10 @@ impl StagedVault {
         drop(self.reservation.take());
     }
 
+    fn ancestor_guards(&self) -> &AncestorGuards {
+        &self.ancestor_guards
+    }
+
     fn try_clone_reservation(&self) -> io::Result<File> {
         self.reservation
             .as_ref()
@@ -1070,16 +1342,22 @@ impl StagedVault {
 
     fn remove_name(&mut self) -> io::Result<()> {
         self.release_reservation();
-        fs::remove_file(&self.path)
+        remove_file_with_ancestor_guards(&self.ancestor_guards, &self.path)
     }
 }
 
 impl Drop for StagedVault {
     fn drop(&mut self) {
         self.release_reservation();
-        let _ = fs::remove_file(&self.path);
-        let _ = fs::remove_file(sqlite_sidecar(&self.path, "-wal"));
-        let _ = fs::remove_file(sqlite_sidecar(&self.path, "-shm"));
+        let _ = remove_file_with_ancestor_guards(&self.ancestor_guards, &self.path);
+        let _ = remove_file_with_ancestor_guards(
+            &self.ancestor_guards,
+            &sqlite_sidecar(&self.path, "-wal"),
+        );
+        let _ = remove_file_with_ancestor_guards(
+            &self.ancestor_guards,
+            &sqlite_sidecar(&self.path, "-shm"),
+        );
     }
 }
 
@@ -1092,7 +1370,7 @@ fn sqlite_sidecar(path: &Path, suffix: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use std::{
-        fs,
+        fs::{self, File},
         path::{Path, PathBuf},
         sync::atomic::{AtomicU64, Ordering},
     };
@@ -1113,8 +1391,8 @@ mod tests {
     };
     #[cfg(unix)]
     use super::{
-        initialize_database, publish_staged_vault, read_empty_vault,
-        read_empty_vault_with_connection_hooks,
+        initialize_database, publish_staged_vault, publish_staged_vault_with_before_link,
+        read_empty_vault, read_empty_vault_with_connection_hooks, read_empty_vault_with_hooks,
     };
 
     static TEST_DIRECTORY_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -1170,6 +1448,36 @@ mod tests {
             .unlock(password("restart password"), &CancellationFlag::new())
             .expect("correct password must unlock after restart");
         assert!(restarted.is_unlocked());
+    }
+
+    #[test]
+    fn created_vault_persists_wal_journal_mode() {
+        use std::io::Read as _;
+
+        let directory = TestDirectory::new();
+        let path = directory.vault_path();
+        let agent = create_test_vault(&path, "wal mode password");
+        drop(agent);
+
+        let mut database = File::open(&path).expect("created database must open");
+        let mut header = [0_u8; super::SQLITE_HEADER_BYTES];
+        database
+            .read_exact(&mut header)
+            .expect("created database header must be readable");
+        assert_eq!(
+            header[super::SQLITE_READ_VERSION_OFFSET],
+            super::SQLITE_WAL_VERSION
+        );
+        assert_eq!(
+            header[super::SQLITE_WRITE_VERSION_OFFSET],
+            super::SQLITE_WAL_VERSION
+        );
+
+        let connection = Connection::open(&path).expect("created database must open in SQLite");
+        let journal_mode: String = connection
+            .pragma_query_value(None, "journal_mode", |row| row.get(0))
+            .expect("journal mode must be queryable");
+        assert_eq!(journal_mode, "wal");
     }
 
     #[test]
@@ -1590,6 +1898,31 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn publication_removes_a_replacement_linked_after_identity_check() {
+        let directory = TestDirectory::new();
+        let target = directory.vault_path();
+        let mut staging =
+            reserve_staging_file(&target).expect("staging file must be reserved atomically");
+        initialize_database(&mut staging, b"header", b"manifest")
+            .expect("staged database must initialize");
+        let staging_path = staging.path().to_path_buf();
+
+        let result = publish_staged_vault_with_before_link(&mut staging, &target, || {
+            fs::remove_file(&staging_path)
+                .expect("reserved staging name must be removed after identity validation");
+            fs::write(&staging_path, b"attacker replacement")
+                .expect("replacement staging name must be created");
+        });
+
+        assert!(matches!(result, Err(CreateError::Failed)));
+        assert!(
+            !target.exists(),
+            "a replacement linked during publication must be removed"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn created_vault_is_owner_read_write_only() {
         use std::os::unix::fs::PermissionsExt;
 
@@ -1647,6 +1980,49 @@ mod tests {
             shm_agent.unlock(password("sidecar password"), &CancellationFlag::new()),
             Err(UnlockError::Failed)
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sqlite_snapshot_rejects_sidecars_created_after_snapshotting() {
+        let directory = TestDirectory::new();
+        let path = directory.vault_path();
+        let agent = create_test_vault(&path, "late sidecar password");
+        drop(agent);
+
+        for suffix in ["-wal", "-shm"] {
+            let sidecar = sqlite_sidecar(&path, suffix);
+            let result = read_empty_vault_with_connection_hooks(
+                &path,
+                || {},
+                || {
+                    fs::write(&sidecar, b"late sidecar")
+                        .expect("late sidecar fixture must be written");
+                },
+            );
+            assert!(
+                result.is_err(),
+                "a {suffix} file created after snapshotting must fail closed"
+            );
+            fs::remove_file(&sidecar).expect("late sidecar fixture must be removed");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_regular_unix_vault_paths_fail_without_blocking() {
+        use rustix::fs::{CWD, Mode, mkfifoat};
+
+        let directory = TestDirectory::new();
+        let path = directory.vault_path();
+        mkfifoat(CWD, &path, Mode::RUSR | Mode::WUSR).expect("FIFO vault fixture must be created");
+
+        let mut agent = VaultAgent::open_locked(&path);
+        assert_eq!(
+            agent.unlock(password("fifo password"), &CancellationFlag::new()),
+            Err(UnlockError::Failed)
+        );
+        assert!(!agent.is_unlocked());
     }
 
     #[cfg(windows)]
@@ -1709,6 +2085,41 @@ mod tests {
             },
         )
         .expect("the guarded original inode must remain the SQLite input");
+
+        assert_eq!(actual, expected);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sqlite_snapshot_remains_bound_when_an_ancestor_is_replaced() {
+        let directory = TestDirectory::new();
+        let visible_parent = directory.0.join("visible");
+        let parked_parent = directory.0.join("parked");
+        let attacker_parent = directory.0.join("attacker");
+        fs::create_dir(&visible_parent).expect("visible parent must be created");
+        fs::create_dir(&attacker_parent).expect("attacker parent must be created");
+        let path = visible_parent.join("vault.sqlite3");
+        let attacker_path = attacker_parent.join("vault.sqlite3");
+        let original = create_test_vault(&path, "original ancestor password");
+        let attacker = create_test_vault(&attacker_path, "attacker ancestor password");
+        drop(original);
+        drop(attacker);
+        let expected = read_empty_vault(&path).expect("original vault must be readable");
+
+        let actual = read_empty_vault_with_hooks(
+            &path,
+            || {
+                fs::rename(&visible_parent, &parked_parent).expect("guarded parent must be parked");
+                create_directory_symlink(&attacker_parent, &visible_parent);
+            },
+            || {},
+            || {
+                fs::remove_file(&visible_parent).expect("redirecting symlink must be removed");
+                fs::rename(&parked_parent, &visible_parent)
+                    .expect("guarded parent must be restored");
+            },
+        )
+        .expect("directory-relative reads must stay bound to the guarded parent");
 
         assert_eq!(actual, expected);
     }

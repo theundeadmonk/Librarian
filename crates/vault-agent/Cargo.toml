@@ -13,7 +13,7 @@ librarian-vault-format = { path = "../vault-format" }
 rusqlite = { version = "=0.40.1", default-features = false, features = ["backup", "bundled", "limits", "serialize"] }
 
 [target.'cfg(unix)'.dependencies]
-libc = "=0.2.189"
+rustix = { version = "=1.1.4", features = ["fs"] }
 
 [target.'cfg(windows)'.dependencies]
 same-file = "=1.0.6"
