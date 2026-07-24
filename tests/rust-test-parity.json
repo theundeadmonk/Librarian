@@ -1,0 +1,81 @@
+{
+  "version": 1,
+  "harnessFreeTargets": [],
+  "platformOnlyTests": [
+    {
+      "platform": "windows",
+      "test": "librarian-vault-agent::lib:librarian_vault_agent::unit_tests::tests::checked_vault_file_cannot_be_replaced_before_sqlite_opens::test:active",
+      "rationale": "Exercises Windows file-share locks that prevent vault replacement before SQLite opens the guarded file."
+    },
+    {
+      "platform": "windows",
+      "test": "librarian-vault-agent::lib:librarian_vault_agent::unit_tests::tests::junction_ancestors_fail_closed::test:active",
+      "rationale": "Exercises Windows junction traversal, which is distinct from portable symbolic-link handling."
+    },
+    {
+      "platform": "windows",
+      "test": "librarian-vault-agent::lib:librarian_vault_agent::unit_tests::tests::publication_rejects_a_same_size_replacement_after_linking::test:active",
+      "rationale": "Exercises Windows file identity and sharing semantics during atomic vault publication."
+    },
+    {
+      "platform": "windows",
+      "test": "librarian-vault-agent::lib:librarian_vault_agent::unit_tests::tests::publication_revalidation_rejects_in_place_transition_mutation::test:active",
+      "rationale": "Exercises Windows metadata revalidation when a linked staging file is mutated during publication."
+    },
+    {
+      "platform": "windows",
+      "test": "librarian-vault-agent::lib:librarian_vault_agent::unit_tests::tests::staging_reservation_cannot_be_replaced_during_initialization::test:active",
+      "rationale": "Exercises Windows share-mode protection for the reserved staging file during vault initialization."
+    },
+    {
+      "platform": "windows",
+      "test": "librarian-vault-agent::lib:librarian_vault_agent::unit_tests::tests::vault_writers_remain_blocked_through_unlock_publication::test:active",
+      "rationale": "Exercises Windows share-mode protection across password work and unlocked-session publication."
+    },
+    {
+      "platform": "linux",
+      "test": "librarian-vault-agent::lib:librarian_vault_agent::unit_tests::tests::created_vault_is_owner_read_write_only::test:active",
+      "rationale": "Exercises Unix permission bits, which do not exist under Windows access-control-list semantics."
+    },
+    {
+      "platform": "linux",
+      "test": "librarian-vault-agent::lib:librarian_vault_agent::unit_tests::tests::initialization_writes_only_to_the_reserved_staging_inode::test:active",
+      "rationale": "Exercises Unix inode binding while the reserved staging file is initialized."
+    },
+    {
+      "platform": "linux",
+      "test": "librarian-vault-agent::lib:librarian_vault_agent::unit_tests::tests::non_regular_unix_vault_paths_fail_without_blocking::test:active",
+      "rationale": "Exercises Unix special-file handling without opening potentially blocking FIFO paths."
+    },
+    {
+      "platform": "linux",
+      "test": "librarian-vault-agent::lib:librarian_vault_agent::unit_tests::tests::publication_removes_a_replacement_linked_after_identity_check::test:active",
+      "rationale": "Exercises Unix hard-link and inode replacement behavior during atomic vault publication."
+    },
+    {
+      "platform": "linux",
+      "test": "librarian-vault-agent::lib:librarian_vault_agent::unit_tests::tests::sqlite_snapshot_is_bound_to_the_guarded_inode_during_path_replacement::test:active",
+      "rationale": "Exercises Unix inode-bound snapshot reads while the visible vault path is replaced."
+    },
+    {
+      "platform": "linux",
+      "test": "librarian-vault-agent::lib:librarian_vault_agent::unit_tests::tests::sqlite_snapshot_rechecks_size_immediately_before_allocation::test:active",
+      "rationale": "Exercises Unix descriptor-based size revalidation immediately before snapshot allocation."
+    },
+    {
+      "platform": "linux",
+      "test": "librarian-vault-agent::lib:librarian_vault_agent::unit_tests::tests::sqlite_snapshot_remains_bound_when_an_ancestor_is_replaced::test:active",
+      "rationale": "Exercises Unix descriptor and inode binding when a vault ancestor directory is replaced."
+    },
+    {
+      "platform": "linux",
+      "test": "librarian-vault-agent::lib:librarian_vault_agent::unit_tests::tests::vault_replacement_during_password_work_prevents_unlock_publication::test:active",
+      "rationale": "Exercises Unix inode replacement during password work and requires unlock to fail closed."
+    },
+    {
+      "platform": "linux",
+      "test": "librarian-vault-agent::lib:librarian_vault_agent::unit_tests::tests::vault_rewrite_during_password_work_prevents_unlock_publication::test:active",
+      "rationale": "Exercises Unix in-place vault rewriting during password work and requires unlock to fail closed."
+    }
+  ]
+}

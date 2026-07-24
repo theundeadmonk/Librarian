@@ -49,6 +49,32 @@ powershell.exe -NoProfile -File .\scripts\build.ps1 -Configuration Release -Plat
 Build outputs and diagnostic logs are written beneath `artifacts/` or the component-specific ignored output directories. Native artifacts are unsigned; production MSIX generation and signing are deferred to issue #19.
 On a normal Windows checkout, the build also checks whitespace in the committed branch diff, the index, and the working tree. GitHub Actions supplies the pull request or push base commit explicitly.
 
+Windows is the authoritative MVP build and remains responsible for the native
+application, passkey provider, packaging boundary, and Windows-specific
+filesystem behavior. CI also formats, lints, and tests every Rust workspace
+target and documentation test on Linux. This second platform catches
+accidental portability gaps in the security core; it does not make Linux a
+supported Librarian product.
+
+After both jobs pass, CI compares each Rust test's package, Cargo target,
+harness type, name, and active or ignored status. All platform-neutral tests
+must appear and execute under the same status on both systems. An intentional
+operating-system-specific test must be listed in
+`tests/rust-test-parity.json` with a concrete rationale. The comparison fails
+for an undocumented difference and for a stale policy entry, so removing,
+renaming, ignoring, or accidentally excluding a Windows-only test is also
+visible. Aggregate test counts are not used as a substitute for test identity.
+The inventory compiles the complete workspace test graph once and lists the
+exact test executables Cargo selected. This preserves workspace-wide dependency
+feature unification and naturally excludes disabled targets. Documentation
+tests are listed through the corresponding workspace-wide Cargo command, and
+platform-specific path separators are normalized before comparison. Cargo's
+stable metadata does not expose the `harness` manifest setting. A selected
+target declared with `harness = false` must therefore also be named in
+`harnessFreeTargets` in `tests/rust-test-parity.json`; CI compares that
+executable at the target level without passing libtest arguments and rejects
+duplicate, inactive, or stale declarations.
+
 The foundation now includes the empty-vault lifecycle, encrypted key hierarchy,
 master-password unlock, and guarded local SQLite ownership described by issue
 #10. Credential records, browser site access, authenticated IPC, native

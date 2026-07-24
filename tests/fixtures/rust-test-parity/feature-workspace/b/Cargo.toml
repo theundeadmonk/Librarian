@@ -1,0 +1,14 @@
+[package]
+name = "feature-provider"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+gated = []
+
+[dependencies]
+shared-feature = { path = "../c", features = ["enabled"] }
+
+[[example]]
+name = "gated"
+required-features = ["gated"]

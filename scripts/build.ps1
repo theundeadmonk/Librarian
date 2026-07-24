@@ -122,6 +122,20 @@ Invoke-CheckedProcess `
     -Arguments @(
         "test",
         "--workspace",
+        "--all-targets",
+        "--locked",
+        "--target",
+        "x86_64-pc-windows-msvc"
+    ) `
+    -WorkingDirectory $repoRoot
+
+Invoke-CheckedProcess `
+    -Label "Rust documentation tests" `
+    -FilePath $toolchain.Cargo `
+    -Arguments @(
+        "test",
+        "--workspace",
+        "--doc",
         "--locked",
         "--target",
         "x86_64-pc-windows-msvc"
@@ -149,6 +163,12 @@ Invoke-CheckedProcess `
     -Label "Extension dependency restore" `
     -FilePath $toolchain.Npm `
     -Arguments @("ci", "--ignore-scripts") `
+    -WorkingDirectory $repoRoot
+
+Invoke-CheckedProcess `
+    -Label "Cross-platform Rust test parity checker tests" `
+    -FilePath $toolchain.Npm `
+    -Arguments @("run", "check:test-parity") `
     -WorkingDirectory $repoRoot
 
 $typeScript = Join-Path $repoRoot "node_modules\typescript\bin\tsc"
