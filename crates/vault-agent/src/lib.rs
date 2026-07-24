@@ -8,7 +8,7 @@
 
 use std::{
     env, fmt,
-    fs::{self, OpenOptions},
+    fs::{self, File, OpenOptions},
     io,
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
@@ -26,6 +26,17 @@ const MAX_SQLITE_VALUE_BYTES: i32 = 8 * 1024 * 1024;
 const MAX_PAGE_COUNT: u32 = 131_072;
 const MAX_SQLITE_SHM_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_STAGING_ATTEMPTS: u64 = 128;
+
+#[cfg(windows)]
+const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+#[cfg(windows)]
+const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+#[cfg(windows)]
+const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+#[cfg(windows)]
+const FILE_SHARE_READ: u32 = 0x0000_0001;
+#[cfg(windows)]
+const FILE_SHARE_WRITE: u32 = 0x0000_0002;
 
 static NEXT_SESSION_ID: AtomicU64 = AtomicU64::new(1);
 static NEXT_STAGING_ID: AtomicU64 = AtomicU64::new(1);
@@ -99,18 +110,20 @@ impl VaultAgent {
     ) -> Result<(Self, RecoveryKey), CreateError> {
         let path = path.as_ref().to_path_buf();
         validate_new_target(&path)?;
-        let staging_path = reserve_staging_file(&path)?;
-        let cleanup = StagedVaultCleanup::new(staging_path.clone());
+        let mut staging = reserve_staging_file(&path)?;
 
         let created_at_ms = unix_time_ms().map_err(|()| CreateError::Failed)?;
         let created = create_vault(password, created_at_ms).map_err(|_| CreateError::Failed)?;
         let (header, manifest, recovery_key, session) = created.into_parts();
         let session_id = next_session_id().ok_or(CreateError::Failed)?;
 
-        initialize_database(&staging_path, &header, &manifest).map_err(|_| CreateError::Failed)?;
-        ensure_sidecars_absent(&staging_path).map_err(|()| CreateError::Failed)?;
-        publish_staged_vault(&staging_path, &path)?;
-        drop(cleanup);
+        initialize_database(staging.path(), &header, &manifest).map_err(|_| CreateError::Failed)?;
+        ensure_sidecars_absent(staging.path()).map_err(|()| CreateError::Failed)?;
+        publish_staged_vault(&mut staging, &path)?;
+        if staging.remove_name().is_err() {
+            let _ = fs::remove_file(&path);
+            return Err(CreateError::Failed);
+        }
         if sync_parent_directory(&path).is_err() {
             let _ = fs::remove_file(&path);
             let _ = sync_parent_directory(&path);
@@ -229,9 +242,13 @@ impl VaultAgent {
 }
 
 fn validate_new_target(path: &Path) -> Result<(), CreateError> {
-    reject_symlinked_ancestors(path).map_err(|_| CreateError::Failed)?;
+    let _ancestor_guards = acquire_ancestor_guards(path).map_err(|_| CreateError::Failed)?;
+    validate_new_target_with_guarded_ancestors(path)
+}
+
+fn validate_new_target_with_guarded_ancestors(path: &Path) -> Result<(), CreateError> {
     match fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.file_type().is_symlink() => return Err(CreateError::Failed),
+        Ok(metadata) if is_reparse_point(&metadata) => return Err(CreateError::Failed),
         Ok(_) => return Err(CreateError::AlreadyExists),
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
         Err(_) => return Err(CreateError::Failed),
@@ -242,7 +259,9 @@ fn validate_new_target(path: &Path) -> Result<(), CreateError> {
     Ok(())
 }
 
-fn reserve_staging_file(target: &Path) -> Result<PathBuf, CreateError> {
+fn reserve_staging_file(target: &Path) -> Result<StagedVault, CreateError> {
+    let ancestor_guards = acquire_ancestor_guards(target).map_err(|_| CreateError::Failed)?;
+    validate_new_target_with_guarded_ancestors(target)?;
     let parent = parent_directory(target);
     let target_name = target.file_name().ok_or(CreateError::Failed)?;
     for _ in 0..MAX_STAGING_ATTEMPTS {
@@ -257,15 +276,13 @@ fn reserve_staging_file(target: &Path) -> Result<PathBuf, CreateError> {
             std::process::id()
         ));
         let staging_path = parent.join(staging_name);
-        match OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create_new(true)
-            .open(&staging_path)
-        {
-            Ok(file) => {
-                drop(file);
-                return Ok(staging_path);
+        match create_staging_reservation(&staging_path) {
+            Ok(reservation) => {
+                return Ok(StagedVault {
+                    path: staging_path,
+                    reservation: Some(reservation),
+                    _ancestor_guards: ancestor_guards,
+                });
             }
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
             Err(_) => return Err(CreateError::Failed),
@@ -274,12 +291,15 @@ fn reserve_staging_file(target: &Path) -> Result<PathBuf, CreateError> {
     Err(CreateError::Failed)
 }
 
-fn publish_staged_vault(staging_path: &Path, target: &Path) -> Result<(), CreateError> {
-    reject_symlinked_ancestors(target).map_err(|_| CreateError::Failed)?;
+fn publish_staged_vault(staging: &mut StagedVault, target: &Path) -> Result<(), CreateError> {
+    reject_reparse_ancestors(target).map_err(|_| CreateError::Failed)?;
     ensure_sidecars_absent(target).map_err(|()| CreateError::Failed)?;
-    match fs::hard_link(staging_path, target) {
+    match fs::hard_link(staging.path(), target) {
         Ok(()) => {
-            if ensure_sidecars_absent(target).is_err() {
+            let published_guard = open_regular_file_guard(target);
+            if published_guard.is_err() || ensure_sidecars_absent(target).is_err() {
+                drop(published_guard);
+                staging.release_reservation();
                 let _ = fs::remove_file(target);
                 return Err(CreateError::Failed);
             }
@@ -295,8 +315,6 @@ fn publish_staged_vault(staging_path: &Path, target: &Path) -> Result<(), Create
 #[cfg(windows)]
 fn sync_parent_directory(path: &Path) -> io::Result<()> {
     use std::os::windows::fs::OpenOptionsExt;
-
-    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
 
     OpenOptions::new()
         .write(true)
@@ -365,11 +383,8 @@ fn initialize_database(path: &Path, header: &[u8], manifest: &[u8]) -> rusqlite:
 }
 
 fn read_empty_vault(path: &Path) -> Result<(Vec<u8>, Vec<u8>), ()> {
-    let metadata = reject_symlink(path).map_err(|_| ())?;
-    if !metadata.is_file() {
-        return Err(());
-    }
-    validate_sqlite_input_sizes(path, metadata.len())?;
+    let input_guards = acquire_sqlite_input_guards(path)?;
+    validate_guarded_sqlite_input_sizes(&input_guards)?;
 
     let connection = Connection::open_with_flags(
         path,
@@ -383,6 +398,10 @@ fn read_empty_vault(path: &Path) -> Result<(Vec<u8>, Vec<u8>), ()> {
     connection
         .pragma_update(None, "trusted_schema", false)
         .map_err(|_| ())?;
+    validate_sqlite_input_sizes(
+        path,
+        input_guards.database.metadata().map_err(|_| ())?.len(),
+    )?;
     verify_application_schema(&connection)?;
 
     let header: Vec<u8> = connection
@@ -418,6 +437,11 @@ fn read_empty_vault(path: &Path) -> Result<(Vec<u8>, Vec<u8>), ()> {
     {
         return Err(());
     }
+    validate_guarded_sqlite_input_sizes(&input_guards)?;
+    validate_sqlite_input_sizes(
+        path,
+        input_guards.database.metadata().map_err(|_| ())?.len(),
+    )?;
     Ok((header, manifest))
 }
 
@@ -512,7 +536,7 @@ fn validate_sqlite_input_sizes(path: &Path, database_bytes: u64) -> Result<(), (
 
 fn optional_sidecar_size(path: &Path, suffix: &str, maximum_bytes: u64) -> Result<u64, ()> {
     let sidecar_path = sqlite_sidecar(path, suffix);
-    match reject_symlink(&sidecar_path) {
+    match reject_reparse(&sidecar_path) {
         Ok(metadata) if metadata.is_file() && metadata.len() <= maximum_bytes => Ok(metadata.len()),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(0),
         Ok(_) | Err(_) => Err(()),
@@ -529,19 +553,170 @@ fn ensure_sidecars_absent(path: &Path) -> Result<(), ()> {
     Ok(())
 }
 
-fn reject_symlink(path: &Path) -> io::Result<fs::Metadata> {
-    reject_symlinked_ancestors(path)?;
-    match fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.file_type().is_symlink() => Err(io::Error::new(
+struct SqliteInputGuards {
+    database: File,
+    wal: Option<File>,
+    shm: Option<File>,
+    _ancestor_guards: AncestorGuards,
+}
+
+fn acquire_sqlite_input_guards(path: &Path) -> Result<SqliteInputGuards, ()> {
+    let ancestor_guards = acquire_ancestor_guards(path).map_err(|_| ())?;
+    let database = open_regular_file_guard(path).map_err(|_| ())?;
+    let wal = open_optional_regular_file_guard(&sqlite_sidecar(path, "-wal"))?;
+    let shm = open_optional_regular_file_guard(&sqlite_sidecar(path, "-shm"))?;
+    Ok(SqliteInputGuards {
+        database,
+        wal,
+        shm,
+        _ancestor_guards: ancestor_guards,
+    })
+}
+
+fn validate_guarded_sqlite_input_sizes(input: &SqliteInputGuards) -> Result<(), ()> {
+    let database_bytes = input.database.metadata().map_err(|_| ())?.len();
+    let wal_bytes = guarded_file_size(
+        input.wal.as_ref(),
+        librarian_vault_format::MAX_DATABASE_BYTES,
+    )?;
+    let shm_bytes = guarded_file_size(input.shm.as_ref(), MAX_SQLITE_SHM_BYTES)?;
+    let total_bytes = database_bytes
+        .checked_add(wal_bytes)
+        .and_then(|value| value.checked_add(shm_bytes))
+        .ok_or(())?;
+    if total_bytes > librarian_vault_format::MAX_DATABASE_BYTES {
+        return Err(());
+    }
+    Ok(())
+}
+
+fn guarded_file_size(file: Option<&File>, maximum_bytes: u64) -> Result<u64, ()> {
+    let Some(file) = file else {
+        return Ok(0);
+    };
+    let metadata = file.metadata().map_err(|_| ())?;
+    if !metadata.is_file() || is_reparse_point(&metadata) || metadata.len() > maximum_bytes {
+        return Err(());
+    }
+    Ok(metadata.len())
+}
+
+fn open_optional_regular_file_guard(path: &Path) -> Result<Option<File>, ()> {
+    match open_regular_file_guard(path) {
+        Ok(file) => Ok(Some(file)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(_) => Err(()),
+    }
+}
+
+fn open_regular_file_guard(path: &Path) -> io::Result<File> {
+    let file = open_existing_guard(path)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() || is_reparse_point(&metadata) {
+        return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "symlink rejected",
+            "non-regular or redirected file rejected",
+        ));
+    }
+    Ok(file)
+}
+
+#[cfg(windows)]
+fn open_existing_guard(path: &Path) -> io::Result<File> {
+    use std::os::windows::fs::OpenOptionsExt;
+
+    OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+}
+
+#[cfg(not(windows))]
+fn open_existing_guard(path: &Path) -> io::Result<File> {
+    OpenOptions::new().read(true).open(path)
+}
+
+#[cfg(windows)]
+fn create_staging_reservation(path: &Path) -> io::Result<File> {
+    use std::os::windows::fs::OpenOptionsExt;
+
+    OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+}
+
+#[cfg(not(windows))]
+fn create_staging_reservation(path: &Path) -> io::Result<File> {
+    OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .open(path)
+}
+
+struct AncestorGuards {
+    #[cfg(windows)]
+    _handles: Vec<File>,
+}
+
+#[cfg(windows)]
+fn acquire_ancestor_guards(path: &Path) -> io::Result<AncestorGuards> {
+    use std::os::windows::fs::OpenOptionsExt;
+
+    let absolute_path = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        env::current_dir()?.join(path)
+    };
+    let mut ancestors = parent_directory(&absolute_path)
+        .ancestors()
+        .filter(|ancestor| !ancestor.as_os_str().is_empty())
+        .collect::<Vec<_>>();
+    ancestors.reverse();
+
+    let mut handles = Vec::with_capacity(ancestors.len());
+    for ancestor in ancestors {
+        let handle = OpenOptions::new()
+            .access_mode(0)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(ancestor)?;
+        let metadata = handle.metadata()?;
+        if !metadata.is_dir() || is_reparse_point(&metadata) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "redirected ancestor rejected",
+            ));
+        }
+        handles.push(handle);
+    }
+    Ok(AncestorGuards { _handles: handles })
+}
+
+#[cfg(not(windows))]
+fn acquire_ancestor_guards(path: &Path) -> io::Result<AncestorGuards> {
+    reject_reparse_ancestors(path)?;
+    Ok(AncestorGuards {})
+}
+
+fn reject_reparse(path: &Path) -> io::Result<fs::Metadata> {
+    reject_reparse_ancestors(path)?;
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if is_reparse_point(&metadata) => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "path redirection rejected",
         )),
         Ok(metadata) => Ok(metadata),
         Err(error) => Err(error),
     }
 }
 
-fn reject_symlinked_ancestors(path: &Path) -> io::Result<()> {
+fn reject_reparse_ancestors(path: &Path) -> io::Result<()> {
     let absolute_path = if path.is_absolute() {
         path.to_path_buf()
     } else {
@@ -551,14 +726,26 @@ fn reject_symlinked_ancestors(path: &Path) -> io::Result<()> {
         if ancestor.as_os_str().is_empty() {
             continue;
         }
-        if fs::symlink_metadata(ancestor)?.file_type().is_symlink() {
+        if is_reparse_point(&fs::symlink_metadata(ancestor)?) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "symlink ancestor rejected",
+                "redirected ancestor rejected",
             ));
         }
     }
     Ok(())
+}
+
+#[cfg(windows)]
+fn is_reparse_point(metadata: &fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+
+    metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+}
+
+#[cfg(not(windows))]
+fn is_reparse_point(metadata: &fs::Metadata) -> bool {
+    metadata.file_type().is_symlink()
 }
 
 fn parent_directory(path: &Path) -> &Path {
@@ -582,18 +769,30 @@ fn unix_time_ms() -> Result<u64, ()> {
     u64::try_from(duration.as_millis()).map_err(|_| ())
 }
 
-struct StagedVaultCleanup {
+struct StagedVault {
     path: PathBuf,
+    reservation: Option<File>,
+    _ancestor_guards: AncestorGuards,
 }
 
-impl StagedVaultCleanup {
-    const fn new(path: PathBuf) -> Self {
-        Self { path }
+impl StagedVault {
+    fn path(&self) -> &Path {
+        &self.path
+    }
+
+    fn release_reservation(&mut self) {
+        drop(self.reservation.take());
+    }
+
+    fn remove_name(&mut self) -> io::Result<()> {
+        self.release_reservation();
+        fs::remove_file(&self.path)
     }
 }
 
-impl Drop for StagedVaultCleanup {
+impl Drop for StagedVault {
     fn drop(&mut self) {
+        self.release_reservation();
         let _ = fs::remove_file(&self.path);
         let _ = fs::remove_file(sqlite_sidecar(&self.path, "-wal"));
         let _ = fs::remove_file(sqlite_sidecar(&self.path, "-shm"));
@@ -618,7 +817,7 @@ mod tests {
     use rusqlite::Connection;
 
     use super::{
-        CreateError, StagedVaultCleanup, UnlockError, VaultAgent, parent_directory,
+        CreateError, UnlockError, VaultAgent, acquire_sqlite_input_guards, parent_directory,
         reserve_staging_file, sqlite_sidecar, sync_parent_directory, validate_new_target,
     };
 
@@ -930,19 +1129,40 @@ mod tests {
         let directory = TestDirectory::new();
         let target = directory.vault_path();
         validate_new_target(&target).expect("new target must be accepted");
-        let staging_path =
+        let staging =
             reserve_staging_file(&target).expect("staging file must be reserved atomically");
-        let cleanup = StagedVaultCleanup::new(staging_path.clone());
 
-        fs::write(&staging_path, b"partial database").expect("partial fixture must be written");
+        fs::write(staging.path(), b"partial database").expect("partial fixture must be written");
         assert!(
             !target.exists(),
             "the final path must not exist during initialization"
         );
 
-        drop(cleanup);
+        let staging_path = staging.path().to_path_buf();
+        drop(staging);
         assert!(!target.exists());
         assert!(!staging_path.exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn staging_reservation_cannot_be_replaced_during_initialization() {
+        let directory = TestDirectory::new();
+        let target = directory.vault_path();
+        let staging =
+            reserve_staging_file(&target).expect("staging file must be reserved atomically");
+        let replacement = directory.0.join("replacement.sqlite3");
+        fs::write(&replacement, b"replacement").expect("replacement fixture must be written");
+
+        assert!(
+            fs::remove_file(staging.path()).is_err(),
+            "the live reservation must deny deletion"
+        );
+        assert!(
+            fs::rename(&replacement, staging.path()).is_err(),
+            "the live reservation must deny replacement"
+        );
+        assert!(replacement.exists());
     }
 
     #[test]
@@ -988,6 +1208,31 @@ mod tests {
         );
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn checked_vault_file_cannot_be_replaced_before_sqlite_opens() {
+        let directory = TestDirectory::new();
+        let path = directory.vault_path();
+        let agent = create_test_vault(&path, "stable file password");
+        drop(agent);
+        let replacement = directory.0.join("replacement.sqlite3");
+        fs::write(&replacement, b"replacement").expect("replacement fixture must be written");
+
+        let input_guards =
+            acquire_sqlite_input_guards(&path).expect("vault inputs must be guarded");
+        assert!(
+            fs::remove_file(&path).is_err(),
+            "the checked vault file must deny deletion"
+        );
+        assert!(
+            fs::rename(&replacement, &path).is_err(),
+            "the checked vault file must deny replacement"
+        );
+        drop(input_guards);
+        assert!(path.exists());
+        assert!(replacement.exists());
+    }
+
     #[cfg(any(unix, windows))]
     #[test]
     fn symlinked_vault_ancestors_fail_closed() {
@@ -1009,6 +1254,32 @@ mod tests {
             VaultAgent::create(
                 linked_parent.join("new-vault.sqlite3"),
                 password("new password")
+            ),
+            Err(CreateError::Failed)
+        ));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn junction_ancestors_fail_closed() {
+        let directory = TestDirectory::new();
+        let real_parent = directory.0.join("real-junction-target");
+        let junction_parent = directory.0.join("junction");
+        fs::create_dir(&real_parent).expect("junction target must be created");
+        let real_path = real_parent.join("vault.sqlite3");
+        let agent = create_test_vault(&real_path, "junction password");
+        drop(agent);
+        create_directory_junction(&real_parent, &junction_parent);
+
+        let mut linked_agent = VaultAgent::open_locked(junction_parent.join("vault.sqlite3"));
+        assert_eq!(
+            linked_agent.unlock(password("junction password"), &CancellationFlag::new()),
+            Err(UnlockError::Failed)
+        );
+        assert!(matches!(
+            VaultAgent::create(
+                junction_parent.join("new-vault.sqlite3"),
+                password("new junction password")
             ),
             Err(CreateError::Failed)
         ));
@@ -1039,5 +1310,16 @@ mod tests {
     fn create_directory_symlink(original: &Path, link: &Path) {
         std::os::windows::fs::symlink_dir(original, link)
             .expect("directory symlink must be created");
+    }
+
+    #[cfg(windows)]
+    fn create_directory_junction(original: &Path, link: &Path) {
+        let status = std::process::Command::new("cmd.exe")
+            .args(["/D", "/C", "mklink", "/J"])
+            .arg(link)
+            .arg(original)
+            .status()
+            .expect("junction command must start");
+        assert!(status.success(), "junction command must succeed");
     }
 }

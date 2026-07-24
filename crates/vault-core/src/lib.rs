@@ -314,8 +314,8 @@ fn create_vault_with_entropy(
     entropy: &mut impl EntropySource,
 ) -> Result<CreatedVault, CreateVaultError> {
     let vault_id = random_array(entropy)?;
-    let vault_root_key = Zeroizing::new(random_array(entropy)?);
-    let recovery_key_bytes = Zeroizing::new(random_array(entropy)?);
+    let vault_root_key = random_secret_array(entropy)?;
+    let recovery_key_bytes = random_secret_array(entropy)?;
     let password_salt = random_array(entropy)?;
     let master_nonce = random_array(entropy)?;
     let recovery_nonce = random_array(entropy)?;
@@ -395,6 +395,14 @@ fn random_array<const LENGTH: usize>(
 ) -> Result<[u8; LENGTH], CreateVaultError> {
     let mut value = [0_u8; LENGTH];
     entropy.fill(&mut value)?;
+    Ok(value)
+}
+
+fn random_secret_array<const LENGTH: usize>(
+    entropy: &mut impl EntropySource,
+) -> Result<Zeroizing<[u8; LENGTH]>, CreateVaultError> {
+    let mut value = Zeroizing::new([0_u8; LENGTH]);
+    entropy.fill(value.as_mut())?;
     Ok(value)
 }
 
