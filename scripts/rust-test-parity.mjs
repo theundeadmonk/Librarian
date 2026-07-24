@@ -11,6 +11,8 @@ const defaultPolicyPath = path.join(
   "rust-test-parity.json",
 );
 const summaryPattern = /^\d+ tests?, \d+ benchmarks?$/;
+const rustdocSummaryPattern =
+  /^all doctests ran in \S+; merged doctests compilation took \S+$/;
 const testPattern = /^(.*): (test|benchmark)$/;
 
 function compareText(left, right) {
@@ -55,7 +57,11 @@ function parseHarnessList(output, label) {
 
   for (const rawLine of output.split(/\r?\n/u)) {
     const line = rawLine.trim();
-    if (line.length === 0 || summaryPattern.test(line)) {
+    if (
+      line.length === 0 ||
+      summaryPattern.test(line) ||
+      rustdocSummaryPattern.test(line)
+    ) {
       continue;
     }
 

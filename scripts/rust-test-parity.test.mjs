@@ -89,6 +89,32 @@ test("a doctest-enabled library produces distinct unit and doc targets", () => {
   );
 });
 
+test("rustdoc timing summaries do not enter doctest inventories", () => {
+  const allDoctests = [
+    "src/lib.rs - add_one (line 3): test",
+    "src/lib.rs - add_one (line 7): test",
+    "all doctests ran in 0.18s; merged doctests compilation took 0.18s",
+    "",
+  ].join("\n");
+  const ignoredDoctests = [
+    "src/lib.rs - add_one (line 7): test",
+    "all doctests ran in 0.10s; merged doctests compilation took 0.10s",
+    "",
+  ].join("\n");
+
+  assert.deepEqual(
+    parseTestList(
+      "librarian-example::doc:librarian_example",
+      allDoctests,
+      ignoredDoctests,
+    ),
+    [
+      "librarian-example::doc:librarian_example::src/lib.rs - add_one (line 3)::test:active",
+      "librarian-example::doc:librarian_example::src/lib.rs - add_one (line 7)::test:ignored",
+    ],
+  );
+});
+
 test("active versus ignored status creates a parity difference", () => {
   const windowsTests = parseTestList(
     "librarian-example::lib:librarian_example",
