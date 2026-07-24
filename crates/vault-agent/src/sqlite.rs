@@ -14,8 +14,9 @@ use rusqlite::{
 use crate::{
     errors::StorageError,
     filesystem::{
-        AncestorGuards, acquire_ancestor_guards, guarded_file_matches_path_with_ancestor_guards,
-        guarded_file_size, guarded_optional_file_matches_path_with_ancestor_guards,
+        AncestorGuards, acquire_ancestor_guards, create_write_sidecar_guard,
+        guarded_file_matches_path_with_ancestor_guards, guarded_file_size,
+        guarded_optional_file_matches_path_with_ancestor_guards,
         open_optional_regular_file_guard_with_ancestor_guards,
         open_regular_file_guard_with_ancestor_guards, sqlite_sidecar,
     },
@@ -335,16 +336,19 @@ pub(crate) fn apply_record_mutation(
     mutation: &PreparedRecordMutation,
     before_commit: impl FnOnce() -> Result<(), StorageError>,
 ) -> Result<(), StorageError> {
-    let ancestor_guards = acquire_ancestor_guards(path).map_err(|_| StorageError::Filesystem)?;
-    let database_guard =
-        open_regular_file_guard_with_ancestor_guards(&ancestor_guards, path, true, false)
-            .map_err(|_| StorageError::Filesystem)?;
-    guarded_file_matches_path_with_ancestor_guards(&database_guard, path, &ancestor_guards)?;
+    let mut input_guards = acquire_sqlite_write_input_guards(path)?;
+    validate_guarded_sqlite_input_sizes(&input_guards)?;
+    validate_guarded_sqlite_input_paths(path, &input_guards)?;
+    validate_wal_database_header(&mut input_guards.database)?;
     let mut connection = Connection::open_with_flags(
         path,
-        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        OpenFlags::SQLITE_OPEN_READ_WRITE
+            | OpenFlags::SQLITE_OPEN_NO_MUTEX
+            | OpenFlags::SQLITE_OPEN_NOFOLLOW,
     )
     .map_err(|_| StorageError::Sqlite)?;
+    validate_guarded_sqlite_input_sizes(&input_guards)?;
+    validate_guarded_sqlite_input_paths(path, &input_guards)?;
     configure_limits(&connection).map_err(|_| StorageError::Sqlite)?;
     connection
         .set_db_config(DbConfig::SQLITE_DBCONFIG_DEFENSIVE, true)
@@ -369,7 +373,8 @@ pub(crate) fn apply_record_mutation(
     }
     verify_database_integrity(&connection)?;
     verify_application_schema(&connection)?;
-    guarded_file_matches_path_with_ancestor_guards(&database_guard, path, &ancestor_guards)?;
+    validate_guarded_sqlite_input_sizes(&input_guards)?;
+    validate_guarded_sqlite_input_paths(path, &input_guards)?;
 
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -417,8 +422,11 @@ pub(crate) fn apply_record_mutation(
         return Err(StorageError::Schema);
     }
     before_commit()?;
+    validate_guarded_sqlite_input_sizes(&input_guards)?;
+    validate_guarded_sqlite_input_paths(path, &input_guards)?;
     transaction.commit().map_err(|_| StorageError::Sqlite)?;
-    guarded_file_matches_path_with_ancestor_guards(&database_guard, path, &ancestor_guards)?;
+    validate_guarded_sqlite_input_sizes(&input_guards)?;
+    validate_guarded_sqlite_input_paths(path, &input_guards)?;
 
     let committed = read_vault_data_from_connection(&connection)?;
     let expected_committed_records = apply_to_expected_records(expected_records, mutation)?;
@@ -429,6 +437,42 @@ pub(crate) fn apply_record_mutation(
         return Err(StorageError::Integrity);
     }
     Ok(())
+}
+
+fn acquire_sqlite_write_input_guards(path: &Path) -> Result<SqliteInputGuards, StorageError> {
+    let ancestor_guards = acquire_ancestor_guards(path).map_err(|_| StorageError::Filesystem)?;
+    let database =
+        open_regular_file_guard_with_ancestor_guards(&ancestor_guards, path, true, false)
+            .map_err(|_| StorageError::Filesystem)?;
+    let wal = Some(open_or_create_write_sidecar(
+        &ancestor_guards,
+        &sqlite_sidecar(path, "-wal"),
+    )?);
+    let shm = Some(open_or_create_write_sidecar(
+        &ancestor_guards,
+        &sqlite_sidecar(path, "-shm"),
+    )?);
+    let guards = SqliteInputGuards {
+        database,
+        wal,
+        shm,
+        ancestor_guards,
+    };
+    validate_guarded_sqlite_input_sizes(&guards)?;
+    validate_guarded_sqlite_input_paths(path, &guards)?;
+    Ok(guards)
+}
+
+fn open_or_create_write_sidecar(
+    ancestor_guards: &AncestorGuards,
+    path: &Path,
+) -> Result<File, StorageError> {
+    if let Some(existing) =
+        open_optional_regular_file_guard_with_ancestor_guards(ancestor_guards, path, true, false)?
+    {
+        return Ok(existing);
+    }
+    create_write_sidecar_guard(ancestor_guards, path).map_err(|_| StorageError::Filesystem)
 }
 
 fn read_vault_data_from_connection(connection: &Connection) -> Result<VaultData, StorageError> {

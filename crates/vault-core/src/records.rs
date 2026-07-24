@@ -245,7 +245,11 @@ impl UnlockedVault {
         manifest_envelope_bytes: &[u8],
         records: &[EncryptedRecord],
     ) -> Result<Vec<WebsiteAccount>, RecordOperationError> {
-        self.authenticate_snapshot(header_bytes, manifest_envelope_bytes, records)
+        self.authenticate_snapshot_metadata(header_bytes, manifest_envelope_bytes)?;
+        let mut accounts = Vec::with_capacity(records.len());
+        visit_authenticated_records(self, records, None, |account| accounts.push(account))
+            .map_err(|_| RecordOperationError::Failed)?;
+        Ok(accounts)
     }
 
     /// Fully authenticates a snapshot and returns one matching account.
@@ -260,10 +264,15 @@ impl UnlockedVault {
         records: &[EncryptedRecord],
         id: RecordId,
     ) -> Result<WebsiteAccount, RecordOperationError> {
-        self.authenticate_snapshot(header_bytes, manifest_envelope_bytes, records)?
-            .into_iter()
-            .find(|account| account.id == id)
-            .ok_or(RecordOperationError::NotFound)
+        self.authenticate_snapshot_metadata(header_bytes, manifest_envelope_bytes)?;
+        let mut found = None;
+        visit_authenticated_records(self, records, None, |account| {
+            if account.id == id {
+                found = Some(account);
+            }
+        })
+        .map_err(|_| RecordOperationError::Failed)?;
+        found.ok_or(RecordOperationError::NotFound)
     }
 
     /// Prepares an encrypted insert and the matching next manifest.
@@ -280,9 +289,8 @@ impl UnlockedVault {
         input: WebsiteAccountInput,
         committed_at_ms: u64,
     ) -> Result<PreparedRecordMutation, RecordOperationError> {
-        let accounts =
-            self.authenticate_snapshot(header_bytes, manifest_envelope_bytes, records)?;
-        drop(accounts);
+        self.authenticate_snapshot_metadata(header_bytes, manifest_envelope_bytes)?;
+        authenticate_records_only(self, records)?;
         self.prepare_add_with_entropy(input, committed_at_ms, &mut SystemEntropy)
     }
 
@@ -373,12 +381,11 @@ impl UnlockedVault {
         Ok(mutation.id)
     }
 
-    fn authenticate_snapshot(
+    fn authenticate_snapshot_metadata(
         &self,
         header_bytes: &[u8],
         manifest_envelope_bytes: &[u8],
-        records: &[EncryptedRecord],
-    ) -> Result<Vec<WebsiteAccount>, RecordOperationError> {
+    ) -> Result<(), RecordOperationError> {
         let header = VaultHeader::decode(header_bytes).map_err(|_| RecordOperationError::Failed)?;
         if header != self.header {
             return Err(RecordOperationError::Failed);
@@ -387,7 +394,7 @@ impl UnlockedVault {
         if manifest != self.manifest {
             return Err(RecordOperationError::Failed);
         }
-        authenticate_records_inner(self, records)
+        Ok(())
     }
 
     fn prepare_add_with_entropy(
@@ -519,31 +526,32 @@ pub(super) fn authenticate_records(
     records: &[EncryptedRecord],
     cancellation: &CancellationFlag,
 ) -> Result<(), super::UnlockError> {
-    let accounts = authenticate_records_inner_with_cancellation(vault, records, Some(cancellation))
-        .map_err(|error| match error {
+    visit_authenticated_records(vault, records, Some(cancellation), drop).map_err(|error| {
+        match error {
             SnapshotAuthenticationError::Cancelled => super::UnlockError::Cancelled,
             SnapshotAuthenticationError::Failed => super::UnlockError::Failed,
-        })?;
-    drop(accounts);
+        }
+    })?;
     if cancellation.is_cancelled() {
         return Err(super::UnlockError::Cancelled);
     }
     Ok(())
 }
 
-fn authenticate_records_inner(
+fn authenticate_records_only(
     vault: &UnlockedVault,
     records: &[EncryptedRecord],
-) -> Result<Vec<WebsiteAccount>, RecordOperationError> {
-    authenticate_records_inner_with_cancellation(vault, records, None)
+) -> Result<(), RecordOperationError> {
+    visit_authenticated_records(vault, records, None, drop)
         .map_err(|_| RecordOperationError::Failed)
 }
 
-fn authenticate_records_inner_with_cancellation(
+fn visit_authenticated_records(
     vault: &UnlockedVault,
     records: &[EncryptedRecord],
     cancellation: Option<&CancellationFlag>,
-) -> Result<Vec<WebsiteAccount>, SnapshotAuthenticationError> {
+    mut visit: impl FnMut(WebsiteAccount),
+) -> Result<(), SnapshotAuthenticationError> {
     if records.len() != vault.manifest.entries().len() || records.len() > MAX_RECORDS {
         return Err(SnapshotAuthenticationError::Failed);
     }
@@ -553,7 +561,6 @@ fn authenticate_records_inner_with_cancellation(
     {
         return Err(SnapshotAuthenticationError::Failed);
     }
-    let mut accounts = Vec::with_capacity(records.len());
     for (record, commitment) in records.iter().zip(vault.manifest.entries()) {
         if cancellation.is_some_and(CancellationFlag::is_cancelled) {
             return Err(SnapshotAuthenticationError::Cancelled);
@@ -563,9 +570,9 @@ fn authenticate_records_inner_with_cancellation(
         {
             return Err(SnapshotAuthenticationError::Failed);
         }
-        accounts.push(decrypt_website_account(vault, record)?);
+        visit(decrypt_website_account(vault, record)?);
     }
-    Ok(accounts)
+    Ok(())
 }
 
 fn decrypt_manifest(

@@ -1,4 +1,6 @@
-use minicbor::{Decoder, Encoder};
+use std::fmt;
+
+use minicbor::{Decoder, Encoder, encode::Write};
 use zeroize::Zeroizing;
 
 use crate::{CONTAINER_VERSION, FormatError, MAX_RECORD_ENVELOPE_BYTES};
@@ -14,6 +16,43 @@ pub const MAX_PASSWORD_BYTES: usize = 16 * 1_024;
 
 const RECORD_MAGIC: &str = "LBR-REC";
 const TAG_BYTES: usize = 16;
+const WEBSITE_ACCOUNT_ENCODING_OVERHEAD_BYTES: usize = 128;
+
+struct SecretWriter {
+    bytes: Zeroizing<Vec<u8>>,
+}
+
+impl SecretWriter {
+    fn with_capacity(capacity: usize) -> Self {
+        Self {
+            bytes: Zeroizing::new(Vec::with_capacity(capacity)),
+        }
+    }
+
+    fn into_bytes(self) -> Zeroizing<Vec<u8>> {
+        self.bytes
+    }
+}
+
+#[derive(Debug)]
+struct SecretWriterOverflow;
+
+impl Write for SecretWriter {
+    type Error = SecretWriterOverflow;
+
+    fn write_all(&mut self, bytes: &[u8]) -> Result<(), Self::Error> {
+        let required = self
+            .bytes
+            .len()
+            .checked_add(bytes.len())
+            .ok_or(SecretWriterOverflow)?;
+        if required > self.bytes.capacity() {
+            return Err(SecretWriterOverflow);
+        }
+        self.bytes.extend_from_slice(bytes);
+        Ok(())
+    }
+}
 
 /// One bounded, encrypted record stored in `encrypted_records`.
 #[derive(Clone, Eq, PartialEq)]
@@ -211,7 +250,15 @@ impl WebsiteAccountPlaintext {
     /// Returns an invariant or size error when the value is not representable.
     pub fn encode(&self) -> Result<Zeroizing<Vec<u8>>, FormatError> {
         validate_plaintext(self)?;
-        let mut encoder = Encoder::new(Vec::new());
+        let capacity = self
+            .service_name
+            .len()
+            .checked_add(self.permitted_origin.len())
+            .and_then(|value| value.checked_add(self.username.len()))
+            .and_then(|value| value.checked_add(self.password.len()))
+            .and_then(|value| value.checked_add(WEBSITE_ACCOUNT_ENCODING_OVERHEAD_BYTES))
+            .ok_or(FormatError::TooLarge)?;
+        let mut encoder = Encoder::new(SecretWriter::with_capacity(capacity));
         encode_array(&mut encoder, 6);
         encode_u32(&mut encoder, RECORD_SCHEMA);
         encode_u32(&mut encoder, WEBSITE_ACCOUNT_RECORD_TYPE);
@@ -223,7 +270,7 @@ impl WebsiteAccountPlaintext {
         encode_str(&mut encoder, &self.permitted_origin);
         encode_str(&mut encoder, &self.username);
         encode_str(&mut encoder, &self.password);
-        let bytes = Zeroizing::new(encoder.into_writer());
+        let bytes = encoder.into_writer().into_bytes();
         if bytes
             .len()
             .checked_add(TAG_BYTES)
@@ -317,31 +364,51 @@ fn validate_plaintext(value: &WebsiteAccountPlaintext) -> Result<(), FormatError
     Ok(())
 }
 
-fn encode_array(encoder: &mut Encoder<Vec<u8>>, length: u64) {
+fn encode_array<W>(encoder: &mut Encoder<W>, length: u64)
+where
+    W: Write,
+    W::Error: fmt::Debug,
+{
     encoder
         .array(length)
         .expect("encoding into a byte vector cannot fail");
 }
 
-fn encode_u32(encoder: &mut Encoder<Vec<u8>>, value: u32) {
+fn encode_u32<W>(encoder: &mut Encoder<W>, value: u32)
+where
+    W: Write,
+    W::Error: fmt::Debug,
+{
     encoder
         .u32(value)
         .expect("encoding into a byte vector cannot fail");
 }
 
-fn encode_u64(encoder: &mut Encoder<Vec<u8>>, value: u64) {
+fn encode_u64<W>(encoder: &mut Encoder<W>, value: u64)
+where
+    W: Write,
+    W::Error: fmt::Debug,
+{
     encoder
         .u64(value)
         .expect("encoding into a byte vector cannot fail");
 }
 
-fn encode_bytes(encoder: &mut Encoder<Vec<u8>>, value: &[u8]) {
+fn encode_bytes<W>(encoder: &mut Encoder<W>, value: &[u8])
+where
+    W: Write,
+    W::Error: fmt::Debug,
+{
     encoder
         .bytes(value)
         .expect("encoding into a byte vector cannot fail");
 }
 
-fn encode_str(encoder: &mut Encoder<Vec<u8>>, value: &str) {
+fn encode_str<W>(encoder: &mut Encoder<W>, value: &str)
+where
+    W: Write,
+    W::Error: fmt::Debug,
+{
     encoder
         .str(value)
         .expect("encoding into a byte vector cannot fail");

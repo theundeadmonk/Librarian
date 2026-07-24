@@ -272,6 +272,54 @@ pub(crate) fn create_staging_reservation(
         .open(path)
 }
 
+#[cfg(windows)]
+pub(crate) fn create_write_sidecar_guard(
+    _ancestor_guards: &AncestorGuards,
+    path: &Path,
+) -> io::Result<File> {
+    use std::os::windows::fs::OpenOptionsExt;
+
+    OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+}
+
+#[cfg(unix)]
+pub(crate) fn create_write_sidecar_guard(
+    ancestor_guards: &AncestorGuards,
+    path: &Path,
+) -> io::Result<File> {
+    use rustix::fs::{Mode, OFlags, openat};
+
+    Ok(File::from(openat(
+        &ancestor_guards.directory,
+        child_name(path)?,
+        OFlags::RDWR
+            | OFlags::CREATE
+            | OFlags::EXCL
+            | OFlags::CLOEXEC
+            | OFlags::NOFOLLOW
+            | OFlags::NONBLOCK,
+        Mode::RUSR | Mode::WUSR,
+    )?))
+}
+
+#[cfg(not(any(unix, windows)))]
+pub(crate) fn create_write_sidecar_guard(
+    _ancestor_guards: &AncestorGuards,
+    path: &Path,
+) -> io::Result<File> {
+    OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .open(path)
+}
+
 pub(crate) struct AncestorGuards {
     #[cfg(windows)]
     _handles: Vec<File>,

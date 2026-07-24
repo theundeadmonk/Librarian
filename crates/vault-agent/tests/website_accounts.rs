@@ -443,6 +443,57 @@ fn replaying_an_older_record_envelope_blocks_unlock() {
 }
 
 #[test]
+fn single_record_get_authenticates_every_other_row_before_returning_plaintext() {
+    let directory = TestDirectory::new();
+    let path = directory.vault_path();
+    let (mut agent, _recovery) =
+        VaultAgent::create(&path, password("streaming authentication password"))
+            .expect("vault must be created");
+    let requested = agent
+        .add_website_account(account(
+            "Requested",
+            "https://requested.example",
+            "requested",
+            "requested password",
+        ))
+        .expect("requested account must be added");
+    let corrupted = agent
+        .add_website_account(account(
+            "Corrupted",
+            "https://corrupted.example",
+            "corrupted",
+            "corrupted password",
+        ))
+        .expect("second account must be added");
+
+    let connection = Connection::open(&path).expect("test database must open");
+    let mut envelope: Vec<u8> = connection
+        .query_row(
+            "SELECT envelope FROM encrypted_records WHERE record_id = ?1",
+            [corrupted.as_bytes().as_slice()],
+            |row| row.get(0),
+        )
+        .expect("second record envelope must exist");
+    let last = envelope
+        .last_mut()
+        .expect("record envelope must not be empty");
+    *last ^= 1;
+    connection
+        .execute(
+            "UPDATE encrypted_records SET envelope = ?1 WHERE record_id = ?2",
+            rusqlite::params![envelope, corrupted.as_bytes().as_slice()],
+        )
+        .expect("test must corrupt the second record");
+    drop(connection);
+
+    assert_eq!(
+        agent.get_website_account(requested).err(),
+        Some(AccountError::Failed)
+    );
+    assert!(!agent.is_unlocked());
+}
+
+#[test]
 fn unknown_record_id_is_not_found_only_after_authentication() {
     let directory = TestDirectory::new();
     let path = directory.vault_path();

@@ -1248,6 +1248,31 @@ mod tests {
     }
 
     #[test]
+    fn record_mutation_rejects_oversized_sidecars_before_sqlite_opens() {
+        let directory = TestDirectory::new();
+        let path = directory.vault_path();
+        let mut agent = create_test_vault(&path, "oversized mutation sidecar password");
+        let shm = sqlite_sidecar(&path, "-shm");
+        File::create(&shm)
+            .and_then(|file| file.set_len(crate::MAX_SQLITE_SHM_BYTES + 1))
+            .expect("oversized shared-memory fixture must be created");
+
+        assert_eq!(
+            agent
+                .add_website_account(account_input("Oversized Sidecar"))
+                .err(),
+            Some(AccountError::Failed)
+        );
+        assert!(!agent.is_unlocked());
+        assert_eq!(
+            fs::metadata(shm)
+                .expect("oversized sidecar must remain available")
+                .len(),
+            crate::MAX_SQLITE_SHM_BYTES + 1
+        );
+    }
+
+    #[test]
     fn lock_before_plaintext_return_discards_the_result() {
         let directory = TestDirectory::new();
         let path = directory.vault_path();
