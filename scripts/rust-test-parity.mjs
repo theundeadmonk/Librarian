@@ -140,8 +140,8 @@ export function parseTestList(targetIdentity, output, ignoredOutput = "") {
   });
 }
 
-function runCargo(arguments_, { cargo, cwd }) {
-  const result = spawnSync(cargo, arguments_, {
+function runProcess(executable, arguments_, { cwd, label = executable }) {
+  const result = spawnSync(executable, arguments_, {
     cwd,
     encoding: "utf8",
     maxBuffer: 16 * 1024 * 1024,
@@ -150,7 +150,7 @@ function runCargo(arguments_, { cargo, cwd }) {
 
   if (result.error !== undefined) {
     throw new Error(
-      `Unable to run ${cargo} ${arguments_.join(" ")}: ${result.error.message}`,
+      `Unable to run ${label} ${arguments_.join(" ")}: ${result.error.message}`,
     );
   }
 
@@ -160,7 +160,7 @@ function runCargo(arguments_, { cargo, cwd }) {
       .filter((value) => value.length > 0)
       .join("\n");
     throw new Error(
-      `${cargo} ${arguments_.join(" ")} failed with exit code ${result.status}.` +
+      `${label} ${arguments_.join(" ")} failed with exit code ${result.status}.` +
         (details.length === 0 ? "" : `\n${details}`),
     );
   }
@@ -168,19 +168,14 @@ function runCargo(arguments_, { cargo, cwd }) {
   return result.stdout;
 }
 
-export function describeCargoTargets(target, activeFeatures = new Set()) {
+function runCargo(arguments_, { cargo, cwd }) {
+  return runProcess(cargo, arguments_, { cwd });
+}
+
+export function describeCargoTargets(target) {
   const name = requireNonEmptyString(target.name, "Cargo target name");
   if (!Array.isArray(target.kind) || target.kind.length === 0) {
     throw new Error(`Cargo target ${name} has no target kind.`);
-  }
-
-  const requiredFeatures = target["required-features"] ?? [];
-  if (!Array.isArray(requiredFeatures)) {
-    throw new Error(`Cargo target ${name} required-features must be an array.`);
-  }
-
-  if (requiredFeatures.some((feature) => !activeFeatures.has(feature))) {
-    return [];
   }
 
   const kinds = new Set(target.kind);
@@ -247,6 +242,7 @@ export function buildMetadataArguments(rustTarget) {
   const arguments_ = [
     "metadata",
     "--locked",
+    "--no-deps",
     "--format-version",
     "1",
   ];
@@ -261,23 +257,16 @@ export function buildMetadataArguments(rustTarget) {
   return arguments_;
 }
 
-export function buildTestArguments(
-  packageName,
-  cargoTarget,
-  activeFeatures,
-  rustTarget,
-) {
+export function buildWorkspaceTestArguments(rustTarget) {
   const arguments_ = [
     "test",
-    "-p",
-    requireNonEmptyString(packageName, "Cargo package name"),
-    ...cargoTarget.selection,
+    "--workspace",
+    "--all-targets",
+    "--no-run",
     "--locked",
+    "--message-format",
+    "json-render-diagnostics",
   ];
-  const features = [...activeFeatures].sort(compareText);
-  if (features.length > 0) {
-    arguments_.push("--features", features.join(","));
-  }
 
   if (rustTarget !== undefined) {
     arguments_.push(
@@ -289,91 +278,287 @@ export function buildTestArguments(
   return arguments_;
 }
 
+export function buildWorkspaceDoctestArguments(rustTarget) {
+  const arguments_ = [
+    "test",
+    "--workspace",
+    "--doc",
+    "--locked",
+  ];
+
+  if (rustTarget !== undefined) {
+    arguments_.push(
+      "--target",
+      requireNonEmptyString(rustTarget, "Rust target"),
+    );
+  }
+
+  return arguments_;
+}
+
+export function parseCompilerArtifacts(output, workspacePackages) {
+  if (!Array.isArray(workspacePackages)) {
+    throw new Error("Workspace packages must be an array.");
+  }
+
+  const packagesById = new Map(
+    workspacePackages.map((package_) => [
+      requireNonEmptyString(package_.id, "Cargo package ID"),
+      {
+        name: requireNonEmptyString(package_.name, "Cargo package name"),
+        workingDirectory: path.dirname(
+          requireNonEmptyString(
+            package_.manifest_path,
+            "Cargo package manifest path",
+          ),
+        ),
+      },
+    ]),
+  );
+  const artifacts = new Map();
+
+  for (const rawLine of output.split(/\r?\n/u)) {
+    const line = rawLine.trim();
+    if (line.length === 0) {
+      continue;
+    }
+
+    let message;
+    try {
+      message = JSON.parse(line);
+    } catch (error) {
+      throw new Error(`Cargo emitted invalid JSON: ${error.message}`);
+    }
+
+    const package_ = packagesById.get(message.package_id);
+    if (
+      message.reason !== "compiler-artifact" ||
+      package_ === undefined ||
+      message.executable === null ||
+      message.executable === undefined ||
+      message.profile?.test !== true
+    ) {
+      continue;
+    }
+
+    const cargoTarget = describeCargoTargets(message.target).find(
+      (target) => !target.identity.startsWith("doc:"),
+    );
+    if (cargoTarget === undefined) {
+      throw new Error(
+        `Cargo test artifact for ${package_.name} has no executable target identity.`,
+      );
+    }
+
+    const targetIdentity = `${package_.name}::${cargoTarget.identity}`;
+    const executable = requireNonEmptyString(
+      message.executable,
+      `${targetIdentity} executable`,
+    );
+    const existing = artifacts.get(targetIdentity);
+    if (existing !== undefined && existing.executable !== executable) {
+      throw new Error(
+        `Cargo emitted multiple test executables for ${targetIdentity}.`,
+      );
+    }
+    artifacts.set(targetIdentity, {
+      executable,
+      workingDirectory: package_.workingDirectory,
+    });
+  }
+
+  return [...artifacts]
+    .map(([targetIdentity, artifact]) => ({
+      ...artifact,
+      targetIdentity,
+    }))
+    .sort((left, right) =>
+      compareText(left.targetIdentity, right.targetIdentity),
+    );
+}
+
+function parseDoctestHarness(output, label) {
+  return normalizeHarnessTests(
+    parseHarnessList(output, label),
+    "workspace::doc:workspace",
+    label,
+  );
+}
+
+export function parseWorkspaceDoctestList(
+  docTargets,
+  output,
+  ignoredOutput = "",
+) {
+  if (!Array.isArray(docTargets)) {
+    throw new Error("Documentation targets must be an array.");
+  }
+
+  const normalizedTargets = docTargets.map((target, index) => ({
+    sourcePath: requireNonEmptyString(
+      target.sourcePath,
+      `Documentation target ${index} source path`,
+    ).replaceAll("\\", "/"),
+    targetIdentity: requireNonEmptyString(
+      target.targetIdentity,
+      `Documentation target ${index} identity`,
+    ),
+  }));
+  const sourcePaths = normalizedTargets.map((target) => target.sourcePath);
+  if (new Set(sourcePaths).size !== sourcePaths.length) {
+    throw new Error("Documentation targets contain duplicate source paths.");
+  }
+
+  const listedTests = parseDoctestHarness(
+    output,
+    "workspace documentation test-list",
+  );
+  const ignoredTests = parseDoctestHarness(
+    ignoredOutput,
+    "workspace documentation ignored-test-list",
+  );
+  const listedKeys = new Set(
+    listedTests.map((test) => `${test.name}\0${test.type}`),
+  );
+  const ignoredKeys = new Set(
+    ignoredTests.map((test) => `${test.name}\0${test.type}`),
+  );
+
+  for (const ignoredKey of ignoredKeys) {
+    if (!listedKeys.has(ignoredKey)) {
+      throw new Error(
+        "Workspace documentation ignored-test-list contains a test absent from the complete list.",
+      );
+    }
+  }
+
+  return listedTests.map((test) => {
+    const matches = normalizedTargets.filter((target) =>
+      test.name.startsWith(`${target.sourcePath} - `),
+    );
+    if (matches.length !== 1) {
+      throw new Error(
+        `Unable to map documentation test to one Cargo target: ${test.name}`,
+      );
+    }
+
+    const key = `${test.name}\0${test.type}`;
+    const status = ignoredKeys.has(key) ? "ignored" : "active";
+    return `${matches[0].targetIdentity}::${test.name}::${test.type}:${status}`;
+  });
+}
+
 export function collectInventory({
   cargo = process.env.CARGO ?? "cargo",
   cwd = repositoryRoot,
+  policyPath = defaultPolicyPath,
   target: rustTarget,
 } = {}) {
   const metadata = JSON.parse(
     runCargo(buildMetadataArguments(rustTarget), { cargo, cwd }),
   );
-  const policy = normalizePolicy(readPolicy(defaultPolicyPath));
+  const policy = normalizePolicy(readPolicy(policyPath));
   const harnessFreeTargets = new Set(policy.harnessFreeTargets);
   const workspaceMembers = new Set(metadata.workspace_members);
-  const resolveNodes = metadata.resolve?.nodes;
-  if (!Array.isArray(resolveNodes)) {
-    throw new Error("Cargo metadata did not include resolved feature state.");
-  }
-
-  const activeFeaturesByPackage = new Map(
-    resolveNodes.map((node) => [node.id, new Set(node.features)]),
-  );
   const packages = metadata.packages
     .filter((package_) => workspaceMembers.has(package_.id))
     .sort((left, right) => compareText(left.name, right.name));
-  const discoveredTargets = new Set();
-  const inventory = [];
-
-  for (const package_ of packages) {
-    const activeFeatures =
-      activeFeaturesByPackage.get(package_.id) ?? new Set();
-    const allTargets = package_.targets.flatMap((target) =>
-      describeCargoTargets(
-        target,
-        new Set(target["required-features"] ?? []),
-      ),
-    );
-    for (const cargoTarget of allTargets) {
-      if (!cargoTarget.identity.startsWith("doc:")) {
-        discoveredTargets.add(`${package_.name}::${cargoTarget.identity}`);
-      }
-    }
-
-    const targets = package_.targets
-      .flatMap((target) => describeCargoTargets(target, activeFeatures))
-      .sort((left, right) => compareText(left.identity, right.identity));
-
-    for (const cargoTarget of targets) {
-      const qualifiedTarget = `${package_.name}::${cargoTarget.identity}`;
-      if (harnessFreeTargets.has(qualifiedTarget)) {
-        inventory.push(
-          `${qualifiedTarget}::<harness-free-target>::target:active`,
-        );
-        continue;
-      }
-
-      const arguments_ = buildTestArguments(
-        package_.name,
-        cargoTarget,
-        activeFeatures,
-        rustTarget,
-      );
-
-      const output = runCargo(
-        [...arguments_, "--", "--list", "--format", "terse"],
-        { cargo, cwd },
-      );
-      const ignoredOutput = runCargo(
-        [...arguments_, "--", "--ignored", "--list", "--format", "terse"],
-        { cargo, cwd },
-      );
-      inventory.push(
-        ...parseTestList(
-          qualifiedTarget,
-          output,
-          ignoredOutput,
-        ),
-      );
-    }
-  }
-
+  const workspaceRoot = requireNonEmptyString(
+    metadata.workspace_root,
+    "Cargo workspace root",
+  );
+  const artifactOutput = runCargo(
+    buildWorkspaceTestArguments(rustTarget),
+    { cargo, cwd },
+  );
+  const artifacts = parseCompilerArtifacts(artifactOutput, packages);
+  const selectedTargets = new Set(
+    artifacts.map((artifact) => artifact.targetIdentity),
+  );
   const staleHarnessFreeTargets = policy.harnessFreeTargets.filter(
-    (target) => !discoveredTargets.has(target),
+    (target) => !selectedTargets.has(target),
   );
   if (staleHarnessFreeTargets.length > 0) {
     throw new Error(
-      "Harness-free target policy entries do not match Cargo metadata:\n" +
+      "Harness-free target policy entries do not match selected Cargo test artifacts:\n" +
         formatTests(staleHarnessFreeTargets),
+    );
+  }
+
+  const inventory = [];
+
+  for (const artifact of artifacts) {
+    if (harnessFreeTargets.has(artifact.targetIdentity)) {
+      inventory.push(
+        `${artifact.targetIdentity}::<harness-free-target>::target:active`,
+      );
+      continue;
+    }
+
+    const output = runProcess(
+      artifact.executable,
+      ["--list", "--format", "terse"],
+      {
+        cwd: artifact.workingDirectory,
+        label: artifact.targetIdentity,
+      },
+    );
+    const ignoredOutput = runProcess(
+      artifact.executable,
+      ["--ignored", "--list", "--format", "terse"],
+      {
+        cwd: artifact.workingDirectory,
+        label: artifact.targetIdentity,
+      },
+    );
+    inventory.push(
+      ...parseTestList(
+        artifact.targetIdentity,
+        output,
+        ignoredOutput,
+      ),
+    );
+  }
+
+  const docTargets = packages.flatMap((package_) =>
+    package_.targets.flatMap((target) => {
+      const docTarget = describeCargoTargets(target).find(
+        (cargoTarget) => cargoTarget.identity.startsWith("doc:"),
+      );
+      if (docTarget === undefined) {
+        return [];
+      }
+
+      const sourcePath = path
+        .relative(
+          workspaceRoot,
+          requireNonEmptyString(target.src_path, "Cargo target source path"),
+        )
+        .replaceAll("\\", "/");
+      return [
+        {
+          sourcePath,
+          targetIdentity: `${package_.name}::${docTarget.identity}`,
+        },
+      ];
+    }),
+  );
+  if (docTargets.length > 0) {
+    const arguments_ = buildWorkspaceDoctestArguments(rustTarget);
+    const output = runCargo(
+      [...arguments_, "--", "--list", "--format", "terse"],
+      { cargo, cwd },
+    );
+    const ignoredOutput = runCargo(
+      [...arguments_, "--", "--ignored", "--list", "--format", "terse"],
+      { cargo, cwd },
+    );
+    inventory.push(
+      ...parseWorkspaceDoctestList(
+        docTargets,
+        output,
+        ignoredOutput,
+      ),
     );
   }
 

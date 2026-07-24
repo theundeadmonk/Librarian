@@ -1,3 +1,4 @@
-pub fn available() -> bool {
+#[cfg(feature = "enabled")]
+pub fn enabled() -> bool {
     true
 }

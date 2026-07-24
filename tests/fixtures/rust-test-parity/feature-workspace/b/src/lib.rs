@@ -1,3 +1,3 @@
 pub fn enabled() -> bool {
-    optional_support::available()
+    shared_feature::enabled()
 }

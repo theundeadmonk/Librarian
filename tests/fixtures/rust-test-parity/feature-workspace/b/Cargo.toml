@@ -4,11 +4,11 @@ version = "0.1.0"
 edition = "2024"
 
 [features]
-enabled = ["dep:optional-support"]
+gated = []
 
 [dependencies]
-optional-support = { path = "../c", optional = true }
+shared-feature = { path = "../c", features = ["enabled"] }
 
 [[example]]
 name = "gated"
-required-features = ["enabled"]
+required-features = ["gated"]

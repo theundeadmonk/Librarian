@@ -10,12 +10,19 @@ dependencies = [
 ]
 
 [[package]]
-name = "feature-provider"
+name = "feature-observer"
 version = "0.1.0"
 dependencies = [
- "optional-support",
+ "shared-feature",
 ]
 
 [[package]]
-name = "optional-support"
+name = "feature-provider"
+version = "0.1.0"
+dependencies = [
+ "shared-feature",
+]
+
+[[package]]
+name = "shared-feature"
 version = "0.1.0"

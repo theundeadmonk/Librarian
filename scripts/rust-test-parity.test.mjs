@@ -5,13 +5,16 @@ import { fileURLToPath } from "node:url";
 
 import {
   buildMetadataArguments,
-  buildTestArguments,
+  buildWorkspaceDoctestArguments,
+  buildWorkspaceTestArguments,
   collectInventory,
   compareInventories,
   decodeInventory,
   describeCargoTargets,
   encodeInventory,
+  parseCompilerArtifacts,
   parseTestList,
+  parseWorkspaceDoctestList,
 } from "./rust-test-parity.mjs";
 
 const testDirectory = path.dirname(fileURLToPath(import.meta.url));
@@ -22,6 +25,11 @@ const featureWorkspace = path.resolve(
   "fixtures",
   "rust-test-parity",
   "feature-workspace",
+);
+const featureWorkspacePolicy = path.join(featureWorkspace, "policy.json");
+const inactiveHarnessPolicy = path.join(
+  featureWorkspace,
+  "inactive-harness-policy.json",
 );
 const emptyPolicy = {
   version: 1,
@@ -130,16 +138,22 @@ test("rustdoc timing summaries do not enter doctest inventories", () => {
 });
 
 test("doctest path separators normalize across Windows and Linux", () => {
-  const windowsDoctests = parseTestList(
-    "librarian-example::doc:librarian_example",
+  const targets = [
+    {
+      sourcePath: "crates/example/src/lib.rs",
+      targetIdentity: "librarian-example::doc:librarian_example",
+    },
+  ];
+  const windowsDoctests = parseWorkspaceDoctestList(
+    targets,
     [
       "crates\\example\\src\\lib.rs - add_one (line 3): test",
       "all doctests ran in 0.18s; merged doctests compilation took 0.18s",
       "",
     ].join("\n"),
   );
-  const linuxDoctests = parseTestList(
-    "librarian-example::doc:librarian_example",
+  const linuxDoctests = parseWorkspaceDoctestList(
+    targets,
     [
       "crates/example/src/lib.rs - add_one (line 3): test",
       "all doctests ran in 0.18s; merged doctests compilation took 0.18s",
@@ -150,21 +164,78 @@ test("doctest path separators normalize across Windows and Linux", () => {
   assert.deepEqual(windowsDoctests, linuxDoctests);
 });
 
-test("targets behind inactive required features are not inventoried", () => {
-  const target = {
-    "required-features": ["desktop"],
-    kind: ["bin"],
-    name: "desktop-helper",
-    test: true,
-  };
-
-  assert.deepEqual(describeCargoTargets(target, new Set()), []);
-  assert.deepEqual(describeCargoTargets(target, new Set(["desktop"])), [
+test("compiler artifacts preserve package and target identities", () => {
+  const messages = [
     {
-      identity: "bin:desktop-helper",
-      selection: ["--bin", "desktop-helper"],
+      executable: "/workspace/target/example",
+      package_id: "workspace-package",
+      profile: { test: true },
+      reason: "compiler-artifact",
+      target: {
+        kind: ["test"],
+        name: "lifecycle",
+        test: false,
+      },
     },
-  ]);
+    {
+      executable: "/workspace/target/ordinary-binary",
+      package_id: "workspace-package",
+      profile: { test: false },
+      reason: "compiler-artifact",
+      target: {
+        kind: ["bin"],
+        name: "helper",
+        test: true,
+      },
+    },
+  ]
+    .map((message) => JSON.stringify(message))
+    .join("\n");
+
+  assert.deepEqual(
+    parseCompilerArtifacts(messages, [
+      {
+        id: "workspace-package",
+        manifest_path: "/workspace/Cargo.toml",
+        name: "librarian-example",
+      },
+    ]),
+    [
+      {
+        executable: "/workspace/target/example",
+        targetIdentity: "librarian-example::test:lifecycle",
+        workingDirectory: "/workspace",
+      },
+    ],
+  );
+});
+
+test("workspace compilation preserves the exact tested feature graph", () => {
+  assert.deepEqual(
+    buildWorkspaceTestArguments("x86_64-pc-windows-msvc"),
+    [
+      "test",
+      "--workspace",
+      "--all-targets",
+      "--no-run",
+      "--locked",
+      "--message-format",
+      "json-render-diagnostics",
+      "--target",
+      "x86_64-pc-windows-msvc",
+    ],
+  );
+  assert.deepEqual(
+    buildWorkspaceDoctestArguments("x86_64-pc-windows-msvc"),
+    [
+      "test",
+      "--workspace",
+      "--doc",
+      "--locked",
+      "--target",
+      "x86_64-pc-windows-msvc",
+    ],
+  );
 });
 
 test("metadata receives the platform target exactly once", () => {
@@ -173,6 +244,7 @@ test("metadata receives the platform target exactly once", () => {
     [
       "metadata",
       "--locked",
+      "--no-deps",
       "--format-version",
       "1",
       "--filter-platform",
@@ -181,39 +253,42 @@ test("metadata receives the platform target exactly once", () => {
   );
 });
 
-test("target listing preserves resolved package features", () => {
-  assert.deepEqual(
-    buildTestArguments(
-      "librarian-example",
-      {
-        identity: "example:gated",
-        selection: ["--example", "gated"],
-      },
-      new Set(["zebra", "desktop"]),
-      "x86_64-pc-windows-msvc",
-    ),
-    [
-      "test",
-      "-p",
-      "librarian-example",
-      "--example",
-      "gated",
-      "--locked",
-      "--features",
-      "desktop,zebra",
-      "--target",
-      "x86_64-pc-windows-msvc",
-    ],
-  );
-});
-
 test(
-  "inventory propagates features activated by another workspace member",
+  "inventory preserves workspace dependency features and active targets",
   { timeout: 120_000 },
   () => {
-    assert.deepEqual(collectInventory({ cwd: featureWorkspace }), [
-      "feature-provider::example:gated::tests::resolved_feature_is_active::test:active",
-    ]);
+    const inventory = collectInventory({
+      cwd: featureWorkspace,
+      policyPath: featureWorkspacePolicy,
+    });
+    assert.deepEqual(
+      inventory.filter((entry) => !entry.includes("::doc:")),
+      [
+        "feature-observer::lib:feature_observer::tests::workspace_dependency_feature_is_unified::test:active",
+        "feature-provider::example:gated::tests::resolved_feature_is_active::test:active",
+      ],
+    );
+    const doctests = inventory.filter((entry) => entry.includes("::doc:"));
+    assert.equal(doctests.length, 1);
+    assert.match(
+      doctests[0],
+      /^feature-observer::doc:feature_observer::a\/src\/lib\.rs - workspace_feature_is_enabled \(line \d+\)::test:active$/u,
+    );
+  },
+);
+
+test(
+  "inactive harness-free policy targets fail closed",
+  { timeout: 120_000 },
+  () => {
+    assert.throws(
+      () =>
+        collectInventory({
+          cwd: featureWorkspace,
+          policyPath: inactiveHarnessPolicy,
+        }),
+      /Harness-free target policy entries do not match selected Cargo test artifacts/u,
+    );
   },
 );
 

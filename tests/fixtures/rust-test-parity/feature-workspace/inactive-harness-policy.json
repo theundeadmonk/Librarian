@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "harnessFreeTargets": [
+    "feature-observer::test:disabled"
+  ],
+  "platformOnlyTests": []
+}

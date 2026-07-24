@@ -1,7 +1,12 @@
 [package]
-name = "feature-consumer"
+name = "feature-observer"
 version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-feature-provider = { path = "../b", features = ["enabled"] }
+shared-feature = { path = "../c" }
+
+[[test]]
+name = "disabled"
+path = "tests/disabled.rs"
+test = false
