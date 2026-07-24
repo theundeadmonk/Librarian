@@ -111,6 +111,11 @@ impl VaultAgent {
         ensure_sidecars_absent(&staging_path).map_err(|()| CreateError::Failed)?;
         publish_staged_vault(&staging_path, &path)?;
         drop(cleanup);
+        if sync_parent_directory(&path).is_err() {
+            let _ = fs::remove_file(&path);
+            let _ = sync_parent_directory(&path);
+            return Err(CreateError::Failed);
+        }
 
         Ok((
             Self {
@@ -151,6 +156,15 @@ impl VaultAgent {
         password: MasterPassword,
         cancellation: &CancellationFlag,
     ) -> Result<(), UnlockError> {
+        self.unlock_with_before_publish(password, cancellation, || {})
+    }
+
+    fn unlock_with_before_publish(
+        &mut self,
+        password: MasterPassword,
+        cancellation: &CancellationFlag,
+        before_publish: impl FnOnce(),
+    ) -> Result<(), UnlockError> {
         self.lock();
         let (header, manifest) = read_empty_vault(&self.path).map_err(|()| UnlockError::Failed)?;
         let session = match unlock_empty_vault(password, &header, &manifest, cancellation) {
@@ -161,14 +175,22 @@ impl VaultAgent {
             Err(librarian_vault_core::UnlockError::Failed) => return Err(UnlockError::Failed),
         };
 
-        if !self.advance_authorization_epoch() {
-            return Err(UnlockError::Failed);
+        before_publish();
+        if cancellation.is_cancelled() {
+            return Err(UnlockError::Cancelled);
         }
         let Some(session_id) = next_session_id() else {
             return Err(UnlockError::Failed);
         };
+        if !self.advance_authorization_epoch() {
+            return Err(UnlockError::Failed);
+        }
         self.session = Some(session);
         self.session_id = Some(session_id);
+        if cancellation.is_cancelled() {
+            self.lock();
+            return Err(UnlockError::Cancelled);
+        }
         Ok(())
     }
 
@@ -254,13 +276,38 @@ fn reserve_staging_file(target: &Path) -> Result<PathBuf, CreateError> {
 
 fn publish_staged_vault(staging_path: &Path, target: &Path) -> Result<(), CreateError> {
     reject_symlinked_ancestors(target).map_err(|_| CreateError::Failed)?;
+    ensure_sidecars_absent(target).map_err(|()| CreateError::Failed)?;
     match fs::hard_link(staging_path, target) {
-        Ok(()) => Ok(()),
+        Ok(()) => {
+            if ensure_sidecars_absent(target).is_err() {
+                let _ = fs::remove_file(target);
+                return Err(CreateError::Failed);
+            }
+            Ok(())
+        }
         Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
             Err(CreateError::AlreadyExists)
         }
         Err(_) => Err(CreateError::Failed),
     }
+}
+
+#[cfg(windows)]
+fn sync_parent_directory(path: &Path) -> io::Result<()> {
+    use std::os::windows::fs::OpenOptionsExt;
+
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+
+    OpenOptions::new()
+        .write(true)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+        .open(parent_directory(path))?
+        .sync_all()
+}
+
+#[cfg(not(windows))]
+fn sync_parent_directory(path: &Path) -> io::Result<()> {
+    fs::File::open(parent_directory(path))?.sync_all()
 }
 
 fn initialize_database(path: &Path, header: &[u8], manifest: &[u8]) -> rusqlite::Result<()> {
@@ -352,14 +399,21 @@ fn read_empty_vault(path: &Path) -> Result<(Vec<u8>, Vec<u8>), ()> {
             |row| row.get(0),
         )
         .map_err(|_| ())?;
-    let record_count: i64 = connection
-        .query_row("SELECT COUNT(*) FROM encrypted_records", [], |row| {
-            row.get(0)
-        })
+    let (header_count, manifest_count, record_count): (i64, i64, i64) = connection
+        .query_row(
+            "SELECT
+                (SELECT COUNT(*) FROM vault_header),
+                (SELECT COUNT(*) FROM vault_manifest),
+                (SELECT COUNT(*) FROM encrypted_records)",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
         .map_err(|_| ())?;
 
     if header.len() > librarian_vault_format::MAX_HEADER_BYTES
         || manifest.len() > librarian_vault_format::MAX_MANIFEST_ENVELOPE_BYTES
+        || header_count != 1
+        || manifest_count != 1
         || record_count != 0
     {
         return Err(());
@@ -370,21 +424,23 @@ fn read_empty_vault(path: &Path) -> Result<(Vec<u8>, Vec<u8>), ()> {
 fn verify_application_schema(connection: &Connection) -> Result<(), ()> {
     let mut statement = connection
         .prepare(
-            "SELECT name FROM sqlite_schema
-             WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
-             ORDER BY name",
+            "SELECT type, name FROM sqlite_schema
+             WHERE name NOT LIKE 'sqlite_%'
+             ORDER BY type, name",
         )
         .map_err(|_| ())?;
-    let table_names = statement
-        .query_map([], |row| row.get::<_, String>(0))
+    let application_objects = statement
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
         .map_err(|_| ())?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|_| ())?;
-    if table_names
+    if application_objects
         != [
-            "encrypted_records".to_owned(),
-            "vault_header".to_owned(),
-            "vault_manifest".to_owned(),
+            ("table".to_owned(), "encrypted_records".to_owned()),
+            ("table".to_owned(), "vault_header".to_owned()),
+            ("table".to_owned(), "vault_manifest".to_owned()),
         ]
     {
         return Err(());
@@ -563,7 +619,7 @@ mod tests {
 
     use super::{
         CreateError, StagedVaultCleanup, UnlockError, VaultAgent, parent_directory,
-        reserve_staging_file, sqlite_sidecar, validate_new_target,
+        reserve_staging_file, sqlite_sidecar, sync_parent_directory, validate_new_target,
     };
 
     static TEST_DIRECTORY_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -697,6 +753,26 @@ mod tests {
     }
 
     #[test]
+    fn cancellation_after_core_unlock_does_not_publish_the_session() {
+        let directory = TestDirectory::new();
+        let path = directory.vault_path();
+        let mut agent = create_test_vault(&path, "late cancel password");
+        agent.lock();
+        let cancellation = CancellationFlag::new();
+
+        assert_eq!(
+            agent.unlock_with_before_publish(
+                password("late cancel password"),
+                &cancellation,
+                || cancellation.cancel()
+            ),
+            Err(UnlockError::Cancelled)
+        );
+        assert!(!agent.is_unlocked());
+        assert!(agent.begin_operation().is_none());
+    }
+
+    #[test]
     fn truncated_database_fails_closed() {
         let directory = TestDirectory::new();
         let path = directory.vault_path();
@@ -740,6 +816,75 @@ mod tests {
     }
 
     #[test]
+    fn unexpected_views_and_triggers_fail_closed() {
+        let directory = TestDirectory::new();
+        let path = directory.vault_path();
+        let agent = create_test_vault(&path, "schema object password");
+        drop(agent);
+
+        let connection = Connection::open(&path).expect("test database must open");
+        connection
+            .execute_batch(
+                "CREATE VIEW unexpected_view AS SELECT header FROM vault_header;
+                 CREATE TRIGGER unexpected_trigger
+                 AFTER INSERT ON encrypted_records
+                 BEGIN
+                     SELECT 1;
+                 END;",
+            )
+            .expect("test must add unexpected schema objects");
+        drop(connection);
+
+        let mut restarted = VaultAgent::open_locked(&path);
+        assert_eq!(
+            restarted.unlock(password("schema object password"), &CancellationFlag::new()),
+            Err(UnlockError::Failed)
+        );
+        assert!(!restarted.is_unlocked());
+    }
+
+    #[test]
+    fn extra_singleton_rows_fail_closed() {
+        let directory = TestDirectory::new();
+        let path = directory.vault_path();
+        let agent = create_test_vault(&path, "singleton password");
+        drop(agent);
+
+        let connection = Connection::open(&path).expect("test database must open");
+        connection
+            .execute_batch(
+                "PRAGMA ignore_check_constraints = ON;
+                 INSERT INTO vault_header(singleton, header)
+                 SELECT 2, header FROM vault_header WHERE singleton = 1;",
+            )
+            .expect("test must add an extra header row");
+        drop(connection);
+
+        let mut restarted = VaultAgent::open_locked(&path);
+        assert_eq!(
+            restarted.unlock(password("singleton password"), &CancellationFlag::new()),
+            Err(UnlockError::Failed)
+        );
+
+        let connection = Connection::open(&path).expect("test database must reopen");
+        connection
+            .execute_batch(
+                "PRAGMA ignore_check_constraints = ON;
+                 DELETE FROM vault_header WHERE singleton = 2;
+                 INSERT INTO vault_manifest(singleton, envelope)
+                 SELECT 2, envelope FROM vault_manifest WHERE singleton = 1;",
+            )
+            .expect("test must replace the extra row with an extra manifest row");
+        drop(connection);
+
+        assert_eq!(
+            restarted.unlock(password("singleton password"), &CancellationFlag::new()),
+            Err(UnlockError::Failed)
+        );
+        assert!(!restarted.is_unlocked());
+    }
+
+    #[test]
     fn creation_never_overwrites_an_existing_file() {
         let directory = TestDirectory::new();
         let path = directory.vault_path();
@@ -751,6 +896,33 @@ mod tests {
             fs::read(&path).expect("fixture must remain readable"),
             b"existing data"
         );
+    }
+
+    #[test]
+    fn creation_rejects_final_path_sidecars() {
+        let directory = TestDirectory::new();
+        let path = directory.vault_path();
+        let wal_path = sqlite_sidecar(&path, "-wal");
+        fs::write(&wal_path, b"stale wal").expect("WAL fixture must be written");
+
+        assert!(matches!(
+            VaultAgent::create(&path, password("sidecar create password")),
+            Err(CreateError::Failed)
+        ));
+        assert!(!path.exists());
+        assert_eq!(
+            fs::read(&wal_path).expect("WAL fixture must remain"),
+            b"stale wal"
+        );
+
+        fs::remove_file(&wal_path).expect("WAL fixture must be removed");
+        let shm_path = sqlite_sidecar(&path, "-shm");
+        fs::write(&shm_path, b"stale shm").expect("SHM fixture must be written");
+        assert!(matches!(
+            VaultAgent::create(&path, password("sidecar create password")),
+            Err(CreateError::Failed)
+        ));
+        assert!(!path.exists());
     }
 
     #[test]
@@ -776,6 +948,13 @@ mod tests {
     #[test]
     fn bare_relative_vault_paths_use_the_current_directory_as_parent() {
         assert_eq!(parent_directory(Path::new("vault.sqlite3")), Path::new("."));
+    }
+
+    #[test]
+    fn parent_directory_durability_barrier_succeeds() {
+        let directory = TestDirectory::new();
+        sync_parent_directory(&directory.vault_path())
+            .expect("parent directory must support a durability barrier");
     }
 
     #[test]
