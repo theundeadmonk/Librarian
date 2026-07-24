@@ -1,8 +1,9 @@
 //! `SQLite` ownership and lock-state lifecycle for the trusted local vault agent.
 //!
 //! This is not an IPC server yet. Issue #13 will expose a constrained protocol;
-//! for issue #10, this crate proves that only the agent opens the vault file and
-//! that a restart begins locked.
+//! for the code slice tracked by issue #10, this crate proves that only the
+//! agent opens the vault file and that a restart begins locked. Issue #10
+//! remains open until its slowest-supported-Windows benchmark gate is met.
 
 #![forbid(unsafe_code)]
 
@@ -18,9 +19,13 @@ use std::{
 use librarian_vault_core::{
     CancellationFlag, MasterPassword, RecoveryKey, UnlockedVault, create_vault, unlock_empty_vault,
 };
-use rusqlite::{
-    Connection, OpenFlags, TransactionBehavior, config::DbConfig, limits::Limit, params,
-};
+#[cfg(unix)]
+use rusqlite::MAIN_DB;
+#[cfg(not(unix))]
+use rusqlite::OpenFlags;
+use rusqlite::{Connection, TransactionBehavior, config::DbConfig, limits::Limit, params};
+#[cfg(unix)]
+use std::io::{Read, Seek, SeekFrom, Write};
 
 const MAX_SQLITE_VALUE_BYTES: i32 = 8 * 1024 * 1024;
 const MAX_PAGE_COUNT: u32 = 131_072;
@@ -119,7 +124,7 @@ impl VaultAgent {
         let (header, manifest, recovery_key, session) = created.into_parts();
         let session_id = next_session_id().ok_or(CreateError::Failed)?;
 
-        initialize_database(staging.path(), &header, &manifest).map_err(|_| CreateError::Failed)?;
+        initialize_database(&mut staging, &header, &manifest).map_err(|_| CreateError::Failed)?;
         ensure_sidecars_absent(staging.path()).map_err(|()| CreateError::Failed)?;
         publish_staged_vault(&mut staging, &path)?;
         if staging.remove_name().is_err() {
@@ -296,10 +301,20 @@ fn reserve_staging_file(target: &Path) -> Result<StagedVault, CreateError> {
 fn publish_staged_vault(staging: &mut StagedVault, target: &Path) -> Result<(), CreateError> {
     reject_reparse_ancestors(target).map_err(|_| CreateError::Failed)?;
     ensure_sidecars_absent(target).map_err(|()| CreateError::Failed)?;
+    let reservation = staging
+        .try_clone_reservation()
+        .map_err(|_| CreateError::Failed)?;
+    guarded_file_matches_path(&reservation, staging.path()).map_err(|()| CreateError::Failed)?;
     match fs::hard_link(staging.path(), target) {
         Ok(()) => {
             let published_guard = open_regular_file_guard(target, true, false);
-            if published_guard.is_err() || ensure_sidecars_absent(target).is_err() {
+            #[cfg(unix)]
+            let publication_is_valid = published_guard
+                .as_ref()
+                .is_ok_and(|published| guarded_files_match(&reservation, published).is_ok());
+            #[cfg(not(unix))]
+            let publication_is_valid = published_guard.is_ok();
+            if !publication_is_valid || ensure_sidecars_absent(target).is_err() {
                 drop(published_guard);
                 staging.release_reservation();
                 let _ = fs::remove_file(target);
@@ -330,15 +345,64 @@ fn sync_parent_directory(path: &Path) -> io::Result<()> {
     fs::File::open(parent_directory(path))?.sync_all()
 }
 
-fn initialize_database(path: &Path, header: &[u8], manifest: &[u8]) -> rusqlite::Result<()> {
+#[cfg(not(unix))]
+fn initialize_database(
+    staging: &mut StagedVault,
+    header: &[u8],
+    manifest: &[u8],
+) -> rusqlite::Result<()> {
+    let path = staging.path();
     let mut connection = Connection::open_with_flags(
         path,
         OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )?;
-    configure_limits(&connection)?;
+    initialize_connection(&mut connection, header, manifest, true)?;
+    connection.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
+    drop(connection);
+
+    OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+        .and_then(|file| file.sync_all())
+        .map_err(|_| rusqlite::Error::InvalidQuery)?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn initialize_database(
+    staging: &mut StagedVault,
+    header: &[u8],
+    manifest: &[u8],
+) -> rusqlite::Result<()> {
+    let mut connection = Connection::open_in_memory()?;
+    initialize_connection(&mut connection, header, manifest, false)?;
+    let image = connection.serialize(MAIN_DB)?;
+    let reservation = staging
+        .reservation
+        .as_mut()
+        .ok_or(rusqlite::Error::InvalidQuery)?;
+    reservation
+        .seek(SeekFrom::Start(0))
+        .and_then(|_| reservation.write_all(&image))
+        .and_then(|()| reservation.set_len(u64::try_from(image.len()).map_err(io::Error::other)?))
+        .and_then(|()| reservation.sync_all())
+        .map_err(|_| rusqlite::Error::InvalidQuery)?;
+    Ok(())
+}
+
+fn initialize_connection(
+    connection: &mut Connection,
+    header: &[u8],
+    manifest: &[u8],
+    use_wal: bool,
+) -> rusqlite::Result<()> {
+    configure_limits(connection)?;
     connection.set_db_config(DbConfig::SQLITE_DBCONFIG_DEFENSIVE, true)?;
     connection.pragma_update(None, "page_size", 4096)?;
-    connection.pragma_update(None, "journal_mode", "WAL")?;
+    if use_wal {
+        connection.pragma_update(None, "journal_mode", "WAL")?;
+    }
     connection.pragma_update(None, "synchronous", "FULL")?;
     connection.pragma_update(None, "foreign_keys", true)?;
     connection.pragma_update(None, "trusted_schema", false)?;
@@ -372,28 +436,25 @@ fn initialize_database(path: &Path, header: &[u8], manifest: &[u8]) -> rusqlite:
         params![manifest],
     )?;
     transaction.commit()?;
-    connection.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
-    drop(connection);
-
-    OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(path)
-        .and_then(|file| file.sync_all())
-        .map_err(|_| rusqlite::Error::InvalidQuery)?;
     Ok(())
 }
 
 fn read_empty_vault(path: &Path) -> Result<(Vec<u8>, Vec<u8>), ()> {
+    read_empty_vault_with_connection_hooks(path, || {}, || {})
+}
+
+fn read_empty_vault_with_connection_hooks(
+    path: &Path,
+    before_connection: impl FnOnce(),
+    after_connection: impl FnOnce(),
+) -> Result<(Vec<u8>, Vec<u8>), ()> {
     let mut input_guards = acquire_sqlite_input_guards(path)?;
     validate_guarded_sqlite_input_sizes(&input_guards)?;
     validate_guarded_sqlite_input_paths(path, &input_guards)?;
 
-    let connection = Connection::open_with_flags(
-        path,
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )
-    .map_err(|_| ())?;
+    before_connection();
+    let connection = open_guarded_read_connection(path, &mut input_guards)?;
+    after_connection();
     configure_limits(&connection).map_err(|_| ())?;
     connection
         .set_db_config(DbConfig::SQLITE_DBCONFIG_DEFENSIVE, true)
@@ -451,6 +512,45 @@ fn read_empty_vault(path: &Path) -> Result<(Vec<u8>, Vec<u8>), ()> {
     )?;
     validate_guarded_sqlite_input_paths(path, &input_guards)?;
     Ok((header, manifest))
+}
+
+#[cfg(unix)]
+fn open_guarded_read_connection(
+    _path: &Path,
+    input_guards: &mut SqliteInputGuards,
+) -> Result<Connection, ()> {
+    if input_guards.wal.is_some() || input_guards.shm.is_some() {
+        return Err(());
+    }
+    let database_bytes = input_guards.database.metadata().map_err(|_| ())?.len();
+    let database_bytes = usize::try_from(database_bytes).map_err(|_| ())?;
+    input_guards
+        .database
+        .seek(SeekFrom::Start(0))
+        .map_err(|_| ())?;
+    let mut connection = Connection::open_in_memory().map_err(|_| ())?;
+    connection
+        .deserialize_read_exact(
+            MAIN_DB,
+            Read::by_ref(&mut input_guards.database)
+                .take(u64::try_from(database_bytes).map_err(|_| ())?),
+            database_bytes,
+            true,
+        )
+        .map_err(|_| ())?;
+    Ok(connection)
+}
+
+#[cfg(not(unix))]
+fn open_guarded_read_connection(
+    path: &Path,
+    _input_guards: &mut SqliteInputGuards,
+) -> Result<Connection, ()> {
+    Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(|_| ())
 }
 
 fn verify_application_schema(connection: &Connection) -> Result<(), ()> {
@@ -632,6 +732,19 @@ fn guarded_optional_file_matches_path(file: Option<&File>, path: &Path) -> Resul
 }
 
 #[cfg(unix)]
+fn guarded_files_match(left: &File, right: &File) -> Result<(), ()> {
+    use std::os::unix::fs::MetadataExt;
+
+    let left = left.metadata().map_err(|_| ())?;
+    let right = right.metadata().map_err(|_| ())?;
+    if !left.is_file() || !right.is_file() || left.dev() != right.dev() || left.ino() != right.ino()
+    {
+        return Err(());
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
 fn guarded_file_matches_path(file: &File, path: &Path) -> Result<(), ()> {
     use std::os::unix::fs::MetadataExt;
 
@@ -754,7 +867,19 @@ fn create_staging_reservation(path: &Path) -> io::Result<File> {
         .open(path)
 }
 
-#[cfg(not(windows))]
+#[cfg(unix)]
+fn create_staging_reservation(path: &Path) -> io::Result<File> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)
+}
+
+#[cfg(not(any(unix, windows)))]
 fn create_staging_reservation(path: &Path) -> io::Result<File> {
     OpenOptions::new()
         .read(true)
@@ -888,6 +1013,13 @@ impl StagedVault {
         drop(self.reservation.take());
     }
 
+    fn try_clone_reservation(&self) -> io::Result<File> {
+        self.reservation
+            .as_ref()
+            .ok_or_else(|| io::Error::other("staging reservation is not live"))?
+            .try_clone()
+    }
+
     fn remove_name(&mut self) -> io::Result<()> {
         self.release_reservation();
         fs::remove_file(&self.path)
@@ -918,11 +1050,20 @@ mod tests {
     };
 
     use librarian_vault_core::{CancellationFlag, MasterPassword};
-    use rusqlite::{Connection, OpenFlags};
+    use rusqlite::Connection;
+    #[cfg(windows)]
+    use rusqlite::OpenFlags;
 
+    #[cfg(windows)]
+    use super::acquire_sqlite_input_guards;
     use super::{
-        CreateError, UnlockError, VaultAgent, acquire_sqlite_input_guards, parent_directory,
-        reserve_staging_file, sqlite_sidecar, sync_parent_directory, validate_new_target,
+        CreateError, UnlockError, VaultAgent, parent_directory, reserve_staging_file,
+        sqlite_sidecar, sync_parent_directory, validate_new_target,
+    };
+    #[cfg(unix)]
+    use super::{
+        initialize_database, publish_staged_vault, read_empty_vault,
+        read_empty_vault_with_connection_hooks,
     };
 
     static TEST_DIRECTORY_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -1290,6 +1431,65 @@ mod tests {
         assert!(replacement.exists());
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn initialization_writes_only_to_the_reserved_staging_inode() {
+        use std::io::{Read, Seek, SeekFrom};
+
+        let directory = TestDirectory::new();
+        let target = directory.vault_path();
+        let mut staging =
+            reserve_staging_file(&target).expect("staging file must be reserved atomically");
+        let mut reserved = staging
+            .reservation
+            .as_ref()
+            .expect("reservation must remain live")
+            .try_clone()
+            .expect("reservation must be clonable");
+
+        fs::remove_file(staging.path()).expect("Unix permits unlinking a live reservation");
+        fs::write(staging.path(), b"attacker replacement")
+            .expect("replacement staging name must be created");
+        initialize_database(&mut staging, b"header", b"manifest")
+            .expect("initialization through the reserved descriptor must succeed");
+
+        assert_eq!(
+            fs::read(staging.path()).expect("replacement must remain readable"),
+            b"attacker replacement"
+        );
+        reserved
+            .seek(SeekFrom::Start(0))
+            .expect("reserved descriptor must rewind");
+        let mut signature = [0_u8; 16];
+        reserved
+            .read_exact(&mut signature)
+            .expect("reserved inode must contain a SQLite image");
+        assert_eq!(&signature, b"SQLite format 3\0");
+        assert!(
+            publish_staged_vault(&mut staging, &target).is_err(),
+            "a replaced staging pathname must never be published"
+        );
+        assert!(!target.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn created_vault_is_owner_read_write_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = TestDirectory::new();
+        let path = directory.vault_path();
+        let agent = create_test_vault(&path, "permission password");
+        drop(agent);
+
+        let mode = fs::metadata(&path)
+            .expect("created vault metadata must be readable")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600);
+    }
+
     #[test]
     fn bare_relative_vault_paths_use_the_current_directory_as_parent() {
         assert_eq!(parent_directory(Path::new("vault.sqlite3")), Path::new("."));
@@ -1366,6 +1566,35 @@ mod tests {
         drop(input_guards);
         assert!(path.exists());
         assert!(replacement.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sqlite_snapshot_is_bound_to_the_guarded_inode_during_path_replacement() {
+        let directory = TestDirectory::new();
+        let path = directory.vault_path();
+        let replacement = directory.0.join("replacement.sqlite3");
+        let parked = directory.0.join("parked.sqlite3");
+        let original = create_test_vault(&path, "original password");
+        let alternate = create_test_vault(&replacement, "replacement password");
+        drop(original);
+        drop(alternate);
+        let expected = read_empty_vault(&path).expect("original vault must be readable");
+
+        let actual = read_empty_vault_with_connection_hooks(
+            &path,
+            || {
+                fs::rename(&path, &parked).expect("original path must be parked");
+                fs::rename(&replacement, &path).expect("replacement must take the vault path");
+            },
+            || {
+                fs::rename(&path, &replacement).expect("replacement must be moved back");
+                fs::rename(&parked, &path).expect("original path must be restored");
+            },
+        )
+        .expect("the guarded original inode must remain the SQLite input");
+
+        assert_eq!(actual, expected);
     }
 
     #[cfg(any(unix, windows))]

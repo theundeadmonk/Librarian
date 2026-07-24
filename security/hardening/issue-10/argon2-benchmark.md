@@ -1,7 +1,7 @@
 # Argon2id Version 1 Development Benchmark
 
 **Date:** 2026-07-23
-**Status:** Development-machine evidence; slowest-supported-baseline run still required
+**Status:** Non-acceptance development evidence; slowest-supported-baseline run still required
 
 ## Profile
 
@@ -49,7 +49,8 @@ cargo test -p librarian-vault-core `
 
 This machine is substantially faster than a reasonable minimum Windows 11
 baseline. The result proves that the exact profile is wired and measurable; it
-does not establish the final product latency budget. Repeat the same harness on
-the slowest supported Windows 11 hardware after that baseline and budget are
-defined. Do not weaken the profile as a fallback. `FormatReadiness` remains
-`ScaffoldOnly`.
+does not establish the final product latency budget and must not be used to
+close or claim satisfaction of issue #10. Issue #10 remains open. Repeat the
+same harness on the slowest supported Windows 11 hardware after that baseline
+and budget are defined. Do not weaken the profile as a fallback.
+`FormatReadiness` remains `ScaffoldOnly`.
