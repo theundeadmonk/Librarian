@@ -9,6 +9,8 @@ repository.workspace = true
 
 [dependencies]
 librarian-vault-core = { path = "../vault-core" }
+librarian-vault-format = { path = "../vault-format" }
+rusqlite = { version = "=0.40.1", default-features = false, features = ["backup", "bundled", "limits"] }
 
 [lints]
 workspace = true
