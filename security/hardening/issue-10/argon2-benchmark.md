@@ -1,6 +1,6 @@
 # Argon2id Version 1 Development Benchmark
 
-**Date:** 2026-07-23  
+**Date:** 2026-07-23
 **Status:** Development-machine evidence; slowest-supported-baseline run still required
 
 ## Profile
