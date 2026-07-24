@@ -122,6 +122,7 @@ Invoke-CheckedProcess `
     -Arguments @(
         "test",
         "--workspace",
+        "--all-targets",
         "--locked",
         "--target",
         "x86_64-pc-windows-msvc"

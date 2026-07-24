@@ -13,10 +13,10 @@ const emptyPolicy = {
   platformOnlyTests: [],
 };
 
-test("parseTestList qualifies tests and ignores the harness summary", () => {
+test("parseTestList preserves target, type, and ignored status", () => {
   assert.deepEqual(
     parseTestList(
-      "librarian-example",
+      "librarian-example::lib:librarian_example",
       [
         "tests::alpha: test",
         "tests::manual_benchmark: benchmark",
@@ -24,10 +24,11 @@ test("parseTestList qualifies tests and ignores the harness summary", () => {
         "1 test, 1 benchmark",
         "",
       ].join("\n"),
+      "tests::manual_benchmark: benchmark\n",
     ),
     [
-      "librarian-example::tests::alpha",
-      "librarian-example::tests::manual_benchmark",
+      "librarian-example::lib:librarian_example::tests::alpha::test:active",
+      "librarian-example::lib:librarian_example::tests::manual_benchmark::benchmark:ignored",
     ],
   );
 });
@@ -35,7 +36,52 @@ test("parseTestList qualifies tests and ignores the harness summary", () => {
 test("parseTestList rejects output it cannot classify", () => {
   assert.throws(
     () => parseTestList("librarian-example", "unrecognized output"),
-    /Unexpected cargo test-list output/u,
+    /Unexpected librarian-example test-list output/u,
+  );
+});
+
+test("parseTestList rejects ignored tests absent from the complete list", () => {
+  assert.throws(
+    () =>
+      parseTestList(
+        "librarian-example::lib:librarian_example",
+        "tests::active: test\n",
+        "tests::missing: test\n",
+      ),
+    /ignored-test-list contains a test absent from the complete list/u,
+  );
+});
+
+test("the same test name remains distinct across Cargo targets", () => {
+  const libraryTests = parseTestList(
+    "librarian-example::lib:librarian_example",
+    "tests::same_name: test\n",
+  );
+  const integrationTests = parseTestList(
+    "librarian-example::test:lifecycle",
+    "tests::same_name: test\n",
+  );
+
+  assert.notEqual(libraryTests[0], integrationTests[0]);
+  assert.doesNotThrow(() =>
+    encodeInventory([...libraryTests, ...integrationTests]),
+  );
+});
+
+test("active versus ignored status creates a parity difference", () => {
+  const windowsTests = parseTestList(
+    "librarian-example::lib:librarian_example",
+    "tests::portable: test\n",
+    "tests::portable: test\n",
+  );
+  const linuxTests = parseTestList(
+    "librarian-example::lib:librarian_example",
+    "tests::portable: test\n",
+  );
+
+  assert.throws(
+    () => compareInventories(windowsTests, linuxTests, emptyPolicy),
+    /unexpectedly run only on Windows[\s\S]*unexpectedly run only on Linux/u,
   );
 });
 

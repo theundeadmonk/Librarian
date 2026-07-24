@@ -50,8 +50,7 @@ function normalizeInventory(inventory, label) {
   return [...unique].sort(compareText);
 }
 
-export function parseTestList(packageName, output) {
-  const qualifiedPackage = requireNonEmptyString(packageName, "Package name");
+function parseHarnessList(output, label) {
   const tests = [];
 
   for (const rawLine of output.split(/\r?\n/u)) {
@@ -62,15 +61,55 @@ export function parseTestList(packageName, output) {
 
     const match = line.match(testPattern);
     if (match === null || match[1].length === 0) {
-      throw new Error(
-        `Unexpected cargo test-list output for ${qualifiedPackage}: ${line}`,
-      );
+      throw new Error(`Unexpected ${label} output: ${line}`);
     }
 
-    tests.push(`${qualifiedPackage}::${match[1]}`);
+    tests.push({
+      name: match[1],
+      type: match[2],
+    });
   }
 
-  return normalizeInventory(tests, `Test list for ${qualifiedPackage}`);
+  const keys = tests.map((test) => `${test.name}\0${test.type}`);
+  if (new Set(keys).size !== keys.length) {
+    throw new Error(`${label} contains duplicate test identities.`);
+  }
+
+  return tests.sort((left, right) =>
+    compareText(`${left.name}\0${left.type}`, `${right.name}\0${right.type}`),
+  );
+}
+
+export function parseTestList(targetIdentity, output, ignoredOutput = "") {
+  const qualifiedTarget = requireNonEmptyString(
+    targetIdentity,
+    "Cargo target identity",
+  );
+  const listedTests = parseHarnessList(output, `${qualifiedTarget} test-list`);
+  const ignoredTests = parseHarnessList(
+    ignoredOutput,
+    `${qualifiedTarget} ignored-test-list`,
+  );
+  const listedKeys = new Set(
+    listedTests.map((test) => `${test.name}\0${test.type}`),
+  );
+  const ignoredKeys = new Set(
+    ignoredTests.map((test) => `${test.name}\0${test.type}`),
+  );
+
+  for (const ignoredKey of ignoredKeys) {
+    if (!listedKeys.has(ignoredKey)) {
+      throw new Error(
+        `${qualifiedTarget} ignored-test-list contains a test absent from the complete list.`,
+      );
+    }
+  }
+
+  return listedTests.map((test) => {
+    const key = `${test.name}\0${test.type}`;
+    const status = ignoredKeys.has(key) ? "ignored" : "active";
+    return `${qualifiedTarget}::${test.name}::${test.type}:${status}`;
+  });
 }
 
 function runCargo(arguments_, { cargo, cwd }) {
@@ -101,10 +140,67 @@ function runCargo(arguments_, { cargo, cwd }) {
   return result.stdout;
 }
 
+function describeCargoTarget(target) {
+  const name = requireNonEmptyString(target.name, "Cargo target name");
+  if (!Array.isArray(target.kind) || target.kind.length === 0) {
+    throw new Error(`Cargo target ${name} has no target kind.`);
+  }
+
+  const kinds = new Set(target.kind);
+  if (kinds.has("custom-build")) {
+    return null;
+  }
+
+  const libraryKinds = [
+    "cdylib",
+    "dylib",
+    "lib",
+    "proc-macro",
+    "rlib",
+    "staticlib",
+  ];
+  const selections = [
+    {
+      matches: libraryKinds.some((kind) => kinds.has(kind)),
+      identity: `lib:${name}`,
+      selection: ["--lib"],
+    },
+    {
+      matches: kinds.has("bin"),
+      identity: `bin:${name}`,
+      selection: ["--bin", name],
+    },
+    {
+      matches: kinds.has("test"),
+      identity: `test:${name}`,
+      selection: ["--test", name],
+    },
+    {
+      matches: kinds.has("example"),
+      identity: `example:${name}`,
+      selection: ["--example", name],
+    },
+    {
+      matches: kinds.has("bench"),
+      identity: `bench:${name}`,
+      selection: ["--bench", name],
+    },
+  ].filter((selection) => selection.matches);
+
+  if (selections.length !== 1) {
+    throw new Error(
+      `Cargo target ${name} has unsupported or ambiguous kinds: ${target.kind.join(", ")}`,
+    );
+  }
+
+  const [{ identity, selection }] = selections;
+  return { identity, selection };
+}
+
 export function collectInventory({
   cargo = process.env.CARGO ?? "cargo",
   cwd = repositoryRoot,
-  target,
+  target: rustTarget,
 } = {}) {
   const metadata = JSON.parse(
     runCargo(
@@ -115,26 +211,47 @@ export function collectInventory({
   const workspaceMembers = new Set(metadata.workspace_members);
   const packages = metadata.packages
     .filter((package_) => workspaceMembers.has(package_.id))
-    .map((package_) => package_.name)
-    .sort(compareText);
+    .sort((left, right) => compareText(left.name, right.name));
   const inventory = [];
 
-  for (const packageName of packages) {
-    const arguments_ = [
-      "test",
-      "-p",
-      packageName,
-      "--all-targets",
-      "--locked",
-    ];
+  for (const package_ of packages) {
+    const targets = package_.targets
+      .map(describeCargoTarget)
+      .filter((target) => target !== null)
+      .sort((left, right) => compareText(left.identity, right.identity));
 
-    if (target !== undefined) {
-      arguments_.push("--target", requireNonEmptyString(target, "Rust target"));
+    for (const cargoTarget of targets) {
+      const arguments_ = [
+        "test",
+        "-p",
+        package_.name,
+        ...cargoTarget.selection,
+        "--locked",
+      ];
+
+      if (rustTarget !== undefined) {
+        arguments_.push(
+          "--target",
+          requireNonEmptyString(rustTarget, "Rust target"),
+        );
+      }
+
+      const output = runCargo(
+        [...arguments_, "--", "--list", "--format", "terse"],
+        { cargo, cwd },
+      );
+      const ignoredOutput = runCargo(
+        [...arguments_, "--", "--ignored", "--list", "--format", "terse"],
+        { cargo, cwd },
+      );
+      inventory.push(
+        ...parseTestList(
+          `${package_.name}::${cargoTarget.identity}`,
+          output,
+          ignoredOutput,
+        ),
+      );
     }
-
-    arguments_.push("--", "--list", "--format", "terse");
-    const output = runCargo(arguments_, { cargo, cwd });
-    inventory.push(...parseTestList(packageName, output));
   }
 
   return normalizeInventory(inventory, "Rust test inventory");

@@ -55,13 +55,14 @@ filesystem behavior. CI also formats, lints, and tests every Rust workspace
 target on Linux. This second platform catches accidental portability gaps in
 the security core; it does not make Linux a supported Librarian product.
 
-After both jobs pass, CI compares their package-qualified Rust test names. All
-platform-neutral tests must appear on both systems. An intentional
+After both jobs pass, CI compares each Rust test's package, Cargo target,
+harness type, name, and active or ignored status. All platform-neutral tests
+must appear and execute under the same status on both systems. An intentional
 operating-system-specific test must be listed in
 `tests/rust-test-parity.json` with a concrete rationale. The comparison fails
 for an undocumented difference and for a stale policy entry, so removing,
-renaming, or accidentally excluding a Windows-only test is also visible.
-Aggregate test counts are not used as a substitute for test identity.
+renaming, ignoring, or accidentally excluding a Windows-only test is also
+visible. Aggregate test counts are not used as a substitute for test identity.
 
 The foundation now includes the empty-vault lifecycle, encrypted key hierarchy,
 master-password unlock, and guarded local SQLite ownership described by issue
