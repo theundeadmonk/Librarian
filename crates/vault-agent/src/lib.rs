@@ -170,7 +170,22 @@ impl VaultAgent {
             let _ = sync_parent_directory_with_ancestor_guards(&path, staging.ancestor_guards());
             return Err(CreateError::Failed);
         }
-        drop(sealed_guard);
+        let _verified_snapshot =
+            match verify_published_vault(&sealed_guard, &path, &header, &manifest) {
+                Ok(snapshot) => snapshot,
+                Err(error) => {
+                    remove_target_if_guarded_matches(
+                        &sealed_guard,
+                        &path,
+                        staging.ancestor_guards(),
+                    );
+                    let _ = sync_parent_directory_with_ancestor_guards(
+                        &path,
+                        staging.ancestor_guards(),
+                    );
+                    return Err(error);
+                }
+            };
 
         Ok((
             Self {
@@ -224,8 +239,14 @@ impl VaultAgent {
         if cancellation.is_cancelled() {
             return Err(UnlockError::Cancelled);
         }
-        let (header, manifest) = read_empty_vault(&self.path).map_err(|()| UnlockError::Failed)?;
-        let session = match unlock_empty_vault(password, &header, &manifest, cancellation) {
+        let mut snapshot =
+            read_guarded_empty_vault(&self.path).map_err(|()| UnlockError::Failed)?;
+        let session = match unlock_empty_vault(
+            password,
+            &snapshot.header,
+            &snapshot.manifest,
+            cancellation,
+        ) {
             Ok(session) => session,
             Err(librarian_vault_core::UnlockError::Cancelled) => {
                 return Err(UnlockError::Cancelled);
@@ -236,6 +257,12 @@ impl VaultAgent {
         before_publish();
         if cancellation.is_cancelled() {
             return Err(UnlockError::Cancelled);
+        }
+        let (current_header, current_manifest) =
+            read_empty_vault_from_guards(&self.path, &mut snapshot.input_guards, || {}, || {})
+                .map_err(|()| UnlockError::Failed)?;
+        if current_header != snapshot.header || current_manifest != snapshot.manifest {
+            return Err(UnlockError::Failed);
         }
         let Some(session_id) = next_session_id() else {
             return Err(UnlockError::Failed);
@@ -405,13 +432,27 @@ fn seal_published_vault_with_ancestor_guards(
     target: &Path,
     ancestor_guards: &AncestorGuards,
 ) -> Result<File, CreateError> {
-    let sealed =
-        open_regular_file_guard_with_ancestor_guards(ancestor_guards, target, false, false)
-            .map_err(|_| CreateError::Failed)?;
+    let sealed = open_regular_file_guard_with_ancestor_guards(ancestor_guards, target, false, true)
+        .map_err(|_| CreateError::Failed)?;
     guarded_files_match(published, &sealed).map_err(|()| CreateError::Failed)?;
     ensure_sidecars_absent_with_ancestor_guards(ancestor_guards, target)
         .map_err(|()| CreateError::Failed)?;
     Ok(sealed)
+}
+
+fn verify_published_vault(
+    published: &File,
+    target: &Path,
+    expected_header: &[u8],
+    expected_manifest: &[u8],
+) -> Result<GuardedEmptyVault, CreateError> {
+    let snapshot = read_guarded_empty_vault(target).map_err(|()| CreateError::Failed)?;
+    guarded_files_match(published, &snapshot.input_guards.database)
+        .map_err(|()| CreateError::Failed)?;
+    if snapshot.header != expected_header || snapshot.manifest != expected_manifest {
+        return Err(CreateError::Failed);
+    }
+    Ok(snapshot)
 }
 
 fn remove_target_if_guarded_matches(
@@ -558,8 +599,20 @@ fn initialize_connection(
     Ok(())
 }
 
+struct GuardedEmptyVault {
+    header: Vec<u8>,
+    manifest: Vec<u8>,
+    input_guards: SqliteInputGuards,
+}
+
+fn read_guarded_empty_vault(path: &Path) -> Result<GuardedEmptyVault, ()> {
+    read_guarded_empty_vault_with_hooks(path, || {}, || {}, || {})
+}
+
+#[cfg(all(test, unix))]
 fn read_empty_vault(path: &Path) -> Result<(Vec<u8>, Vec<u8>), ()> {
-    read_empty_vault_with_hooks(path, || {}, || {}, || {})
+    let snapshot = read_guarded_empty_vault(path)?;
+    Ok((snapshot.header, snapshot.manifest))
 }
 
 #[cfg(all(test, unix))]
@@ -568,22 +621,55 @@ fn read_empty_vault_with_connection_hooks(
     before_connection: impl FnOnce(),
     after_connection: impl FnOnce(),
 ) -> Result<(Vec<u8>, Vec<u8>), ()> {
-    read_empty_vault_with_hooks(path, || {}, before_connection, after_connection)
+    let snapshot =
+        read_guarded_empty_vault_with_hooks(path, || {}, before_connection, after_connection)?;
+    Ok((snapshot.header, snapshot.manifest))
 }
 
+#[cfg(all(test, unix))]
 fn read_empty_vault_with_hooks(
     path: &Path,
     after_ancestor_guards: impl FnOnce(),
     before_connection: impl FnOnce(),
     after_connection: impl FnOnce(),
 ) -> Result<(Vec<u8>, Vec<u8>), ()> {
+    let snapshot = read_guarded_empty_vault_with_hooks(
+        path,
+        after_ancestor_guards,
+        before_connection,
+        after_connection,
+    )?;
+    Ok((snapshot.header, snapshot.manifest))
+}
+
+fn read_guarded_empty_vault_with_hooks(
+    path: &Path,
+    after_ancestor_guards: impl FnOnce(),
+    before_connection: impl FnOnce(),
+    after_connection: impl FnOnce(),
+) -> Result<GuardedEmptyVault, ()> {
     let mut input_guards = acquire_sqlite_input_guards_with_hook(path, after_ancestor_guards)?;
-    validate_guarded_sqlite_input_sizes(&input_guards)?;
-    validate_guarded_sqlite_input_paths(path, &input_guards)?;
+    let (header, manifest) =
+        read_empty_vault_from_guards(path, &mut input_guards, before_connection, after_connection)?;
+    Ok(GuardedEmptyVault {
+        header,
+        manifest,
+        input_guards,
+    })
+}
+
+fn read_empty_vault_from_guards(
+    path: &Path,
+    input_guards: &mut SqliteInputGuards,
+    before_connection: impl FnOnce(),
+    after_connection: impl FnOnce(),
+) -> Result<(Vec<u8>, Vec<u8>), ()> {
+    validate_guarded_sqlite_input_sizes(input_guards)?;
+    validate_guarded_sqlite_input_paths(path, input_guards)?;
     validate_wal_database_header(&mut input_guards.database)?;
 
     before_connection();
-    let connection = open_guarded_read_connection(path, &mut input_guards)?;
+    let connection = open_guarded_read_connection(path, input_guards)?;
     after_connection();
     configure_limits(&connection).map_err(|_| ())?;
     connection
@@ -592,12 +678,12 @@ fn read_empty_vault_with_hooks(
     connection
         .pragma_update(None, "trusted_schema", false)
         .map_err(|_| ())?;
-    refresh_sqlite_sidecar_guards(path, &mut input_guards)?;
-    if !snapshot_sidecars_are_absent(&input_guards) {
+    refresh_sqlite_sidecar_guards(path, input_guards)?;
+    if !snapshot_sidecars_are_absent(input_guards) {
         return Err(());
     }
-    validate_guarded_sqlite_input_sizes(&input_guards)?;
-    validate_guarded_sqlite_input_paths(path, &input_guards)?;
+    validate_guarded_sqlite_input_sizes(input_guards)?;
+    validate_guarded_sqlite_input_paths(path, input_guards)?;
     verify_application_schema(&connection)?;
 
     let header: Vec<u8> = connection
@@ -633,12 +719,12 @@ fn read_empty_vault_with_hooks(
     {
         return Err(());
     }
-    reacquire_sqlite_sidecar_guards(path, &mut input_guards)?;
-    if !snapshot_sidecars_are_absent(&input_guards) {
+    reacquire_sqlite_sidecar_guards(path, input_guards)?;
+    if !snapshot_sidecars_are_absent(input_guards) {
         return Err(());
     }
-    validate_guarded_sqlite_input_sizes(&input_guards)?;
-    validate_guarded_sqlite_input_paths(path, &input_guards)?;
+    validate_guarded_sqlite_input_sizes(input_guards)?;
+    validate_guarded_sqlite_input_paths(path, input_guards)?;
     Ok((header, manifest))
 }
 
@@ -677,6 +763,11 @@ fn open_guarded_read_connection(
         return Err(());
     }
     let database_bytes = input_guards.database.metadata().map_err(|_| ())?.len();
+    if database_bytes < u64::try_from(SQLITE_HEADER_BYTES).map_err(|_| ())?
+        || database_bytes > librarian_vault_format::MAX_DATABASE_BYTES
+    {
+        return Err(());
+    }
     let database_bytes = usize::try_from(database_bytes).map_err(|_| ())?;
     input_guards
         .database
@@ -1589,6 +1680,80 @@ mod tests {
         assert!(agent.begin_operation().is_none());
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn vault_rewrite_during_password_work_prevents_unlock_publication() {
+        let directory = TestDirectory::new();
+        let path = directory.vault_path();
+        let agent = create_test_vault(&path, "rewrite race password");
+        drop(agent);
+        let mut restarted = VaultAgent::open_locked(&path);
+
+        assert_eq!(
+            restarted.unlock_with_before_publish(
+                password("rewrite race password"),
+                &CancellationFlag::new(),
+                || fs::write(&path, b"rewritten during password work")
+                    .expect("Unix fixture must rewrite the guarded inode")
+            ),
+            Err(UnlockError::Failed)
+        );
+        assert!(!restarted.is_unlocked());
+        assert!(restarted.begin_operation().is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn vault_replacement_during_password_work_prevents_unlock_publication() {
+        let directory = TestDirectory::new();
+        let path = directory.vault_path();
+        let replacement = directory.0.join("replacement.sqlite3");
+        let parked = directory.0.join("parked.sqlite3");
+        let agent = create_test_vault(&path, "replacement race password");
+        let other = create_test_vault(&replacement, "other replacement password");
+        drop(agent);
+        drop(other);
+        let mut restarted = VaultAgent::open_locked(&path);
+
+        assert_eq!(
+            restarted.unlock_with_before_publish(
+                password("replacement race password"),
+                &CancellationFlag::new(),
+                || {
+                    fs::rename(&path, &parked).expect("original vault must be parked");
+                    fs::rename(&replacement, &path).expect("replacement must take the vault path");
+                }
+            ),
+            Err(UnlockError::Failed)
+        );
+        assert!(!restarted.is_unlocked());
+        assert!(restarted.begin_operation().is_none());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn vault_writers_remain_blocked_through_unlock_publication() {
+        let directory = TestDirectory::new();
+        let path = directory.vault_path();
+        let agent = create_test_vault(&path, "guarded unlock password");
+        drop(agent);
+        let mut restarted = VaultAgent::open_locked(&path);
+
+        restarted
+            .unlock_with_before_publish(
+                password("guarded unlock password"),
+                &CancellationFlag::new(),
+                || {
+                    assert!(
+                        File::options().write(true).open(&path).is_err(),
+                        "the input guard must deny writers until unlock is published"
+                    );
+                },
+            )
+            .expect("the unchanged guarded vault must unlock");
+        assert!(restarted.is_unlocked());
+    }
+
     #[test]
     fn truncated_database_fails_closed() {
         let directory = TestDirectory::new();
@@ -1855,6 +2020,42 @@ mod tests {
         );
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn publication_revalidation_rejects_in_place_transition_mutation() {
+        use std::io::{Seek as _, SeekFrom, Write as _};
+
+        let directory = TestDirectory::new();
+        let target = directory.vault_path();
+        let mut staging =
+            reserve_staging_file(&target).expect("staging file must be reserved atomically");
+        initialize_database(&mut staging, b"header", b"manifest")
+            .expect("staged database must initialize");
+        let published = publish_staged_vault(&mut staging, &target)
+            .expect("the staged database must be linked and identity-checked");
+        staging
+            .remove_name()
+            .expect("the staging name must be removed");
+
+        let mut writer = File::options()
+            .write(true)
+            .open(&target)
+            .expect("the fixture must exercise the handle-transition window");
+        writer
+            .seek(SeekFrom::Start(0))
+            .and_then(|_| writer.write_all(b"X"))
+            .and_then(|()| writer.sync_all())
+            .expect("the published inode must be modified in place");
+        drop(writer);
+
+        let sealed = seal_published_vault(&published, &target)
+            .expect("the same inode must pass the identity seal");
+        assert!(
+            super::verify_published_vault(&sealed, &target, b"header", b"manifest").is_err(),
+            "content revalidation must reject mutation during the handle transition"
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn initialization_writes_only_to_the_reserved_staging_inode() {
@@ -2006,6 +2207,52 @@ mod tests {
             );
             fs::remove_file(&sidecar).expect("late sidecar fixture must be removed");
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sqlite_snapshot_rechecks_size_immediately_before_allocation() {
+        let oversized_directory = TestDirectory::new();
+        let oversized_path = oversized_directory.vault_path();
+        let agent = create_test_vault(&oversized_path, "oversized snapshot password");
+        drop(agent);
+        let oversized = read_empty_vault_with_connection_hooks(
+            &oversized_path,
+            || {
+                File::options()
+                    .write(true)
+                    .open(&oversized_path)
+                    .expect("oversized fixture must open")
+                    .set_len(librarian_vault_format::MAX_DATABASE_BYTES + 1)
+                    .expect("oversized fixture must be sparse-grown");
+            },
+            || {},
+        );
+        assert!(
+            oversized.is_err(),
+            "a post-validation growth must fail before allocation"
+        );
+
+        let short_directory = TestDirectory::new();
+        let short_path = short_directory.vault_path();
+        let agent = create_test_vault(&short_path, "short snapshot password");
+        drop(agent);
+        let short = read_empty_vault_with_connection_hooks(
+            &short_path,
+            || {
+                File::options()
+                    .write(true)
+                    .open(&short_path)
+                    .expect("short fixture must open")
+                    .set_len(1)
+                    .expect("short fixture must be truncated");
+            },
+            || {},
+        );
+        assert!(
+            short.is_err(),
+            "a post-validation truncation must fail without indexing a short image"
+        );
     }
 
     #[cfg(unix)]

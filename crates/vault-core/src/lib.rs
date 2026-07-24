@@ -81,15 +81,19 @@ impl std::error::Error for PasswordInputError {}
 
 /// The independent recovery material generated with a new vault.
 ///
-/// The recovery UX is owned by Slice 4. Until then callers can transfer the
-/// bytes only through a closure, avoiding a reusable non-zeroizing copy.
-pub struct RecoveryKey(Zeroizing<[u8; KEY_BYTES]>);
-
-impl RecoveryKey {
-    pub fn with_bytes<T>(&self, operation: impl FnOnce(&[u8; KEY_BYTES]) -> T) -> T {
-        operation(&self.0)
-    }
-}
+/// The recovery UX is owned by Slice 4. Until then this type deliberately
+/// exposes no byte-access API that could copy the key into non-zeroizing
+/// memory.
+pub struct RecoveryKey(
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "recovery material remains opaque until the Slice 4 encoded-output API"
+        )
+    )]
+    Zeroizing<[u8; KEY_BYTES]>,
+);
 
 /// A cancellation signal checked before and after expensive unlock work.
 #[derive(Default)]
@@ -572,10 +576,12 @@ mod tests {
         let (header_bytes, _manifest, recovery_unlock_key, initial_session) = created.into_parts();
         let header = librarian_vault_format::VaultHeader::decode(&header_bytes)
             .expect("created header must decode");
-        let derived_recovery_kek = recovery_unlock_key.with_bytes(|bytes| {
-            super::derive_key(bytes, header.vault_id(), super::RECOVERY_WRAP_LABEL)
-                .expect("recovery key derivation must succeed")
-        });
+        let derived_recovery_kek = super::derive_key(
+            &recovery_unlock_key.0[..],
+            header.vault_id(),
+            super::RECOVERY_WRAP_LABEL,
+        )
+        .expect("recovery key derivation must succeed");
         let recovery_aad = librarian_vault_format::encode_recovery_wrapper_aad(
             header.vault_id(),
             header.key_epoch(),
