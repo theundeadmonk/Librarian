@@ -37,6 +37,8 @@ const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
 const FILE_SHARE_READ: u32 = 0x0000_0001;
 #[cfg(windows)]
 const FILE_SHARE_WRITE: u32 = 0x0000_0002;
+#[cfg(windows)]
+const FILE_SHARE_DELETE: u32 = 0x0000_0004;
 
 static NEXT_SESSION_ID: AtomicU64 = AtomicU64::new(1);
 static NEXT_STAGING_ID: AtomicU64 = AtomicU64::new(1);
@@ -296,7 +298,7 @@ fn publish_staged_vault(staging: &mut StagedVault, target: &Path) -> Result<(), 
     ensure_sidecars_absent(target).map_err(|()| CreateError::Failed)?;
     match fs::hard_link(staging.path(), target) {
         Ok(()) => {
-            let published_guard = open_regular_file_guard(target);
+            let published_guard = open_regular_file_guard(target, true, false);
             if published_guard.is_err() || ensure_sidecars_absent(target).is_err() {
                 drop(published_guard);
                 staging.release_reservation();
@@ -383,8 +385,9 @@ fn initialize_database(path: &Path, header: &[u8], manifest: &[u8]) -> rusqlite:
 }
 
 fn read_empty_vault(path: &Path) -> Result<(Vec<u8>, Vec<u8>), ()> {
-    let input_guards = acquire_sqlite_input_guards(path)?;
+    let mut input_guards = acquire_sqlite_input_guards(path)?;
     validate_guarded_sqlite_input_sizes(&input_guards)?;
+    validate_guarded_sqlite_input_paths(path, &input_guards)?;
 
     let connection = Connection::open_with_flags(
         path,
@@ -398,10 +401,13 @@ fn read_empty_vault(path: &Path) -> Result<(Vec<u8>, Vec<u8>), ()> {
     connection
         .pragma_update(None, "trusted_schema", false)
         .map_err(|_| ())?;
+    refresh_sqlite_sidecar_guards(path, &mut input_guards)?;
+    validate_guarded_sqlite_input_sizes(&input_guards)?;
     validate_sqlite_input_sizes(
         path,
         input_guards.database.metadata().map_err(|_| ())?.len(),
     )?;
+    validate_guarded_sqlite_input_paths(path, &input_guards)?;
     verify_application_schema(&connection)?;
 
     let header: Vec<u8> = connection
@@ -437,11 +443,13 @@ fn read_empty_vault(path: &Path) -> Result<(Vec<u8>, Vec<u8>), ()> {
     {
         return Err(());
     }
+    reacquire_sqlite_sidecar_guards(path, &mut input_guards)?;
     validate_guarded_sqlite_input_sizes(&input_guards)?;
     validate_sqlite_input_sizes(
         path,
         input_guards.database.metadata().map_err(|_| ())?.len(),
     )?;
+    validate_guarded_sqlite_input_paths(path, &input_guards)?;
     Ok((header, manifest))
 }
 
@@ -449,7 +457,7 @@ fn verify_application_schema(connection: &Connection) -> Result<(), ()> {
     let mut statement = connection
         .prepare(
             "SELECT type, name FROM sqlite_schema
-             WHERE name NOT LIKE 'sqlite_%'
+             WHERE name NOT GLOB 'sqlite_*'
              ORDER BY type, name",
         )
         .map_err(|_| ())?;
@@ -562,7 +570,7 @@ struct SqliteInputGuards {
 
 fn acquire_sqlite_input_guards(path: &Path) -> Result<SqliteInputGuards, ()> {
     let ancestor_guards = acquire_ancestor_guards(path).map_err(|_| ())?;
-    let database = open_regular_file_guard(path).map_err(|_| ())?;
+    let database = open_regular_file_guard(path, false, false).map_err(|_| ())?;
     let wal = open_optional_regular_file_guard(&sqlite_sidecar(path, "-wal"))?;
     let shm = open_optional_regular_file_guard(&sqlite_sidecar(path, "-shm"))?;
     Ok(SqliteInputGuards {
@@ -571,6 +579,22 @@ fn acquire_sqlite_input_guards(path: &Path) -> Result<SqliteInputGuards, ()> {
         shm,
         _ancestor_guards: ancestor_guards,
     })
+}
+
+fn refresh_sqlite_sidecar_guards(path: &Path, input: &mut SqliteInputGuards) -> Result<(), ()> {
+    if input.wal.is_none() {
+        input.wal = open_optional_regular_file_guard(&sqlite_sidecar(path, "-wal"))?;
+    }
+    if input.shm.is_none() {
+        input.shm = open_optional_regular_file_guard(&sqlite_sidecar(path, "-shm"))?;
+    }
+    Ok(())
+}
+
+fn reacquire_sqlite_sidecar_guards(path: &Path, input: &mut SqliteInputGuards) -> Result<(), ()> {
+    input.wal = None;
+    input.shm = None;
+    refresh_sqlite_sidecar_guards(path, input)
 }
 
 fn validate_guarded_sqlite_input_sizes(input: &SqliteInputGuards) -> Result<(), ()> {
@@ -590,6 +614,64 @@ fn validate_guarded_sqlite_input_sizes(input: &SqliteInputGuards) -> Result<(), 
     Ok(())
 }
 
+fn validate_guarded_sqlite_input_paths(path: &Path, input: &SqliteInputGuards) -> Result<(), ()> {
+    guarded_file_matches_path(&input.database, path)?;
+    guarded_optional_file_matches_path(input.wal.as_ref(), &sqlite_sidecar(path, "-wal"))?;
+    guarded_optional_file_matches_path(input.shm.as_ref(), &sqlite_sidecar(path, "-shm"))?;
+    Ok(())
+}
+
+fn guarded_optional_file_matches_path(file: Option<&File>, path: &Path) -> Result<(), ()> {
+    match file {
+        Some(file) => guarded_file_matches_path(file, path),
+        None => match fs::symlink_metadata(path) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            Ok(_) | Err(_) => Err(()),
+        },
+    }
+}
+
+#[cfg(unix)]
+fn guarded_file_matches_path(file: &File, path: &Path) -> Result<(), ()> {
+    use std::os::unix::fs::MetadataExt;
+
+    let guarded = file.metadata().map_err(|_| ())?;
+    let current = fs::symlink_metadata(path).map_err(|_| ())?;
+    if is_reparse_point(&current)
+        || !current.is_file()
+        || guarded.dev() != current.dev()
+        || guarded.ino() != current.ino()
+    {
+        return Err(());
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn guarded_file_matches_path(file: &File, path: &Path) -> Result<(), ()> {
+    let guarded = file.metadata().map_err(|_| ())?;
+    let current = fs::symlink_metadata(path).map_err(|_| ())?;
+    if is_reparse_point(&guarded)
+        || is_reparse_point(&current)
+        || !guarded.is_file()
+        || !current.is_file()
+        || guarded.len() != current.len()
+    {
+        return Err(());
+    }
+    Ok(())
+}
+
+#[cfg(not(any(unix, windows)))]
+fn guarded_file_matches_path(file: &File, path: &Path) -> Result<(), ()> {
+    let guarded = file.metadata().map_err(|_| ())?;
+    let current = reject_reparse(path).map_err(|_| ())?;
+    if !guarded.is_file() || !current.is_file() || guarded.len() != current.len() {
+        return Err(());
+    }
+    Ok(())
+}
+
 fn guarded_file_size(file: Option<&File>, maximum_bytes: u64) -> Result<u64, ()> {
     let Some(file) = file else {
         return Ok(0);
@@ -602,15 +684,19 @@ fn guarded_file_size(file: Option<&File>, maximum_bytes: u64) -> Result<u64, ()>
 }
 
 fn open_optional_regular_file_guard(path: &Path) -> Result<Option<File>, ()> {
-    match open_regular_file_guard(path) {
+    match open_regular_file_guard(path, true, true) {
         Ok(file) => Ok(Some(file)),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
         Err(_) => Err(()),
     }
 }
 
-fn open_regular_file_guard(path: &Path) -> io::Result<File> {
-    let file = open_existing_guard(path)?;
+fn open_regular_file_guard(
+    path: &Path,
+    share_writes: bool,
+    share_deletes: bool,
+) -> io::Result<File> {
+    let file = open_existing_guard(path, share_writes, share_deletes)?;
     let metadata = file.metadata()?;
     if !metadata.is_file() || is_reparse_point(&metadata) {
         return Err(io::Error::new(
@@ -622,18 +708,36 @@ fn open_regular_file_guard(path: &Path) -> io::Result<File> {
 }
 
 #[cfg(windows)]
-fn open_existing_guard(path: &Path) -> io::Result<File> {
+fn open_existing_guard(path: &Path, share_writes: bool, share_deletes: bool) -> io::Result<File> {
     use std::os::windows::fs::OpenOptionsExt;
 
+    let mut share_mode = FILE_SHARE_READ;
+    if share_writes {
+        share_mode |= FILE_SHARE_WRITE;
+    }
+    if share_deletes {
+        share_mode |= FILE_SHARE_DELETE;
+    }
     OpenOptions::new()
         .read(true)
-        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+        .share_mode(share_mode)
         .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
         .open(path)
 }
 
-#[cfg(not(windows))]
-fn open_existing_guard(path: &Path) -> io::Result<File> {
+#[cfg(unix)]
+fn open_existing_guard(path: &Path, _share_writes: bool, _share_deletes: bool) -> io::Result<File> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
+        .open(path)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn open_existing_guard(path: &Path, _share_writes: bool, _share_deletes: bool) -> io::Result<File> {
+    reject_reparse(path)?;
     OpenOptions::new().read(true).open(path)
 }
 
@@ -814,7 +918,7 @@ mod tests {
     };
 
     use librarian_vault_core::{CancellationFlag, MasterPassword};
-    use rusqlite::Connection;
+    use rusqlite::{Connection, OpenFlags};
 
     use super::{
         CreateError, UnlockError, VaultAgent, acquire_sqlite_input_guards, parent_directory,
@@ -1043,6 +1147,27 @@ mod tests {
     }
 
     #[test]
+    fn sqlite_similar_prefix_objects_fail_closed() {
+        let directory = TestDirectory::new();
+        let path = directory.vault_path();
+        let agent = create_test_vault(&path, "schema prefix password");
+        drop(agent);
+
+        let connection = Connection::open(&path).expect("test database must open");
+        connection
+            .execute_batch("CREATE TABLE sqliteXplaintext(value TEXT) STRICT;")
+            .expect("test must add an application-owned lookalike table");
+        drop(connection);
+
+        let mut restarted = VaultAgent::open_locked(&path);
+        assert_eq!(
+            restarted.unlock(password("schema prefix password"), &CancellationFlag::new()),
+            Err(UnlockError::Failed)
+        );
+        assert!(!restarted.is_unlocked());
+    }
+
+    #[test]
     fn extra_singleton_rows_fail_closed() {
         let directory = TestDirectory::new();
         let path = directory.vault_path();
@@ -1228,6 +1353,16 @@ mod tests {
             fs::rename(&replacement, &path).is_err(),
             "the checked vault file must deny replacement"
         );
+        assert!(
+            fs::OpenOptions::new().write(true).open(&path).is_err(),
+            "the checked vault file must deny concurrent writers"
+        );
+        let sqlite = Connection::open_with_flags(
+            &path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .expect("the trusted read-only SQLite connection must open while guarded");
+        drop(sqlite);
         drop(input_guards);
         assert!(path.exists());
         assert!(replacement.exists());
@@ -1257,6 +1392,24 @@ mod tests {
             ),
             Err(CreateError::Failed)
         ));
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn symlinked_vault_files_fail_closed() {
+        let directory = TestDirectory::new();
+        let real_path = directory.vault_path();
+        let linked_path = directory.0.join("linked-vault.sqlite3");
+        let agent = create_test_vault(&real_path, "file symlink password");
+        drop(agent);
+        create_file_symlink(&real_path, &linked_path);
+
+        let mut linked_agent = VaultAgent::open_locked(&linked_path);
+        assert_eq!(
+            linked_agent.unlock(password("file symlink password"), &CancellationFlag::new()),
+            Err(UnlockError::Failed)
+        );
+        assert!(!linked_agent.is_unlocked());
     }
 
     #[cfg(windows)]
@@ -1306,10 +1459,20 @@ mod tests {
         std::os::unix::fs::symlink(original, link).expect("directory symlink must be created");
     }
 
+    #[cfg(unix)]
+    fn create_file_symlink(original: &Path, link: &Path) {
+        std::os::unix::fs::symlink(original, link).expect("file symlink must be created");
+    }
+
     #[cfg(windows)]
     fn create_directory_symlink(original: &Path, link: &Path) {
         std::os::windows::fs::symlink_dir(original, link)
             .expect("directory symlink must be created");
+    }
+
+    #[cfg(windows)]
+    fn create_file_symlink(original: &Path, link: &Path) {
+        std::os::windows::fs::symlink_file(original, link).expect("file symlink must be created");
     }
 
     #[cfg(windows)]

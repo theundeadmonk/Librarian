@@ -12,5 +12,8 @@ librarian-vault-core = { path = "../vault-core" }
 librarian-vault-format = { path = "../vault-format" }
 rusqlite = { version = "=0.40.1", default-features = false, features = ["backup", "bundled", "limits"] }
 
+[target.'cfg(unix)'.dependencies]
+libc = "=0.2.189"
+
 [lints]
 workspace = true
