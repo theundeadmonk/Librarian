@@ -7,15 +7,11 @@
 
 #![forbid(unsafe_code)]
 
-#[cfg(any(windows, not(any(unix, windows))))]
-use std::env;
-#[cfg(not(unix))]
-use std::fs::OpenOptions;
 #[cfg(unix)]
 use std::path::Component;
 use std::{
-    fmt,
-    fs::{self, File},
+    env, fmt,
+    fs::{self, File, OpenOptions},
     io,
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
@@ -27,7 +23,6 @@ use librarian_vault_core::{
 };
 #[cfg(any(unix, windows))]
 use rusqlite::MAIN_DB;
-#[cfg(not(unix))]
 use rusqlite::OpenFlags;
 use rusqlite::{Connection, TransactionBehavior, config::DbConfig, limits::Limit, params};
 #[cfg(any(unix, windows))]
@@ -41,8 +36,6 @@ const SQLITE_HEADER_BYTES: usize = 20;
 const SQLITE_MAGIC: &[u8; 16] = b"SQLite format 3\0";
 const SQLITE_READ_VERSION_OFFSET: usize = 18;
 const SQLITE_WRITE_VERSION_OFFSET: usize = 19;
-#[cfg(unix)]
-const SQLITE_ROLLBACK_VERSION: u8 = 1;
 const SQLITE_WAL_VERSION: u8 = 2;
 
 #[cfg(windows)]
@@ -109,7 +102,7 @@ pub struct OperationPermit {
 /// This type intentionally does not implement `Debug` because it owns the
 /// unlocked core session.
 pub struct VaultAgent {
-    path: PathBuf,
+    path: Option<PathBuf>,
     session: Option<UnlockedVault>,
     session_id: Option<u64>,
     authorization_epoch: u64,
@@ -128,7 +121,7 @@ impl VaultAgent {
         path: impl AsRef<Path>,
         password: MasterPassword,
     ) -> Result<(Self, RecoveryKey), CreateError> {
-        let path = path.as_ref().to_path_buf();
+        let path = bind_vault_path(path.as_ref()).map_err(|_| CreateError::Failed)?;
         validate_new_target(&path)?;
         let mut staging = reserve_staging_file(&path)?;
 
@@ -187,7 +180,7 @@ impl VaultAgent {
 
         Ok((
             Self {
-                path,
+                path: Some(path),
                 session: Some(session),
                 session_id: Some(session_id),
                 authorization_epoch: 1,
@@ -200,7 +193,7 @@ impl VaultAgent {
     #[must_use]
     pub fn open_locked(path: impl AsRef<Path>) -> Self {
         Self {
-            path: path.as_ref().to_path_buf(),
+            path: bind_vault_path(path.as_ref()).ok(),
             session: None,
             session_id: None,
             authorization_epoch: 0,
@@ -237,8 +230,8 @@ impl VaultAgent {
         if cancellation.is_cancelled() {
             return Err(UnlockError::Cancelled);
         }
-        let mut snapshot =
-            read_guarded_empty_vault(&self.path).map_err(|()| UnlockError::Failed)?;
+        let path = self.path.clone().ok_or(UnlockError::Failed)?;
+        let mut snapshot = read_guarded_empty_vault(&path).map_err(|()| UnlockError::Failed)?;
         let session = match unlock_empty_vault(
             password,
             &snapshot.header,
@@ -257,7 +250,7 @@ impl VaultAgent {
             return Err(UnlockError::Cancelled);
         }
         let (current_header, current_manifest) =
-            read_empty_vault_from_guards(&self.path, &mut snapshot.input_guards, || {}, || {})
+            read_empty_vault_from_guards(&path, &mut snapshot.input_guards, || {}, || {})
                 .map_err(|()| UnlockError::Failed)?;
         if current_header != snapshot.header || current_manifest != snapshot.manifest {
             return Err(UnlockError::Failed);
@@ -308,6 +301,14 @@ impl VaultAgent {
         };
         self.authorization_epoch = next;
         true
+    }
+}
+
+fn bind_vault_path(path: &Path) -> io::Result<PathBuf> {
+    if path.is_absolute() {
+        Ok(path.to_path_buf())
+    } else {
+        Ok(env::current_dir()?.join(path))
     }
 }
 
@@ -613,7 +614,7 @@ fn read_empty_vault(path: &Path) -> Result<(Vec<u8>, Vec<u8>), ()> {
     Ok((snapshot.header, snapshot.manifest))
 }
 
-#[cfg(all(test, unix))]
+#[cfg(all(test, any(unix, windows)))]
 fn read_empty_vault_with_connection_hooks(
     path: &Path,
     before_connection: impl FnOnce(),
@@ -676,10 +677,6 @@ fn read_empty_vault_from_guards(
     connection
         .pragma_update(None, "trusted_schema", false)
         .map_err(|_| ())?;
-    refresh_sqlite_sidecar_guards(path, input_guards)?;
-    if !snapshot_sidecars_are_absent(input_guards) {
-        return Err(());
-    }
     validate_guarded_sqlite_input_sizes(input_guards)?;
     validate_guarded_sqlite_input_paths(path, input_guards)?;
     verify_database_integrity(&connection)?;
@@ -718,10 +715,6 @@ fn read_empty_vault_from_guards(
     {
         return Err(());
     }
-    reacquire_sqlite_sidecar_guards(path, input_guards)?;
-    if !snapshot_sidecars_are_absent(input_guards) {
-        return Err(());
-    }
     validate_guarded_sqlite_input_sizes(input_guards)?;
     validate_guarded_sqlite_input_paths(path, input_guards)?;
     Ok((header, manifest))
@@ -743,55 +736,12 @@ fn validate_wal_database_header(database: &mut File) -> Result<(), ()> {
     Ok(())
 }
 
-#[cfg(unix)]
-fn snapshot_sidecars_are_absent(input: &SqliteInputGuards) -> bool {
-    input.wal.is_none() && input.shm.is_none()
-}
-
-#[cfg(not(unix))]
-fn snapshot_sidecars_are_absent(_input: &SqliteInputGuards) -> bool {
-    true
-}
-
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn open_guarded_read_connection(
     _path: &Path,
     input_guards: &mut SqliteInputGuards,
 ) -> Result<GuardedReadConnection, ()> {
-    if input_guards.wal.is_some() || input_guards.shm.is_some() {
-        return Err(());
-    }
-    let database_bytes = input_guards.database.metadata().map_err(|_| ())?.len();
-    if database_bytes < u64::try_from(SQLITE_HEADER_BYTES).map_err(|_| ())?
-        || database_bytes > librarian_vault_format::MAX_DATABASE_BYTES
-    {
-        return Err(());
-    }
-    let database_bytes = usize::try_from(database_bytes).map_err(|_| ())?;
-    input_guards
-        .database
-        .seek(SeekFrom::Start(0))
-        .map_err(|_| ())?;
-    let mut image = vec![0_u8; database_bytes];
-    input_guards
-        .database
-        .read_exact(&mut image)
-        .map_err(|_| ())?;
-    image[SQLITE_READ_VERSION_OFFSET] = SQLITE_ROLLBACK_VERSION;
-    image[SQLITE_WRITE_VERSION_OFFSET] = SQLITE_ROLLBACK_VERSION;
-    let mut connection = Connection::open_in_memory().map_err(|_| ())?;
-    connection
-        .deserialize_read_exact(MAIN_DB, io::Cursor::new(image), database_bytes, true)
-        .map_err(|_| ())?;
-    Ok(GuardedReadConnection { connection })
-}
-
-#[cfg(windows)]
-fn open_guarded_read_connection(
-    _path: &Path,
-    input_guards: &mut SqliteInputGuards,
-) -> Result<GuardedReadConnection, ()> {
-    let snapshot = WindowsSqliteSnapshot::create(input_guards)?;
+    let snapshot = GuardedSqliteSnapshot::create(input_guards)?;
     let connection = Connection::open_with_flags(
         &snapshot.database,
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
@@ -818,8 +768,8 @@ fn open_guarded_read_connection(
 
 struct GuardedReadConnection {
     connection: Connection,
-    #[cfg(windows)]
-    _snapshot: WindowsSqliteSnapshot,
+    #[cfg(any(unix, windows))]
+    _snapshot: GuardedSqliteSnapshot,
 }
 
 impl std::ops::Deref for GuardedReadConnection {
@@ -830,16 +780,16 @@ impl std::ops::Deref for GuardedReadConnection {
     }
 }
 
-#[cfg(windows)]
-struct WindowsSqliteSnapshot {
+#[cfg(any(unix, windows))]
+struct GuardedSqliteSnapshot {
     database: PathBuf,
     directory: PathBuf,
 }
 
-#[cfg(windows)]
-impl WindowsSqliteSnapshot {
+#[cfg(any(unix, windows))]
+impl GuardedSqliteSnapshot {
     fn create(input: &SqliteInputGuards) -> Result<Self, ()> {
-        let directory = reserve_windows_snapshot_directory()?;
+        let directory = reserve_sqlite_snapshot_directory()?;
         let database = directory.join("vault.sqlite3");
         if copy_guarded_snapshot_file(&input.database, &database).is_err()
             || input.wal.as_ref().is_some_and(|wal| {
@@ -860,8 +810,8 @@ impl WindowsSqliteSnapshot {
     }
 }
 
-#[cfg(windows)]
-impl Drop for WindowsSqliteSnapshot {
+#[cfg(any(unix, windows))]
+impl Drop for GuardedSqliteSnapshot {
     fn drop(&mut self) {
         for suffix in ["-shm", "-wal", "-journal"] {
             let _ = fs::remove_file(sqlite_sidecar(&self.database, suffix));
@@ -871,8 +821,8 @@ impl Drop for WindowsSqliteSnapshot {
     }
 }
 
-#[cfg(windows)]
-fn reserve_windows_snapshot_directory() -> Result<PathBuf, ()> {
+#[cfg(any(unix, windows))]
+fn reserve_sqlite_snapshot_directory() -> Result<PathBuf, ()> {
     for _ in 0..MAX_STAGING_ATTEMPTS {
         let mut random = [0_u8; 16];
         getrandom::fill(&mut random).map_err(|_| ())?;
@@ -880,7 +830,7 @@ fn reserve_windows_snapshot_directory() -> Result<PathBuf, ()> {
             "librarian-vault-snapshot-{:032x}",
             u128::from_le_bytes(random)
         ));
-        match fs::create_dir(&directory) {
+        match create_private_snapshot_directory(&directory) {
             Ok(()) => return Ok(directory),
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
             Err(_) => return Err(()),
@@ -889,7 +839,19 @@ fn reserve_windows_snapshot_directory() -> Result<PathBuf, ()> {
     Err(())
 }
 
+#[cfg(unix)]
+fn create_private_snapshot_directory(path: &Path) -> io::Result<()> {
+    use std::os::unix::fs::DirBuilderExt;
+
+    fs::DirBuilder::new().mode(0o700).create(path)
+}
+
 #[cfg(windows)]
+fn create_private_snapshot_directory(path: &Path) -> io::Result<()> {
+    fs::create_dir(path)
+}
+
+#[cfg(any(unix, windows))]
 fn copy_guarded_snapshot_file(source: &File, target: &Path) -> Result<(), ()> {
     let expected_bytes = source.metadata().map_err(|_| ())?.len();
     let mut source = source.try_clone().map_err(|_| ())?;
@@ -1030,38 +992,6 @@ fn acquire_sqlite_input_guards_with_hook(
         shm,
         ancestor_guards,
     })
-}
-
-fn refresh_sqlite_sidecar_guards(path: &Path, input: &mut SqliteInputGuards) -> Result<(), ()> {
-    if input.wal.is_none() {
-        input.wal = open_optional_regular_file_guard_with_ancestor_guards(
-            &input.ancestor_guards,
-            &sqlite_sidecar(path, "-wal"),
-            false,
-            false,
-        )?;
-    }
-    if input.shm.is_none() {
-        input.shm = open_optional_regular_file_guard_with_ancestor_guards(
-            &input.ancestor_guards,
-            &sqlite_sidecar(path, "-shm"),
-            false,
-            false,
-        )?;
-    }
-    Ok(())
-}
-
-#[cfg(windows)]
-fn reacquire_sqlite_sidecar_guards(path: &Path, input: &mut SqliteInputGuards) -> Result<(), ()> {
-    refresh_sqlite_sidecar_guards(path, input)
-}
-
-#[cfg(not(windows))]
-fn reacquire_sqlite_sidecar_guards(path: &Path, input: &mut SqliteInputGuards) -> Result<(), ()> {
-    input.wal = None;
-    input.shm = None;
-    refresh_sqlite_sidecar_guards(path, input)
 }
 
 fn validate_guarded_sqlite_input_sizes(input: &SqliteInputGuards) -> Result<(), ()> {
@@ -1609,6 +1539,8 @@ mod tests {
     #[cfg(windows)]
     use rusqlite::OpenFlags;
 
+    #[cfg(any(unix, windows))]
+    use super::read_empty_vault_with_connection_hooks;
     use super::{
         CreateError, UnlockError, VaultAgent, parent_directory, reserve_staging_file,
         sqlite_sidecar, sync_parent_directory, validate_new_target,
@@ -1621,7 +1553,7 @@ mod tests {
     #[cfg(unix)]
     use super::{
         initialize_database, publish_staged_vault, publish_staged_vault_with_before_link,
-        read_empty_vault, read_empty_vault_with_connection_hooks, read_empty_vault_with_hooks,
+        read_empty_vault, read_empty_vault_with_hooks,
     };
 
     static TEST_DIRECTORY_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -2413,6 +2345,17 @@ mod tests {
     #[test]
     fn bare_relative_vault_paths_use_the_current_directory_as_parent() {
         assert_eq!(parent_directory(Path::new("vault.sqlite3")), Path::new("."));
+        let agent = VaultAgent::open_locked("vault.sqlite3");
+        let bound = agent
+            .path
+            .expect("a relative path must be bound while the agent is constructed");
+        assert!(bound.is_absolute());
+        assert_eq!(
+            bound,
+            std::env::current_dir()
+                .expect("current directory must remain available")
+                .join("vault.sqlite3")
+        );
     }
 
     #[test]
@@ -2453,7 +2396,7 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[test]
     fn sqlite_snapshot_rejects_sidecars_created_after_snapshotting() {
         let directory = TestDirectory::new();
@@ -2597,7 +2540,7 @@ mod tests {
         fs::remove_file(&shm_path).expect("SHM fixture must be removable after guard drop");
     }
 
-    #[cfg(windows)]
+    #[cfg(any(unix, windows))]
     #[test]
     fn valid_wal_is_read_from_a_guarded_snapshot() {
         let directory = TestDirectory::new();
