@@ -1,0 +1,25 @@
+flowchart LR
+    Password["Master password"]
+    Recovery["Random recovery key"]
+    Hello["Windows Hello<br/>device-only protector"]
+    Wrappers["Independent VRK wrappers"]
+    Agent["Vault agent<br/>only plaintext owner"]
+    VRK["Random VRK"]
+    Records["XChaCha20-Poly1305<br/>record envelopes"]
+    Manifest["Encrypted manifest<br/>commits active record set"]
+    SQLite["SQLite<br/>ciphertext and clear framing"]
+    Backup["Outer-encrypted backup"]
+    Anchor["Device rollback anchor"]
+
+    Password --> Wrappers
+    Recovery --> Wrappers
+    Wrappers --> VRK
+    Hello -. "proved by #15" .-> VRK
+    Agent --> VRK
+    VRK --> Records
+    VRK --> Manifest
+    Records --> Manifest
+    Records --> SQLite
+    Manifest --> SQLite
+    VRK --> Backup
+    Manifest --> Anchor

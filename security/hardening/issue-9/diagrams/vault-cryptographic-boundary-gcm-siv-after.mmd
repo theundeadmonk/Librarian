@@ -1,0 +1,20 @@
+flowchart LR
+    Password["Master password"]
+    Recovery["Random recovery key"]
+    Wrappers["Independent VRK wrappers"]
+    Agent["Vault agent"]
+    VRK["Random VRK"]
+    Records["AES-256-GCM-SIV<br/>misuse-resistant envelopes"]
+    Manifest["Encrypted manifest"]
+    SQLite["SQLite ciphertext"]
+    Audit["Independent crate and<br/>composition review required"]
+
+    Password --> Wrappers
+    Recovery --> Wrappers
+    Wrappers --> VRK
+    Agent --> VRK
+    VRK --> Records
+    VRK --> Manifest
+    Records --> SQLite
+    Manifest --> SQLite
+    Audit -. "current crate unaudited" .-> Records
