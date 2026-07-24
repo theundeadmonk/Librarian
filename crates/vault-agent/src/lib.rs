@@ -7,10 +7,11 @@
 #![forbid(unsafe_code)]
 
 use std::{
-    fmt,
+    env, fmt,
     fs::{self, OpenOptions},
     io,
     path::{Path, PathBuf},
+    sync::atomic::{AtomicU64, Ordering},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -23,6 +24,11 @@ use rusqlite::{
 
 const MAX_SQLITE_VALUE_BYTES: i32 = 8 * 1024 * 1024;
 const MAX_PAGE_COUNT: u32 = 131_072;
+const MAX_SQLITE_SHM_BYTES: u64 = 8 * 1024 * 1024;
+const MAX_STAGING_ATTEMPTS: u64 = 128;
+
+static NEXT_SESSION_ID: AtomicU64 = AtomicU64::new(1);
+static NEXT_STAGING_ID: AtomicU64 = AtomicU64::new(1);
 
 /// A non-secret failure while creating a new local vault.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -63,6 +69,7 @@ impl std::error::Error for UnlockError {}
 /// A non-secret capability snapshot for one in-process operation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct OperationPermit {
+    session_id: u64,
     authorization_epoch: u64,
 }
 
@@ -73,6 +80,7 @@ pub struct OperationPermit {
 pub struct VaultAgent {
     path: PathBuf,
     session: Option<UnlockedVault>,
+    session_id: Option<u64>,
     authorization_epoch: u64,
 }
 
@@ -82,27 +90,33 @@ impl VaultAgent {
     /// # Errors
     ///
     /// Returns `AlreadyExists` without replacing an existing target. Every
-    /// other reservation, cryptographic, format, `SQLite`, or durability failure
-    /// returns `Failed` and removes partial files.
+    /// other staging, cryptographic, format, `SQLite`, or durability failure
+    /// returns `Failed`. The target name is published only after the staged
+    /// database is fully initialized and durable.
     pub fn create(
         path: impl AsRef<Path>,
         password: MasterPassword,
     ) -> Result<(Self, RecoveryKey), CreateError> {
         let path = path.as_ref().to_path_buf();
-        reserve_new_file(&path)?;
-        let mut cleanup = PartialVaultCleanup::new(path.clone());
+        validate_new_target(&path)?;
+        let staging_path = reserve_staging_file(&path)?;
+        let cleanup = StagedVaultCleanup::new(staging_path.clone());
 
         let created_at_ms = unix_time_ms().map_err(|()| CreateError::Failed)?;
         let created = create_vault(password, created_at_ms).map_err(|_| CreateError::Failed)?;
         let (header, manifest, recovery_key, session) = created.into_parts();
+        let session_id = next_session_id().ok_or(CreateError::Failed)?;
 
-        initialize_database(&path, &header, &manifest).map_err(|_| CreateError::Failed)?;
-        cleanup.disarm();
+        initialize_database(&staging_path, &header, &manifest).map_err(|_| CreateError::Failed)?;
+        ensure_sidecars_absent(&staging_path).map_err(|()| CreateError::Failed)?;
+        publish_staged_vault(&staging_path, &path)?;
+        drop(cleanup);
 
         Ok((
             Self {
                 path,
                 session: Some(session),
+                session_id: Some(session_id),
                 authorization_epoch: 1,
             },
             recovery_key,
@@ -115,6 +129,7 @@ impl VaultAgent {
         Self {
             path: path.as_ref().to_path_buf(),
             session: None,
+            session_id: None,
             authorization_epoch: 0,
         }
     }
@@ -149,26 +164,37 @@ impl VaultAgent {
         if !self.advance_authorization_epoch() {
             return Err(UnlockError::Failed);
         }
+        let Some(session_id) = next_session_id() else {
+            return Err(UnlockError::Failed);
+        };
         self.session = Some(session);
+        self.session_id = Some(session_id);
         Ok(())
     }
 
     /// Drops and zeroizes reusable key state, invalidating existing permits.
     pub fn lock(&mut self) {
         self.session = None;
+        self.session_id = None;
         let _ = self.advance_authorization_epoch();
     }
 
     #[must_use]
     pub fn begin_operation(&self) -> Option<OperationPermit> {
-        self.session.as_ref().map(|_| OperationPermit {
-            authorization_epoch: self.authorization_epoch,
-        })
+        self.session
+            .as_ref()
+            .zip(self.session_id)
+            .map(|(_, session_id)| OperationPermit {
+                session_id,
+                authorization_epoch: self.authorization_epoch,
+            })
     }
 
     #[must_use]
     pub fn operation_is_authorized(&self, permit: OperationPermit) -> bool {
-        self.session.is_some() && permit.authorization_epoch == self.authorization_epoch
+        self.session.is_some()
+            && self.session_id == Some(permit.session_id)
+            && permit.authorization_epoch == self.authorization_epoch
     }
 
     fn advance_authorization_epoch(&mut self) -> bool {
@@ -180,23 +206,56 @@ impl VaultAgent {
     }
 }
 
-fn reserve_new_file(path: &Path) -> Result<(), CreateError> {
+fn validate_new_target(path: &Path) -> Result<(), CreateError> {
+    reject_symlinked_ancestors(path).map_err(|_| CreateError::Failed)?;
     match fs::symlink_metadata(path) {
         Ok(metadata) if metadata.file_type().is_symlink() => return Err(CreateError::Failed),
         Ok(_) => return Err(CreateError::AlreadyExists),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            if let Some(parent) = path.parent() {
-                let parent_metadata =
-                    fs::symlink_metadata(parent).map_err(|_| CreateError::Failed)?;
-                if parent_metadata.file_type().is_symlink() {
-                    return Err(CreateError::Failed);
-                }
-            }
-        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
         Err(_) => return Err(CreateError::Failed),
     }
-    match OpenOptions::new().write(true).create_new(true).open(path) {
-        Ok(_) => Ok(()),
+    if path.file_name().is_none() {
+        return Err(CreateError::Failed);
+    }
+    Ok(())
+}
+
+fn reserve_staging_file(target: &Path) -> Result<PathBuf, CreateError> {
+    let parent = parent_directory(target);
+    let target_name = target.file_name().ok_or(CreateError::Failed)?;
+    for _ in 0..MAX_STAGING_ATTEMPTS {
+        let sequence = NEXT_STAGING_ID
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+                value.checked_add(1)
+            })
+            .map_err(|_| CreateError::Failed)?;
+        let mut staging_name = target_name.to_os_string();
+        staging_name.push(format!(
+            ".librarian-stage-{}-{sequence}",
+            std::process::id()
+        ));
+        let staging_path = parent.join(staging_name);
+        match OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&staging_path)
+        {
+            Ok(file) => {
+                drop(file);
+                return Ok(staging_path);
+            }
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(_) => return Err(CreateError::Failed),
+        }
+    }
+    Err(CreateError::Failed)
+}
+
+fn publish_staged_vault(staging_path: &Path, target: &Path) -> Result<(), CreateError> {
+    reject_symlinked_ancestors(target).map_err(|_| CreateError::Failed)?;
+    match fs::hard_link(staging_path, target) {
+        Ok(()) => Ok(()),
         Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
             Err(CreateError::AlreadyExists)
         }
@@ -260,9 +319,10 @@ fn initialize_database(path: &Path, header: &[u8], manifest: &[u8]) -> rusqlite:
 
 fn read_empty_vault(path: &Path) -> Result<(Vec<u8>, Vec<u8>), ()> {
     let metadata = reject_symlink(path).map_err(|_| ())?;
-    if !metadata.is_file() || metadata.len() > librarian_vault_format::MAX_DATABASE_BYTES {
+    if !metadata.is_file() {
         return Err(());
     }
+    validate_sqlite_input_sizes(path, metadata.len())?;
 
     let connection = Connection::open_with_flags(
         path,
@@ -380,27 +440,83 @@ fn configure_limits(connection: &Connection) -> rusqlite::Result<()> {
     Ok(())
 }
 
+fn validate_sqlite_input_sizes(path: &Path, database_bytes: u64) -> Result<(), ()> {
+    let wal_bytes =
+        optional_sidecar_size(path, "-wal", librarian_vault_format::MAX_DATABASE_BYTES)?;
+    let shm_bytes = optional_sidecar_size(path, "-shm", MAX_SQLITE_SHM_BYTES)?;
+    let total_bytes = database_bytes
+        .checked_add(wal_bytes)
+        .and_then(|value| value.checked_add(shm_bytes))
+        .ok_or(())?;
+    if total_bytes > librarian_vault_format::MAX_DATABASE_BYTES {
+        return Err(());
+    }
+    Ok(())
+}
+
+fn optional_sidecar_size(path: &Path, suffix: &str, maximum_bytes: u64) -> Result<u64, ()> {
+    let sidecar_path = sqlite_sidecar(path, suffix);
+    match reject_symlink(&sidecar_path) {
+        Ok(metadata) if metadata.is_file() && metadata.len() <= maximum_bytes => Ok(metadata.len()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(0),
+        Ok(_) | Err(_) => Err(()),
+    }
+}
+
+fn ensure_sidecars_absent(path: &Path) -> Result<(), ()> {
+    for suffix in ["-wal", "-shm"] {
+        match fs::symlink_metadata(sqlite_sidecar(path, suffix)) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            _ => return Err(()),
+        }
+    }
+    Ok(())
+}
+
 fn reject_symlink(path: &Path) -> io::Result<fs::Metadata> {
+    reject_symlinked_ancestors(path)?;
     match fs::symlink_metadata(path) {
         Ok(metadata) if metadata.file_type().is_symlink() => Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "symlink rejected",
         )),
         Ok(metadata) => Ok(metadata),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            if let Some(parent) = path.parent() {
-                let parent_metadata = fs::symlink_metadata(parent)?;
-                if parent_metadata.file_type().is_symlink() {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        "symlink parent rejected",
-                    ));
-                }
-            }
-            Err(error)
-        }
         Err(error) => Err(error),
     }
+}
+
+fn reject_symlinked_ancestors(path: &Path) -> io::Result<()> {
+    let absolute_path = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        env::current_dir()?.join(path)
+    };
+    for ancestor in parent_directory(&absolute_path).ancestors() {
+        if ancestor.as_os_str().is_empty() {
+            continue;
+        }
+        if fs::symlink_metadata(ancestor)?.file_type().is_symlink() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "symlink ancestor rejected",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn parent_directory(path: &Path) -> &Path {
+    path.parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
+}
+
+fn next_session_id() -> Option<u64> {
+    NEXT_SESSION_ID
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+            value.checked_add(1)
+        })
+        .ok()
 }
 
 fn unix_time_ms() -> Result<u64, ()> {
@@ -410,28 +526,21 @@ fn unix_time_ms() -> Result<u64, ()> {
     u64::try_from(duration.as_millis()).map_err(|_| ())
 }
 
-struct PartialVaultCleanup {
+struct StagedVaultCleanup {
     path: PathBuf,
-    armed: bool,
 }
 
-impl PartialVaultCleanup {
+impl StagedVaultCleanup {
     const fn new(path: PathBuf) -> Self {
-        Self { path, armed: true }
-    }
-
-    const fn disarm(&mut self) {
-        self.armed = false;
+        Self { path }
     }
 }
 
-impl Drop for PartialVaultCleanup {
+impl Drop for StagedVaultCleanup {
     fn drop(&mut self) {
-        if self.armed {
-            let _ = fs::remove_file(&self.path);
-            let _ = fs::remove_file(sqlite_sidecar(&self.path, "-wal"));
-            let _ = fs::remove_file(sqlite_sidecar(&self.path, "-shm"));
-        }
+        let _ = fs::remove_file(&self.path);
+        let _ = fs::remove_file(sqlite_sidecar(&self.path, "-wal"));
+        let _ = fs::remove_file(sqlite_sidecar(&self.path, "-shm"));
     }
 }
 
@@ -452,7 +561,10 @@ mod tests {
     use librarian_vault_core::{CancellationFlag, MasterPassword};
     use rusqlite::Connection;
 
-    use super::{CreateError, UnlockError, VaultAgent};
+    use super::{
+        CreateError, StagedVaultCleanup, UnlockError, VaultAgent, parent_directory,
+        reserve_staging_file, sqlite_sidecar, validate_new_target,
+    };
 
     static TEST_DIRECTORY_COUNTER: AtomicU64 = AtomicU64::new(1);
 
@@ -521,6 +633,25 @@ mod tests {
         agent.lock();
         assert!(!agent.operation_is_authorized(permit));
         assert!(agent.begin_operation().is_none());
+    }
+
+    #[test]
+    fn operation_permits_are_bound_to_the_issuing_session() {
+        let first_directory = TestDirectory::new();
+        let second_directory = TestDirectory::new();
+        let first = create_test_vault(&first_directory.vault_path(), "first permit password");
+        let second = create_test_vault(&second_directory.vault_path(), "second permit password");
+        let first_permit = first
+            .begin_operation()
+            .expect("first vault must issue a permit");
+        let second_permit = second
+            .begin_operation()
+            .expect("second vault must issue a permit");
+
+        assert!(first.operation_is_authorized(first_permit));
+        assert!(second.operation_is_authorized(second_permit));
+        assert!(!first.operation_is_authorized(second_permit));
+        assert!(!second.operation_is_authorized(first_permit));
     }
 
     #[test]
@@ -623,6 +754,88 @@ mod tests {
     }
 
     #[test]
+    fn partial_staging_never_publishes_the_target_name() {
+        let directory = TestDirectory::new();
+        let target = directory.vault_path();
+        validate_new_target(&target).expect("new target must be accepted");
+        let staging_path =
+            reserve_staging_file(&target).expect("staging file must be reserved atomically");
+        let cleanup = StagedVaultCleanup::new(staging_path.clone());
+
+        fs::write(&staging_path, b"partial database").expect("partial fixture must be written");
+        assert!(
+            !target.exists(),
+            "the final path must not exist during initialization"
+        );
+
+        drop(cleanup);
+        assert!(!target.exists());
+        assert!(!staging_path.exists());
+    }
+
+    #[test]
+    fn bare_relative_vault_paths_use_the_current_directory_as_parent() {
+        assert_eq!(parent_directory(Path::new("vault.sqlite3")), Path::new("."));
+    }
+
+    #[test]
+    fn oversized_wal_and_shm_sidecars_fail_before_unlock() {
+        let directory = TestDirectory::new();
+        let path = directory.vault_path();
+        let agent = create_test_vault(&path, "sidecar password");
+        drop(agent);
+
+        let wal_path = sqlite_sidecar(&path, "-wal");
+        fs::File::create(&wal_path)
+            .expect("WAL fixture must be created")
+            .set_len(librarian_vault_format::MAX_DATABASE_BYTES)
+            .expect("WAL fixture must be sized");
+        let mut wal_agent = VaultAgent::open_locked(&path);
+        assert_eq!(
+            wal_agent.unlock(password("sidecar password"), &CancellationFlag::new()),
+            Err(UnlockError::Failed)
+        );
+        fs::remove_file(&wal_path).expect("WAL fixture must be removed");
+
+        let shm_path = sqlite_sidecar(&path, "-shm");
+        fs::File::create(&shm_path)
+            .expect("SHM fixture must be created")
+            .set_len(super::MAX_SQLITE_SHM_BYTES + 1)
+            .expect("SHM fixture must be sized");
+        let mut shm_agent = VaultAgent::open_locked(&path);
+        assert_eq!(
+            shm_agent.unlock(password("sidecar password"), &CancellationFlag::new()),
+            Err(UnlockError::Failed)
+        );
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn symlinked_vault_ancestors_fail_closed() {
+        let directory = TestDirectory::new();
+        let real_parent = directory.0.join("real");
+        let linked_parent = directory.0.join("linked");
+        fs::create_dir(&real_parent).expect("real parent must be created");
+        let real_path = real_parent.join("vault.sqlite3");
+        let agent = create_test_vault(&real_path, "ancestor password");
+        drop(agent);
+        create_directory_symlink(&real_parent, &linked_parent);
+
+        let mut linked_agent = VaultAgent::open_locked(linked_parent.join("vault.sqlite3"));
+        assert_eq!(
+            linked_agent.unlock(password("ancestor password"), &CancellationFlag::new()),
+            Err(UnlockError::Failed)
+        );
+        assert!(matches!(
+            VaultAgent::create(
+                linked_parent.join("new-vault.sqlite3"),
+                password("new password")
+            ),
+            Err(CreateError::Failed)
+        ));
+    }
+
+    #[test]
     fn password_never_appears_in_the_database_image() {
         let directory = TestDirectory::new();
         let path = directory.vault_path();
@@ -636,5 +849,16 @@ mod tests {
                 .windows(marker.len())
                 .any(|window| window == marker.as_bytes())
         );
+    }
+
+    #[cfg(unix)]
+    fn create_directory_symlink(original: &Path, link: &Path) {
+        std::os::unix::fs::symlink(original, link).expect("directory symlink must be created");
+    }
+
+    #[cfg(windows)]
+    fn create_directory_symlink(original: &Path, link: &Path) {
+        std::os::windows::fs::symlink_dir(original, link)
+            .expect("directory symlink must be created");
     }
 }
