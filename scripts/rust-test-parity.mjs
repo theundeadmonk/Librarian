@@ -243,26 +243,59 @@ export function describeCargoTargets(target, activeFeatures = new Set()) {
   return targets;
 }
 
-export function collectInventory({
-  cargo = process.env.CARGO ?? "cargo",
-  cwd = repositoryRoot,
-  target: rustTarget,
-} = {}) {
-  const metadataArguments = [
+export function buildMetadataArguments(rustTarget) {
+  const arguments_ = [
     "metadata",
     "--locked",
     "--format-version",
     "1",
   ];
+
   if (rustTarget !== undefined) {
-    metadataArguments.push(
+    arguments_.push(
       "--filter-platform",
       requireNonEmptyString(rustTarget, "Rust target"),
     );
   }
 
+  return arguments_;
+}
+
+export function buildTestArguments(
+  packageName,
+  cargoTarget,
+  activeFeatures,
+  rustTarget,
+) {
+  const arguments_ = [
+    "test",
+    "-p",
+    requireNonEmptyString(packageName, "Cargo package name"),
+    ...cargoTarget.selection,
+    "--locked",
+  ];
+  const features = [...activeFeatures].sort(compareText);
+  if (features.length > 0) {
+    arguments_.push("--features", features.join(","));
+  }
+
+  if (rustTarget !== undefined) {
+    arguments_.push(
+      "--target",
+      requireNonEmptyString(rustTarget, "Rust target"),
+    );
+  }
+
+  return arguments_;
+}
+
+export function collectInventory({
+  cargo = process.env.CARGO ?? "cargo",
+  cwd = repositoryRoot,
+  target: rustTarget,
+} = {}) {
   const metadata = JSON.parse(
-    runCargo(metadataArguments, { cargo, cwd }),
+    runCargo(buildMetadataArguments(rustTarget), { cargo, cwd }),
   );
   const policy = normalizePolicy(readPolicy(defaultPolicyPath));
   const harnessFreeTargets = new Set(policy.harnessFreeTargets);
@@ -309,20 +342,12 @@ export function collectInventory({
         continue;
       }
 
-      const arguments_ = [
-        "test",
-        "-p",
+      const arguments_ = buildTestArguments(
         package_.name,
-        ...cargoTarget.selection,
-        "--locked",
-      ];
-
-      if (rustTarget !== undefined) {
-        arguments_.push(
-          "--target",
-          requireNonEmptyString(rustTarget, "Rust target"),
-        );
-      }
+        cargoTarget,
+        activeFeatures,
+        rustTarget,
+      );
 
       const output = runCargo(
         [...arguments_, "--", "--list", "--format", "terse"],

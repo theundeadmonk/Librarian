@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
+import path from "node:path";
 import { test } from "node:test";
+import { fileURLToPath } from "node:url";
 
 import {
+  buildMetadataArguments,
+  buildTestArguments,
+  collectInventory,
   compareInventories,
   decodeInventory,
   describeCargoTargets,
@@ -9,6 +14,15 @@ import {
   parseTestList,
 } from "./rust-test-parity.mjs";
 
+const testDirectory = path.dirname(fileURLToPath(import.meta.url));
+const featureWorkspace = path.resolve(
+  testDirectory,
+  "..",
+  "tests",
+  "fixtures",
+  "rust-test-parity",
+  "feature-workspace",
+);
 const emptyPolicy = {
   version: 1,
   platformOnlyTests: [],
@@ -152,6 +166,56 @@ test("targets behind inactive required features are not inventoried", () => {
     },
   ]);
 });
+
+test("metadata receives the platform target exactly once", () => {
+  assert.deepEqual(
+    buildMetadataArguments("x86_64-pc-windows-msvc"),
+    [
+      "metadata",
+      "--locked",
+      "--format-version",
+      "1",
+      "--filter-platform",
+      "x86_64-pc-windows-msvc",
+    ],
+  );
+});
+
+test("target listing preserves resolved package features", () => {
+  assert.deepEqual(
+    buildTestArguments(
+      "librarian-example",
+      {
+        identity: "example:gated",
+        selection: ["--example", "gated"],
+      },
+      new Set(["zebra", "desktop"]),
+      "x86_64-pc-windows-msvc",
+    ),
+    [
+      "test",
+      "-p",
+      "librarian-example",
+      "--example",
+      "gated",
+      "--locked",
+      "--features",
+      "desktop,zebra",
+      "--target",
+      "x86_64-pc-windows-msvc",
+    ],
+  );
+});
+
+test(
+  "inventory propagates features activated by another workspace member",
+  { timeout: 120_000 },
+  () => {
+    assert.deepEqual(collectInventory({ cwd: featureWorkspace }), [
+      "feature-provider::example:gated::tests::resolved_feature_is_active::test:active",
+    ]);
+  },
+);
 
 test("bench metadata does not claim to expose the harness setting", () => {
   assert.deepEqual(

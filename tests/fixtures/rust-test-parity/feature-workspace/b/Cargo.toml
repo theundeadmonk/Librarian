@@ -1,0 +1,14 @@
+[package]
+name = "feature-provider"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+enabled = ["dep:optional-support"]
+
+[dependencies]
+optional-support = { path = "../c", optional = true }
+
+[[example]]
+name = "gated"
+required-features = ["enabled"]
