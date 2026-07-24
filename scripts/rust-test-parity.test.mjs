@@ -4,6 +4,7 @@ import { test } from "node:test";
 import {
   compareInventories,
   decodeInventory,
+  describeCargoTargets,
   encodeInventory,
   parseTestList,
 } from "./rust-test-parity.mjs";
@@ -65,6 +66,26 @@ test("the same test name remains distinct across Cargo targets", () => {
   assert.notEqual(libraryTests[0], integrationTests[0]);
   assert.doesNotThrow(() =>
     encodeInventory([...libraryTests, ...integrationTests]),
+  );
+});
+
+test("a doctest-enabled library produces distinct unit and doc targets", () => {
+  assert.deepEqual(
+    describeCargoTargets({
+      doctest: true,
+      kind: ["lib"],
+      name: "librarian_example",
+    }),
+    [
+      {
+        identity: "lib:librarian_example",
+        selection: ["--lib"],
+      },
+      {
+        identity: "doc:librarian_example",
+        selection: ["--doc"],
+      },
+    ],
   );
 });
 

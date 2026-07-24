@@ -52,8 +52,9 @@ On a normal Windows checkout, the build also checks whitespace in the committed 
 Windows is the authoritative MVP build and remains responsible for the native
 application, passkey provider, packaging boundary, and Windows-specific
 filesystem behavior. CI also formats, lints, and tests every Rust workspace
-target on Linux. This second platform catches accidental portability gaps in
-the security core; it does not make Linux a supported Librarian product.
+target and documentation test on Linux. This second platform catches
+accidental portability gaps in the security core; it does not make Linux a
+supported Librarian product.
 
 After both jobs pass, CI compares each Rust test's package, Cargo target,
 harness type, name, and active or ignored status. All platform-neutral tests

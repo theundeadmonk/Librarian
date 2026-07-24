@@ -115,6 +115,14 @@ jobs:
           --locked
           --target x86_64-unknown-linux-gnu
 
+      - name: Test portable Rust documentation
+        run: >-
+          cargo test
+          --workspace
+          --doc
+          --locked
+          --target x86_64-unknown-linux-gnu
+
       - name: Inventory Linux Rust tests
         id: rust_test_inventory
         run: >-

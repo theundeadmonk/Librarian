@@ -140,7 +140,7 @@ function runCargo(arguments_, { cargo, cwd }) {
   return result.stdout;
 }
 
-function describeCargoTarget(target) {
+export function describeCargoTargets(target) {
   const name = requireNonEmptyString(target.name, "Cargo target name");
   if (!Array.isArray(target.kind) || target.kind.length === 0) {
     throw new Error(`Cargo target ${name} has no target kind.`);
@@ -148,7 +148,7 @@ function describeCargoTarget(target) {
 
   const kinds = new Set(target.kind);
   if (kinds.has("custom-build")) {
-    return null;
+    return [];
   }
 
   const libraryKinds = [
@@ -194,7 +194,16 @@ function describeCargoTarget(target) {
   }
 
   const [{ identity, selection }] = selections;
-  return { identity, selection };
+  const targets = [{ identity, selection }];
+
+  if (identity.startsWith("lib:") && target.doctest === true) {
+    targets.push({
+      identity: `doc:${name}`,
+      selection: ["--doc"],
+    });
+  }
+
+  return targets;
 }
 
 export function collectInventory({
@@ -216,8 +225,7 @@ export function collectInventory({
 
   for (const package_ of packages) {
     const targets = package_.targets
-      .map(describeCargoTarget)
-      .filter((target) => target !== null)
+      .flatMap(describeCargoTargets)
       .sort((left, right) => compareText(left.identity, right.identity));
 
     for (const cargoTarget of targets) {

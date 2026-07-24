@@ -129,6 +129,19 @@ Invoke-CheckedProcess `
     ) `
     -WorkingDirectory $repoRoot
 
+Invoke-CheckedProcess `
+    -Label "Rust documentation tests" `
+    -FilePath $toolchain.Cargo `
+    -Arguments @(
+        "test",
+        "--workspace",
+        "--doc",
+        "--locked",
+        "--target",
+        "x86_64-pc-windows-msvc"
+    ) `
+    -WorkingDirectory $repoRoot
+
 $cargoBuildArguments = @(
     "build",
     "--workspace",
