@@ -8,7 +8,16 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+getrandom = "=0.4.3"
 librarian-vault-core = { path = "../vault-core" }
+librarian-vault-format = { path = "../vault-format" }
+rusqlite = { version = "=0.40.1", default-features = false, features = ["backup", "bundled", "limits", "serialize"] }
+
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "=1.1.4", features = ["fs"] }
+
+[target.'cfg(windows)'.dependencies]
+same-file = "=1.0.6"
 
 [lints]
 workspace = true
