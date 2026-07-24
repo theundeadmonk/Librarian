@@ -10,6 +10,14 @@ use std::fmt;
 
 use minicbor::{Decoder, Encoder};
 
+mod records;
+
+pub use records::{
+    MAX_ORIGIN_BYTES, MAX_PASSWORD_BYTES, MAX_SERVICE_NAME_BYTES, MAX_USERNAME_BYTES,
+    RECORD_ENVELOPE_VERSION, RECORD_SCHEMA, RecordEnvelope, WEBSITE_ACCOUNT_RECORD_TYPE,
+    WebsiteAccountPlaintext, encode_record_aad,
+};
+
 pub const CONTAINER_VERSION: u32 = 1;
 pub const MINIMUM_READER_VERSION: u32 = 1;
 pub const KEY_SCHEDULE: u32 = 1;
@@ -299,6 +307,36 @@ impl Manifest {
         &self.entries
     }
 
+    /// Builds the next committed manifest without mutating the authenticated
+    /// current generation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the generation overflows, time moves backwards, or
+    /// the proposed active-record commitments violate the format invariants.
+    pub fn next_generation(
+        &self,
+        committed_at_ms: u64,
+        entries: Vec<ManifestEntry>,
+    ) -> Result<Self, FormatError> {
+        if committed_at_ms < self.committed_at_ms {
+            return Err(FormatError::InvariantViolation);
+        }
+        let next = Self {
+            generation: self
+                .generation
+                .checked_add(1)
+                .ok_or(FormatError::InvariantViolation)?,
+            key_epoch: self.key_epoch,
+            vault_schema: self.vault_schema,
+            created_at_ms: self.created_at_ms,
+            committed_at_ms,
+            entries,
+        };
+        validate_manifest(&next)?;
+        Ok(next)
+    }
+
     /// Encodes the manifest using the deterministic version-1 schema.
     ///
     /// # Errors
@@ -533,6 +571,9 @@ fn validate_manifest(manifest: &Manifest) -> Result<(), FormatError> {
     if manifest.key_epoch == 0 || manifest.vault_schema != VAULT_SCHEMA {
         return Err(FormatError::Unsupported);
     }
+    if manifest.committed_at_ms < manifest.created_at_ms {
+        return Err(FormatError::InvariantViolation);
+    }
     if manifest.entries.len() > MAX_RECORDS {
         return Err(FormatError::TooLarge);
     }
@@ -711,8 +752,8 @@ fn require_end(decoder: &Decoder<'_>, original: &[u8]) -> Result<(), FormatError
 #[cfg(test)]
 mod tests {
     use super::{
-        FormatError, FormatReadiness, Manifest, ManifestEnvelope, MasterWrapper, RecoveryWrapper,
-        VaultHeader, readiness,
+        FormatError, FormatReadiness, Manifest, ManifestEntry, ManifestEnvelope, MasterWrapper,
+        RecoveryWrapper, VaultHeader, readiness,
     };
 
     fn example_header() -> VaultHeader {
@@ -784,5 +825,23 @@ mod tests {
 
         let truncated = &encoded[..encoded.len() - 1];
         assert!(ManifestEnvelope::decode(truncated).is_err());
+    }
+
+    #[test]
+    fn manifest_mutation_increments_once_and_rejects_time_rollback() {
+        let created_at_ms = 1_700_000_000_000;
+        let initial = Manifest::empty(created_at_ms, 1);
+        let committed = initial
+            .next_generation(
+                created_at_ms + 1,
+                vec![ManifestEntry::new([0x11; 16], [0x22; 32])],
+            )
+            .expect("next generation must be valid");
+        assert_eq!(committed.generation(), 1);
+        assert_eq!(committed.committed_at_ms(), created_at_ms + 1);
+        assert!(matches!(
+            committed.next_generation(created_at_ms, Vec::new()),
+            Err(FormatError::InvariantViolation)
+        ));
     }
 }

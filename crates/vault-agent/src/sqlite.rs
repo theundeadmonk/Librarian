@@ -4,11 +4,12 @@ use std::fs::OpenOptions;
 use std::io::{Seek, SeekFrom, Write};
 use std::{fs::File, io, path::Path};
 
+use librarian_vault_core::{EncryptedRecord, PreparedRecordMutation, RecordId, RecordMutationKind};
 #[cfg(any(unix, windows))]
 use rusqlite::MAIN_DB;
-#[cfg(not(any(unix, windows)))]
-use rusqlite::OpenFlags;
-use rusqlite::{Connection, TransactionBehavior, config::DbConfig, limits::Limit, params};
+use rusqlite::{
+    Connection, OpenFlags, TransactionBehavior, config::DbConfig, limits::Limit, params,
+};
 
 use crate::{
     errors::StorageError,
@@ -135,13 +136,24 @@ pub(crate) fn initialize_connection(
     Ok(())
 }
 
-pub(crate) struct GuardedEmptyVault {
+pub(crate) struct GuardedVault {
     pub(crate) header: Vec<u8>,
     pub(crate) manifest: Vec<u8>,
+    pub(crate) records: Vec<EncryptedRecord>,
     pub(crate) input_guards: SqliteInputGuards,
 }
 
-pub(crate) fn read_guarded_empty_vault(path: &Path) -> Result<GuardedEmptyVault, StorageError> {
+pub(crate) struct VaultData {
+    pub(crate) header: Vec<u8>,
+    pub(crate) manifest: Vec<u8>,
+    pub(crate) records: Vec<EncryptedRecord>,
+}
+
+pub(crate) fn read_guarded_vault(path: &Path) -> Result<GuardedVault, StorageError> {
+    read_guarded_vault_with_hooks(path, || {}, || {}, || {})
+}
+
+pub(crate) fn read_guarded_empty_vault(path: &Path) -> Result<GuardedVault, StorageError> {
     read_guarded_empty_vault_with_hooks(path, || {}, || {}, || {})
 }
 
@@ -183,23 +195,42 @@ pub(crate) fn read_guarded_empty_vault_with_hooks(
     after_ancestor_guards: impl FnOnce(),
     before_connection: impl FnOnce(),
     after_connection: impl FnOnce(),
-) -> Result<GuardedEmptyVault, StorageError> {
+) -> Result<GuardedVault, StorageError> {
+    let snapshot = read_guarded_vault_with_hooks(
+        path,
+        after_ancestor_guards,
+        before_connection,
+        after_connection,
+    )?;
+    if !snapshot.records.is_empty() {
+        return Err(StorageError::Schema);
+    }
+    Ok(snapshot)
+}
+
+pub(crate) fn read_guarded_vault_with_hooks(
+    path: &Path,
+    after_ancestor_guards: impl FnOnce(),
+    before_connection: impl FnOnce(),
+    after_connection: impl FnOnce(),
+) -> Result<GuardedVault, StorageError> {
     let mut input_guards = acquire_sqlite_input_guards_with_hook(path, after_ancestor_guards)?;
-    let (header, manifest) =
-        read_empty_vault_from_guards(path, &mut input_guards, before_connection, after_connection)?;
-    Ok(GuardedEmptyVault {
-        header,
-        manifest,
+    let data =
+        read_vault_from_guards(path, &mut input_guards, before_connection, after_connection)?;
+    Ok(GuardedVault {
+        header: data.header,
+        manifest: data.manifest,
+        records: data.records,
         input_guards,
     })
 }
 
-pub(crate) fn read_empty_vault_from_guards(
+pub(crate) fn read_vault_from_guards(
     path: &Path,
     input_guards: &mut SqliteInputGuards,
     before_connection: impl FnOnce(),
     after_connection: impl FnOnce(),
-) -> Result<(Vec<u8>, Vec<u8>), StorageError> {
+) -> Result<VaultData, StorageError> {
     validate_guarded_sqlite_input_sizes(input_guards)?;
     validate_guarded_sqlite_input_paths(path, input_guards)?;
     validate_wal_database_header(&mut input_guards.database)?;
@@ -249,12 +280,210 @@ pub(crate) fn read_empty_vault_from_guards(
     {
         return Err(StorageError::ResourceLimit);
     }
-    if header_count != 1 || manifest_count != 1 || record_count != 0 {
+    if header_count != 1
+        || manifest_count != 1
+        || record_count < 0
+        || usize::try_from(record_count).map_err(|_| StorageError::ResourceLimit)?
+            > librarian_vault_format::MAX_RECORDS
+    {
+        return Err(StorageError::Schema);
+    }
+    let records = read_encrypted_records(&connection)?;
+    if records.len() != usize::try_from(record_count).map_err(|_| StorageError::ResourceLimit)? {
         return Err(StorageError::Schema);
     }
     validate_guarded_sqlite_input_sizes(input_guards)?;
     validate_guarded_sqlite_input_paths(path, input_guards)?;
-    Ok((header, manifest))
+    Ok(VaultData {
+        header,
+        manifest,
+        records,
+    })
+}
+
+fn read_encrypted_records(connection: &Connection) -> Result<Vec<EncryptedRecord>, StorageError> {
+    let mut statement = connection
+        .prepare("SELECT record_id, envelope FROM encrypted_records ORDER BY record_id")
+        .map_err(|_| StorageError::Sqlite)?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?))
+        })
+        .map_err(|_| StorageError::Sqlite)?;
+    let mut records = Vec::new();
+    for row in rows {
+        let (record_id, envelope) = row.map_err(|_| StorageError::Sqlite)?;
+        if records.len() >= librarian_vault_format::MAX_RECORDS
+            || envelope.len() > librarian_vault_format::MAX_RECORD_ENVELOPE_BYTES
+        {
+            return Err(StorageError::ResourceLimit);
+        }
+        let record_id: [u8; 16] = record_id.try_into().map_err(|_| StorageError::Schema)?;
+        records.push(EncryptedRecord::new(
+            RecordId::from_bytes(record_id),
+            envelope,
+        ));
+    }
+    Ok(records)
+}
+
+pub(crate) fn apply_record_mutation(
+    path: &Path,
+    expected_header: &[u8],
+    expected_manifest: &[u8],
+    expected_records: &[EncryptedRecord],
+    mutation: &PreparedRecordMutation,
+    before_commit: impl FnOnce() -> Result<(), StorageError>,
+) -> Result<(), StorageError> {
+    let ancestor_guards = acquire_ancestor_guards(path).map_err(|_| StorageError::Filesystem)?;
+    let database_guard =
+        open_regular_file_guard_with_ancestor_guards(&ancestor_guards, path, true, false)
+            .map_err(|_| StorageError::Filesystem)?;
+    guarded_file_matches_path_with_ancestor_guards(&database_guard, path, &ancestor_guards)?;
+    let mut connection = Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(|_| StorageError::Sqlite)?;
+    configure_limits(&connection).map_err(|_| StorageError::Sqlite)?;
+    connection
+        .set_db_config(DbConfig::SQLITE_DBCONFIG_DEFENSIVE, true)
+        .map_err(|_| StorageError::Sqlite)?;
+    connection
+        .pragma_update(None, "trusted_schema", false)
+        .map_err(|_| StorageError::Sqlite)?;
+    connection
+        .pragma_update(None, "synchronous", "FULL")
+        .map_err(|_| StorageError::Sqlite)?;
+    connection
+        .pragma_update(None, "foreign_keys", true)
+        .map_err(|_| StorageError::Sqlite)?;
+    connection
+        .pragma_update(None, "max_page_count", MAX_PAGE_COUNT)
+        .map_err(|_| StorageError::Sqlite)?;
+    let journal_mode: String = connection
+        .pragma_query_value(None, "journal_mode", |row| row.get(0))
+        .map_err(|_| StorageError::Sqlite)?;
+    if journal_mode != "wal" {
+        return Err(StorageError::Schema);
+    }
+    verify_database_integrity(&connection)?;
+    verify_application_schema(&connection)?;
+    guarded_file_matches_path_with_ancestor_guards(&database_guard, path, &ancestor_guards)?;
+
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|_| StorageError::Sqlite)?;
+    let current = read_vault_data_from_connection(&transaction)?;
+    if current.header != expected_header
+        || current.manifest != expected_manifest
+        || current.records != expected_records
+    {
+        return Err(StorageError::Conflict);
+    }
+
+    let affected = match mutation.kind() {
+        RecordMutationKind::Insert => transaction.execute(
+            "INSERT INTO encrypted_records(record_id, envelope) VALUES (?1, ?2)",
+            params![
+                mutation.id().as_bytes().as_slice(),
+                mutation.envelope().ok_or(StorageError::Schema)?
+            ],
+        ),
+        RecordMutationKind::Update => transaction.execute(
+            "UPDATE encrypted_records SET envelope = ?2 WHERE record_id = ?1",
+            params![
+                mutation.id().as_bytes().as_slice(),
+                mutation.envelope().ok_or(StorageError::Schema)?
+            ],
+        ),
+        RecordMutationKind::Delete => transaction.execute(
+            "DELETE FROM encrypted_records WHERE record_id = ?1",
+            params![mutation.id().as_bytes().as_slice()],
+        ),
+    }
+    .map_err(|_| StorageError::Sqlite)?;
+    if affected != 1 {
+        return Err(StorageError::Conflict);
+    }
+    if transaction
+        .execute(
+            "UPDATE vault_manifest SET envelope = ?1 WHERE singleton = 1",
+            params![mutation.manifest_envelope()],
+        )
+        .map_err(|_| StorageError::Sqlite)?
+        != 1
+    {
+        return Err(StorageError::Schema);
+    }
+    before_commit()?;
+    transaction.commit().map_err(|_| StorageError::Sqlite)?;
+    guarded_file_matches_path_with_ancestor_guards(&database_guard, path, &ancestor_guards)?;
+
+    let committed = read_vault_data_from_connection(&connection)?;
+    let expected_committed_records = apply_to_expected_records(expected_records, mutation)?;
+    if committed.header != expected_header
+        || committed.manifest != mutation.manifest_envelope()
+        || committed.records != expected_committed_records
+    {
+        return Err(StorageError::Integrity);
+    }
+    Ok(())
+}
+
+fn read_vault_data_from_connection(connection: &Connection) -> Result<VaultData, StorageError> {
+    let header = connection
+        .query_row(
+            "SELECT header FROM vault_header WHERE singleton = 1",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|_| StorageError::Sqlite)?;
+    let manifest = connection
+        .query_row(
+            "SELECT envelope FROM vault_manifest WHERE singleton = 1",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|_| StorageError::Sqlite)?;
+    let records = read_encrypted_records(connection)?;
+    Ok(VaultData {
+        header,
+        manifest,
+        records,
+    })
+}
+
+fn apply_to_expected_records(
+    records: &[EncryptedRecord],
+    mutation: &PreparedRecordMutation,
+) -> Result<Vec<EncryptedRecord>, StorageError> {
+    let mut expected = records.to_vec();
+    match mutation.kind() {
+        RecordMutationKind::Insert => expected.push(EncryptedRecord::new(
+            mutation.id(),
+            mutation.envelope().ok_or(StorageError::Schema)?.to_vec(),
+        )),
+        RecordMutationKind::Update => {
+            let record = expected
+                .iter_mut()
+                .find(|record| record.id() == mutation.id())
+                .ok_or(StorageError::Conflict)?;
+            *record = EncryptedRecord::new(
+                mutation.id(),
+                mutation.envelope().ok_or(StorageError::Schema)?.to_vec(),
+            );
+        }
+        RecordMutationKind::Delete => {
+            let original_len = expected.len();
+            expected.retain(|record| record.id() != mutation.id());
+            if expected.len() == original_len {
+                return Err(StorageError::Conflict);
+            }
+        }
+    }
+    expected.sort_by_key(EncryptedRecord::id);
+    Ok(expected)
 }
 
 pub(crate) fn verify_application_schema(connection: &Connection) -> Result<(), StorageError> {

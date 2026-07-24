@@ -26,6 +26,13 @@ use librarian_vault_format::{
 use sha2::Sha256;
 use zeroize::Zeroizing;
 
+mod records;
+
+pub use records::{
+    EncryptedRecord, PreparedRecordMutation, RecordId, RecordMutationKind, RecordOperationError,
+    WebsiteAccount, WebsiteAccountInput, WebsiteAccountInputError,
+};
+
 const KEY_BYTES: usize = 32;
 const WRAPPED_KEY_BYTES: usize = 48;
 const INITIAL_KEY_EPOCH: u32 = 1;
@@ -183,25 +190,24 @@ impl CreatedVault {
 /// traits.
 pub struct UnlockedVault {
     vault_root_key: Zeroizing<[u8; KEY_BYTES]>,
-    vault_id: [u8; 16],
-    key_epoch: u32,
-    generation: u64,
+    header: VaultHeader,
+    manifest: Manifest,
 }
 
 impl UnlockedVault {
     #[must_use]
     pub const fn vault_id(&self) -> &[u8; 16] {
-        &self.vault_id
+        self.header.vault_id()
     }
 
     #[must_use]
     pub const fn key_epoch(&self) -> u32 {
-        self.key_epoch
+        self.header.key_epoch()
     }
 
     #[must_use]
     pub const fn generation(&self) -> u64 {
-        self.generation
+        self.manifest.generation()
     }
 
     /// A private proof that the key allocation is retained by this session.
@@ -232,10 +238,11 @@ pub fn create_vault(
 ///
 /// Returns `Cancelled` when the supplied flag wins the attempt, and `Failed`
 /// for every other unsuccessful unlock condition.
-pub fn unlock_empty_vault(
+pub fn unlock_vault(
     password: MasterPassword,
     header_bytes: &[u8],
     manifest_envelope_bytes: &[u8],
+    records: &[EncryptedRecord],
     cancellation: &CancellationFlag,
 ) -> Result<UnlockedVault, UnlockError> {
     if cancellation.is_cancelled() {
@@ -286,18 +293,41 @@ pub fn unlock_empty_vault(
         return Err(UnlockError::Cancelled);
     }
     if manifest.key_epoch() != header.key_epoch()
-        || !manifest.entries().is_empty()
         || manifest.vault_schema() != librarian_vault_format::VAULT_SCHEMA
     {
         return Err(UnlockError::Failed);
     }
 
-    Ok(UnlockedVault {
+    let unlocked = UnlockedVault {
         vault_root_key,
-        vault_id: *header.vault_id(),
-        key_epoch: header.key_epoch(),
-        generation: manifest.generation(),
-    })
+        header,
+        manifest,
+    };
+    records::authenticate_records(&unlocked, records, cancellation)?;
+    Ok(unlocked)
+}
+
+/// Authenticates a version-1 vault that is expected to contain no records.
+///
+/// This compatibility entry point keeps the lifecycle tests explicit while
+/// the agent uses [`unlock_vault`] for general vaults.
+///
+/// # Errors
+///
+/// Returns the same deliberately uniform error classes as [`unlock_vault`].
+pub fn unlock_empty_vault(
+    password: MasterPassword,
+    header_bytes: &[u8],
+    manifest_envelope_bytes: &[u8],
+    cancellation: &CancellationFlag,
+) -> Result<UnlockedVault, UnlockError> {
+    unlock_vault(
+        password,
+        header_bytes,
+        manifest_envelope_bytes,
+        &[],
+        cancellation,
+    )
 }
 
 trait EntropySource {
@@ -380,9 +410,8 @@ fn create_vault_with_entropy(
 
     let session = UnlockedVault {
         vault_root_key,
-        vault_id,
-        key_epoch: INITIAL_KEY_EPOCH,
-        generation: manifest.generation(),
+        header,
+        manifest,
     };
     let _ = session.root_key();
 

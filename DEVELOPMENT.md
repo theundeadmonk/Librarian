@@ -75,12 +75,16 @@ target declared with `harness = false` must therefore also be named in
 executable at the target level without passing libtest arguments and rejects
 duplicate, inactive, or stale declarations.
 
-The foundation now includes the empty-vault lifecycle, encrypted key hierarchy,
-master-password unlock, and guarded local SQLite ownership described by issue
-#10. Credential records, browser site access, authenticated IPC, native
-messaging, Windows Hello, and production passkey storage remain disabled until
-their security gates and implementation issues are complete. Do not use the
-current build with real credentials.
+The trusted Rust path now includes the vault lifecycle, encrypted key
+hierarchy, master-password unlock, guarded local SQLite ownership, and the
+single website-account CRUD subset from issues #10 and #11. Each mutation
+commits one opaque record envelope and the next encrypted manifest generation
+in the same immediate transaction. Account origins use the pinned WHATWG URL
+parser and are stored as exact normalized HTTP(S) origins. Browser site access,
+authenticated IPC, native messaging, Windows Hello, and production passkey
+storage remain disabled until their security gates and implementation issues
+are complete. Tests use uniquely identifiable disposable values; do not use
+the current build with real credentials.
 
 ## Dependency updates
 

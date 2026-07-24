@@ -36,7 +36,7 @@ The MVP will be delivered as four complete Windows vertical slices. The first sl
 
 The existing passkey-provider feasibility spike is intentionally maintained separately from this production repository because it contains disposable Microsoft sample code and mock credential storage.
 
-The production repository now has a Windows-only foundation for the accepted component boundaries. It deliberately implements no credential handling before the threat model and security decisions are complete. See [Windows development](DEVELOPMENT.md) for the pinned toolchain and single-command build.
+The production repository now has a Windows-only foundation for the accepted component boundaries. Its trusted Rust path can exercise one encrypted website account with disposable test values, but no desktop, browser, or provider client can reach those operations and production credential use remains prohibited until the security gates are complete. See [Windows development](DEVELOPMENT.md) for the pinned toolchain and single-command build.
 
 ## Security
 
