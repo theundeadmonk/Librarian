@@ -49,7 +49,12 @@ powershell.exe -NoProfile -File .\scripts\build.ps1 -Configuration Release -Plat
 Build outputs and diagnostic logs are written beneath `artifacts/` or the component-specific ignored output directories. Native artifacts are unsigned; production MSIX generation and signing are deferred to issue #19.
 On a normal Windows checkout, the build also checks whitespace in the committed branch diff, the index, and the working tree. GitHub Actions supplies the pull request or push base commit explicitly.
 
-The foundation contains no functional vault, cryptography, credential storage, browser site access, native-messaging protocol, agent IPC, or passkey implementation. Do not use it with real credentials.
+The foundation now includes the empty-vault lifecycle, encrypted key hierarchy,
+master-password unlock, and guarded local SQLite ownership described by issue
+#10. Credential records, browser site access, authenticated IPC, native
+messaging, Windows Hello, and production passkey storage remain disabled until
+their security gates and implementation issues are complete. Do not use the
+current build with real credentials.
 
 ## Dependency updates
 
