@@ -911,7 +911,6 @@ fn verify_application_schema(connection: &Connection) -> Result<(), ()> {
     let mut statement = connection
         .prepare(
             "SELECT type, name FROM sqlite_schema
-             WHERE name NOT GLOB 'sqlite_*'
              ORDER BY type, name",
         )
         .map_err(|_| ())?;
@@ -1739,6 +1738,46 @@ mod tests {
         assert_eq!(
             usize::try_from(stored_bytes).expect("stored length must fit"),
             envelope.len()
+        );
+    }
+
+    #[test]
+    fn reserved_prefix_schema_objects_fail_closed() {
+        let connection = Connection::open_in_memory().expect("SQLite fixture must open");
+        connection
+            .execute_batch(
+                "CREATE TABLE vault_header (
+                    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                    header BLOB NOT NULL
+                ) STRICT;
+                CREATE TABLE vault_manifest (
+                    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                    envelope BLOB NOT NULL
+                ) STRICT;
+                CREATE TABLE encrypted_records (
+                    record_id BLOB PRIMARY KEY NOT NULL CHECK (length(record_id) = 16),
+                    envelope BLOB NOT NULL
+                ) STRICT, WITHOUT ROWID;",
+            )
+            .expect("production schema fixture must initialize");
+        connection
+            .pragma_update(None, "writable_schema", true)
+            .expect("schema-tampering fixture must enable direct writes");
+        connection
+            .execute(
+                "INSERT INTO sqlite_schema(type, name, tbl_name, rootpage, sql)
+                 VALUES ('view', 'sqlite_attacker', 'sqlite_attacker', 0,
+                         'CREATE VIEW sqlite_attacker AS SELECT 1')",
+                [],
+            )
+            .expect("reserved-prefix schema row must be injected");
+        connection
+            .pragma_update(None, "writable_schema", false)
+            .expect("schema-tampering fixture must restore normal behavior");
+
+        assert!(
+            super::verify_application_schema(&connection).is_err(),
+            "every unexpected schema row must fail closed, including reserved prefixes"
         );
     }
 
