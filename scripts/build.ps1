@@ -151,6 +151,12 @@ Invoke-CheckedProcess `
     -Arguments @("ci", "--ignore-scripts") `
     -WorkingDirectory $repoRoot
 
+Invoke-CheckedProcess `
+    -Label "Cross-platform Rust test parity checker tests" `
+    -FilePath $toolchain.Npm `
+    -Arguments @("run", "check:test-parity") `
+    -WorkingDirectory $repoRoot
+
 $typeScript = Join-Path $repoRoot "node_modules\typescript\bin\tsc"
 if (-not (Test-Path $typeScript)) {
     throw "The locked TypeScript compiler was not restored at '$typeScript'."

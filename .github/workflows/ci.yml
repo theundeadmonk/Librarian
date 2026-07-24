@@ -1,4 +1,4 @@
-name: Windows foundation
+name: Windows foundation and Rust parity
 
 on:
   pull_request:
@@ -10,14 +10,16 @@ permissions:
   contents: read
 
 concurrency:
-  group: windows-foundation-${{ github.workflow }}-${{ github.ref }}
+  group: foundation-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  build-and-test:
+  build_and_test:
     name: Build and test Windows foundation
     runs-on: windows-2025
     timeout-minutes: 30
+    outputs:
+      rust_test_inventory: ${{ steps.rust_test_inventory.outputs.inventory }}
 
     steps:
       - name: Check out repository
@@ -53,3 +55,92 @@ jobs:
         env:
           LIBRARIAN_DIFF_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
         run: ./scripts/build.ps1 -Configuration Release -Platform x64
+
+      - name: Inventory Windows Rust tests
+        id: rust_test_inventory
+        shell: pwsh
+        run: >-
+          node ./scripts/rust-test-parity.mjs inventory
+          --target x86_64-pc-windows-msvc
+          --github-output inventory
+
+  portable_rust:
+    name: Build and test portable Rust on Linux
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      RUSTUP_TOOLCHAIN: 1.97.1-x86_64-unknown-linux-gnu
+    outputs:
+      rust_test_inventory: ${{ steps.rust_test_inventory.outputs.inventory }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Install pinned Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24.18.0
+
+      - name: Install pinned Rust toolchain
+        shell: bash
+        run: >-
+          rustup toolchain install
+          1.97.1-x86_64-unknown-linux-gnu
+          --profile minimal
+          --component clippy
+          --component rustfmt
+
+      - name: Test parity checker
+        run: node --test ./scripts/rust-test-parity.test.mjs
+
+      - name: Check Rust formatting
+        run: cargo fmt --all -- --check
+
+      - name: Lint portable Rust
+        run: >-
+          cargo clippy
+          --workspace
+          --all-targets
+          --locked
+          --target x86_64-unknown-linux-gnu
+          --
+          -D warnings
+
+      - name: Test portable Rust
+        run: >-
+          cargo test
+          --workspace
+          --all-targets
+          --locked
+          --target x86_64-unknown-linux-gnu
+
+      - name: Inventory Linux Rust tests
+        id: rust_test_inventory
+        run: >-
+          node ./scripts/rust-test-parity.mjs inventory
+          --target x86_64-unknown-linux-gnu
+          --github-output inventory
+
+  rust_test_parity:
+    name: Compare Windows and Linux Rust tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    needs:
+      - build_and_test
+      - portable_rust
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Install pinned Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24.18.0
+
+      - name: Enforce exact Rust test parity
+        env:
+          WINDOWS_TEST_INVENTORY: ${{ needs.build_and_test.outputs.rust_test_inventory }}
+          LINUX_TEST_INVENTORY: ${{ needs.portable_rust.outputs.rust_test_inventory }}
+        run: node ./scripts/rust-test-parity.mjs compare
