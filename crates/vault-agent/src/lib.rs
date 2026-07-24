@@ -30,12 +30,10 @@ use rusqlite::MAIN_DB;
 #[cfg(not(unix))]
 use rusqlite::OpenFlags;
 use rusqlite::{Connection, TransactionBehavior, config::DbConfig, limits::Limit, params};
-#[cfg(unix)]
-use std::io::Read;
 #[cfg(any(unix, windows))]
-use std::io::{Seek, SeekFrom, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 
-const MAX_SQLITE_VALUE_BYTES: i32 = 8 * 1024 * 1024;
+const MAX_SQLITE_ROW_BYTES: i32 = 8 * 1024 * 1024 + 64 * 1024;
 const MAX_PAGE_COUNT: u32 = 131_072;
 const MAX_SQLITE_SHM_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_STAGING_ATTEMPTS: u64 = 128;
@@ -684,6 +682,7 @@ fn read_empty_vault_from_guards(
     }
     validate_guarded_sqlite_input_sizes(input_guards)?;
     validate_guarded_sqlite_input_paths(path, input_guards)?;
+    verify_database_integrity(&connection)?;
     verify_application_schema(&connection)?;
 
     let header: Vec<u8> = connection
@@ -758,7 +757,7 @@ fn snapshot_sidecars_are_absent(_input: &SqliteInputGuards) -> bool {
 fn open_guarded_read_connection(
     _path: &Path,
     input_guards: &mut SqliteInputGuards,
-) -> Result<Connection, ()> {
+) -> Result<GuardedReadConnection, ()> {
     if input_guards.wal.is_some() || input_guards.shm.is_some() {
         return Err(());
     }
@@ -784,19 +783,128 @@ fn open_guarded_read_connection(
     connection
         .deserialize_read_exact(MAIN_DB, io::Cursor::new(image), database_bytes, true)
         .map_err(|_| ())?;
-    Ok(connection)
+    Ok(GuardedReadConnection { connection })
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn open_guarded_read_connection(
+    _path: &Path,
+    input_guards: &mut SqliteInputGuards,
+) -> Result<GuardedReadConnection, ()> {
+    let snapshot = WindowsSqliteSnapshot::create(input_guards)?;
+    let connection = Connection::open_with_flags(
+        &snapshot.database,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(|_| ())?;
+    Ok(GuardedReadConnection {
+        connection,
+        _snapshot: snapshot,
+    })
+}
+
+#[cfg(not(any(unix, windows)))]
 fn open_guarded_read_connection(
     path: &Path,
     _input_guards: &mut SqliteInputGuards,
-) -> Result<Connection, ()> {
-    Connection::open_with_flags(
+) -> Result<GuardedReadConnection, ()> {
+    let connection = Connection::open_with_flags(
         path,
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )
-    .map_err(|_| ())
+    .map_err(|_| ())?;
+    Ok(GuardedReadConnection { connection })
+}
+
+struct GuardedReadConnection {
+    connection: Connection,
+    #[cfg(windows)]
+    _snapshot: WindowsSqliteSnapshot,
+}
+
+impl std::ops::Deref for GuardedReadConnection {
+    type Target = Connection;
+
+    fn deref(&self) -> &Self::Target {
+        &self.connection
+    }
+}
+
+#[cfg(windows)]
+struct WindowsSqliteSnapshot {
+    database: PathBuf,
+    directory: PathBuf,
+}
+
+#[cfg(windows)]
+impl WindowsSqliteSnapshot {
+    fn create(input: &SqliteInputGuards) -> Result<Self, ()> {
+        let directory = reserve_windows_snapshot_directory()?;
+        let database = directory.join("vault.sqlite3");
+        if copy_guarded_snapshot_file(&input.database, &database).is_err()
+            || input.wal.as_ref().is_some_and(|wal| {
+                copy_guarded_snapshot_file(wal, &sqlite_sidecar(&database, "-wal")).is_err()
+            })
+        {
+            let snapshot = Self {
+                database,
+                directory,
+            };
+            drop(snapshot);
+            return Err(());
+        }
+        Ok(Self {
+            database,
+            directory,
+        })
+    }
+}
+
+#[cfg(windows)]
+impl Drop for WindowsSqliteSnapshot {
+    fn drop(&mut self) {
+        for suffix in ["-shm", "-wal", "-journal"] {
+            let _ = fs::remove_file(sqlite_sidecar(&self.database, suffix));
+        }
+        let _ = fs::remove_file(&self.database);
+        let _ = fs::remove_dir(&self.directory);
+    }
+}
+
+#[cfg(windows)]
+fn reserve_windows_snapshot_directory() -> Result<PathBuf, ()> {
+    for _ in 0..MAX_STAGING_ATTEMPTS {
+        let mut random = [0_u8; 16];
+        getrandom::fill(&mut random).map_err(|_| ())?;
+        let directory = env::temp_dir().join(format!(
+            "librarian-vault-snapshot-{:032x}",
+            u128::from_le_bytes(random)
+        ));
+        match fs::create_dir(&directory) {
+            Ok(()) => return Ok(directory),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(_) => return Err(()),
+        }
+    }
+    Err(())
+}
+
+#[cfg(windows)]
+fn copy_guarded_snapshot_file(source: &File, target: &Path) -> Result<(), ()> {
+    let expected_bytes = source.metadata().map_err(|_| ())?.len();
+    let mut source = source.try_clone().map_err(|_| ())?;
+    source.seek(SeekFrom::Start(0)).map_err(|_| ())?;
+    let mut target = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .open(target)
+        .map_err(|_| ())?;
+    let copied_bytes = io::copy(&mut source.take(expected_bytes), &mut target).map_err(|_| ())?;
+    if copied_bytes != expected_bytes {
+        return Err(());
+    }
+    target.sync_all().map_err(|_| ())
 }
 
 fn verify_application_schema(connection: &Connection) -> Result<(), ()> {
@@ -864,8 +972,18 @@ fn verify_application_schema(connection: &Connection) -> Result<(), ()> {
     Ok(())
 }
 
+fn verify_database_integrity(connection: &Connection) -> Result<(), ()> {
+    let status: String = connection
+        .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+        .map_err(|_| ())?;
+    if status != "ok" {
+        return Err(());
+    }
+    Ok(())
+}
+
 fn configure_limits(connection: &Connection) -> rusqlite::Result<()> {
-    connection.set_limit(Limit::SQLITE_LIMIT_LENGTH, MAX_SQLITE_VALUE_BYTES)?;
+    connection.set_limit(Limit::SQLITE_LIMIT_LENGTH, MAX_SQLITE_ROW_BYTES)?;
     connection.set_limit(Limit::SQLITE_LIMIT_SQL_LENGTH, 64 * 1024)?;
     connection.set_limit(Limit::SQLITE_LIMIT_COLUMN, 16)?;
     connection.set_limit(Limit::SQLITE_LIMIT_EXPR_DEPTH, 32)?;
@@ -898,10 +1016,14 @@ fn acquire_sqlite_input_guards_with_hook(
     let wal = open_optional_regular_file_guard_with_ancestor_guards(
         &ancestor_guards,
         &sqlite_sidecar(path, "-wal"),
+        false,
+        false,
     )?;
     let shm = open_optional_regular_file_guard_with_ancestor_guards(
         &ancestor_guards,
         &sqlite_sidecar(path, "-shm"),
+        false,
+        false,
     )?;
     Ok(SqliteInputGuards {
         database,
@@ -916,17 +1038,27 @@ fn refresh_sqlite_sidecar_guards(path: &Path, input: &mut SqliteInputGuards) -> 
         input.wal = open_optional_regular_file_guard_with_ancestor_guards(
             &input.ancestor_guards,
             &sqlite_sidecar(path, "-wal"),
+            false,
+            false,
         )?;
     }
     if input.shm.is_none() {
         input.shm = open_optional_regular_file_guard_with_ancestor_guards(
             &input.ancestor_guards,
             &sqlite_sidecar(path, "-shm"),
+            false,
+            false,
         )?;
     }
     Ok(())
 }
 
+#[cfg(windows)]
+fn reacquire_sqlite_sidecar_guards(path: &Path, input: &mut SqliteInputGuards) -> Result<(), ()> {
+    refresh_sqlite_sidecar_guards(path, input)
+}
+
+#[cfg(not(windows))]
 fn reacquire_sqlite_sidecar_guards(path: &Path, input: &mut SqliteInputGuards) -> Result<(), ()> {
     input.wal = None;
     input.shm = None;
@@ -1036,8 +1168,15 @@ fn guarded_file_size(file: Option<&File>, maximum_bytes: u64) -> Result<u64, ()>
 fn open_optional_regular_file_guard_with_ancestor_guards(
     ancestor_guards: &AncestorGuards,
     path: &Path,
+    share_writes: bool,
+    share_deletes: bool,
 ) -> Result<Option<File>, ()> {
-    match open_regular_file_guard_with_ancestor_guards(ancestor_guards, path, true, true) {
+    match open_regular_file_guard_with_ancestor_guards(
+        ancestor_guards,
+        path,
+        share_writes,
+        share_deletes,
+    ) {
         Ok(file) => Ok(Some(file)),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
         Err(_) => Err(()),
@@ -1572,6 +1711,38 @@ mod tests {
     }
 
     #[test]
+    fn sqlite_row_limit_allows_the_maximum_manifest_payload() {
+        let connection = Connection::open_in_memory().expect("SQLite fixture must open");
+        super::configure_limits(&connection).expect("production limits must apply");
+        connection
+            .execute_batch(
+                "CREATE TABLE manifest_fixture (
+                    singleton INTEGER PRIMARY KEY,
+                    envelope BLOB NOT NULL
+                ) STRICT;",
+            )
+            .expect("manifest fixture schema must initialize");
+        let envelope = vec![0_u8; librarian_vault_format::MAX_MANIFEST_ENVELOPE_BYTES];
+        connection
+            .execute(
+                "INSERT INTO manifest_fixture(singleton, envelope) VALUES (1, ?1)",
+                [&envelope],
+            )
+            .expect("a format-valid maximum manifest must fit within the SQLite row limit");
+        let stored_bytes: i64 = connection
+            .query_row(
+                "SELECT length(envelope) FROM manifest_fixture WHERE singleton = 1",
+                [],
+                |row| row.get(0),
+            )
+            .expect("maximum manifest length must remain readable");
+        assert_eq!(
+            usize::try_from(stored_bytes).expect("stored length must fit"),
+            envelope.len()
+        );
+    }
+
+    #[test]
     fn lock_invalidates_existing_operation_permits() {
         let directory = TestDirectory::new();
         let mut agent = create_test_vault(&directory.vault_path(), "permit password");
@@ -1771,6 +1942,66 @@ mod tests {
         let mut restarted = VaultAgent::open_locked(&path);
         assert_eq!(
             restarted.unlock(password("truncate password"), &CancellationFlag::new()),
+            Err(UnlockError::Failed)
+        );
+        assert!(!restarted.is_unlocked());
+    }
+
+    #[test]
+    fn freelist_corruption_fails_closed() {
+        use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
+
+        let directory = TestDirectory::new();
+        let path = directory.vault_path();
+        let agent = create_test_vault(&path, "integrity password");
+        drop(agent);
+
+        let connection = Connection::open(&path).expect("test database must open");
+        connection
+            .execute_batch(
+                "CREATE TABLE transient_pages(payload BLOB) STRICT;
+                 INSERT INTO transient_pages(payload) VALUES (zeroblob(65536));
+                 DROP TABLE transient_pages;
+                 PRAGMA wal_checkpoint(TRUNCATE);",
+            )
+            .expect("fixture must create and free non-live pages");
+        drop(connection);
+
+        let mut database = File::options()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .expect("database fixture must reopen");
+        let mut header = [0_u8; 100];
+        database
+            .read_exact(&mut header)
+            .expect("SQLite header must be readable");
+        let encoded_page_size = u16::from_be_bytes([header[16], header[17]]);
+        let page_size = if encoded_page_size == 1 {
+            65_536_u64
+        } else {
+            u64::from(encoded_page_size)
+        };
+        let first_freelist_trunk =
+            u32::from_be_bytes([header[32], header[33], header[34], header[35]]);
+        assert_ne!(
+            first_freelist_trunk, 0,
+            "fixture must leave at least one freelist trunk"
+        );
+        let trunk_offset = u64::from(first_freelist_trunk - 1)
+            .checked_mul(page_size)
+            .expect("freelist trunk offset must fit");
+        database
+            .seek(SeekFrom::Start(trunk_offset))
+            .and_then(|_| database.write_all(&u32::MAX.to_be_bytes()))
+            .and_then(|()| database.write_all(&u32::MAX.to_be_bytes()))
+            .and_then(|()| database.sync_all())
+            .expect("freelist trunk must be corrupted beyond the live rows");
+        drop(database);
+
+        let mut restarted = VaultAgent::open_locked(&path);
+        assert_eq!(
+            restarted.unlock(password("integrity password"), &CancellationFlag::new()),
             Err(UnlockError::Failed)
         );
         assert!(!restarted.is_unlocked());
@@ -2305,6 +2536,69 @@ mod tests {
         drop(input_guards);
         assert!(path.exists());
         assert!(replacement.exists());
+
+        let wal_path = sqlite_sidecar(&path, "-wal");
+        let shm_path = sqlite_sidecar(&path, "-shm");
+        fs::write(&wal_path, b"guarded WAL").expect("WAL fixture must be written");
+        fs::write(&shm_path, b"guarded SHM").expect("SHM fixture must be written");
+        let sidecar_guards =
+            acquire_sqlite_input_guards(&path).expect("SQLite sidecars must be guarded");
+        for sidecar in [&wal_path, &shm_path] {
+            assert!(
+                File::options().write(true).open(sidecar).is_err(),
+                "checked SQLite sidecars must deny concurrent writers"
+            );
+            assert!(
+                fs::remove_file(sidecar).is_err(),
+                "checked SQLite sidecars must deny replacement"
+            );
+        }
+        drop(sidecar_guards);
+        fs::remove_file(&wal_path).expect("WAL fixture must be removable after guard drop");
+        fs::remove_file(&shm_path).expect("SHM fixture must be removable after guard drop");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn valid_wal_is_read_from_a_guarded_snapshot() {
+        let directory = TestDirectory::new();
+        let path = directory.vault_path();
+        let agent = create_test_vault(&path, "WAL recovery password");
+        drop(agent);
+
+        let connection = Connection::open(&path).expect("WAL fixture database must open");
+        connection
+            .pragma_update(None, "wal_autocheckpoint", 0)
+            .expect("automatic checkpoints must be disabled");
+        connection
+            .pragma_update(None, "user_version", 1)
+            .expect("a valid committed WAL frame must be written");
+        let database_before_checkpoint =
+            fs::read(&path).expect("pre-checkpoint database must be captured");
+        let wal_path = sqlite_sidecar(&path, "-wal");
+        let committed_wal = fs::read(&wal_path).expect("committed WAL must be captured");
+        assert!(
+            committed_wal.len() > 32,
+            "fixture must contain a WAL header and at least one frame"
+        );
+        drop(connection);
+
+        let shm_path = sqlite_sidecar(&path, "-shm");
+        if shm_path.exists() {
+            fs::remove_file(&shm_path).expect("closed fixture SHM must be removable");
+        }
+        if wal_path.exists() {
+            fs::remove_file(&wal_path).expect("closed fixture WAL must be removable");
+        }
+        fs::write(&path, database_before_checkpoint)
+            .expect("pre-checkpoint database must be restored");
+        fs::write(&wal_path, committed_wal).expect("committed WAL must be restored");
+
+        let mut restarted = VaultAgent::open_locked(&path);
+        restarted
+            .unlock(password("WAL recovery password"), &CancellationFlag::new())
+            .expect("a valid crash-recovery WAL must unlock from the guarded snapshot");
+        assert!(restarted.is_unlocked());
     }
 
     #[cfg(unix)]

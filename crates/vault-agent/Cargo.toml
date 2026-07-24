@@ -16,6 +16,7 @@ rusqlite = { version = "=0.40.1", default-features = false, features = ["backup"
 rustix = { version = "=1.1.4", features = ["fs"] }
 
 [target.'cfg(windows)'.dependencies]
+getrandom = "=0.4.3"
 same-file = "=1.0.6"
 
 [lints]
