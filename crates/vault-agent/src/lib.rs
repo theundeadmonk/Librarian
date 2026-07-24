@@ -19,13 +19,15 @@ use std::{
 use librarian_vault_core::{
     CancellationFlag, MasterPassword, RecoveryKey, UnlockedVault, create_vault, unlock_empty_vault,
 };
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use rusqlite::MAIN_DB;
 #[cfg(not(unix))]
 use rusqlite::OpenFlags;
 use rusqlite::{Connection, TransactionBehavior, config::DbConfig, limits::Limit, params};
 #[cfg(unix)]
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::Read;
+#[cfg(any(unix, windows))]
+use std::io::{Seek, SeekFrom, Write};
 
 const MAX_SQLITE_VALUE_BYTES: i32 = 8 * 1024 * 1024;
 const MAX_PAGE_COUNT: u32 = 131_072;
@@ -126,16 +128,27 @@ impl VaultAgent {
 
         initialize_database(&mut staging, &header, &manifest).map_err(|_| CreateError::Failed)?;
         ensure_sidecars_absent(staging.path()).map_err(|()| CreateError::Failed)?;
-        publish_staged_vault(&mut staging, &path)?;
+        let published_guard = publish_staged_vault(&mut staging, &path)?;
         if staging.remove_name().is_err() {
+            drop(published_guard);
             let _ = fs::remove_file(&path);
             return Err(CreateError::Failed);
         }
+        let sealed_guard = match seal_published_vault(&published_guard, &path) {
+            Ok(guard) => guard,
+            Err(error) => {
+                remove_target_if_guarded_matches(&published_guard, &path);
+                return Err(error);
+            }
+        };
+        drop(published_guard);
         if sync_parent_directory(&path).is_err() {
+            drop(sealed_guard);
             let _ = fs::remove_file(&path);
             let _ = sync_parent_directory(&path);
             return Err(CreateError::Failed);
         }
+        drop(sealed_guard);
 
         Ok((
             Self {
@@ -186,6 +199,9 @@ impl VaultAgent {
         before_publish: impl FnOnce(),
     ) -> Result<(), UnlockError> {
         self.lock();
+        if cancellation.is_cancelled() {
+            return Err(UnlockError::Cancelled);
+        }
         let (header, manifest) = read_empty_vault(&self.path).map_err(|()| UnlockError::Failed)?;
         let session = match unlock_empty_vault(password, &header, &manifest, cancellation) {
             Ok(session) => session,
@@ -298,7 +314,7 @@ fn reserve_staging_file(target: &Path) -> Result<StagedVault, CreateError> {
     Err(CreateError::Failed)
 }
 
-fn publish_staged_vault(staging: &mut StagedVault, target: &Path) -> Result<(), CreateError> {
+fn publish_staged_vault(staging: &mut StagedVault, target: &Path) -> Result<File, CreateError> {
     reject_reparse_ancestors(target).map_err(|_| CreateError::Failed)?;
     ensure_sidecars_absent(target).map_err(|()| CreateError::Failed)?;
     let reservation = staging
@@ -307,26 +323,47 @@ fn publish_staged_vault(staging: &mut StagedVault, target: &Path) -> Result<(), 
     guarded_file_matches_path(&reservation, staging.path()).map_err(|()| CreateError::Failed)?;
     match fs::hard_link(staging.path(), target) {
         Ok(()) => {
-            let published_guard = open_regular_file_guard(target, true, false);
-            #[cfg(unix)]
+            let published_guard = open_regular_file_guard(target, true, true);
             let publication_is_valid = published_guard
                 .as_ref()
                 .is_ok_and(|published| guarded_files_match(&reservation, published).is_ok());
-            #[cfg(not(unix))]
-            let publication_is_valid = published_guard.is_ok();
             if !publication_is_valid || ensure_sidecars_absent(target).is_err() {
+                let target_is_reserved_file = published_guard
+                    .as_ref()
+                    .is_ok_and(|published| guarded_files_match(&reservation, published).is_ok());
                 drop(published_guard);
                 staging.release_reservation();
-                let _ = fs::remove_file(target);
+                drop(reservation);
+                if target_is_reserved_file {
+                    let _ = fs::remove_file(target);
+                }
                 return Err(CreateError::Failed);
             }
-            Ok(())
+            published_guard.map_err(|_| CreateError::Failed)
         }
         Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
             Err(CreateError::AlreadyExists)
         }
         Err(_) => Err(CreateError::Failed),
     }
+}
+
+fn seal_published_vault(published: &File, target: &Path) -> Result<File, CreateError> {
+    let sealed = open_regular_file_guard(target, false, false).map_err(|_| CreateError::Failed)?;
+    guarded_files_match(published, &sealed).map_err(|()| CreateError::Failed)?;
+    ensure_sidecars_absent(target).map_err(|()| CreateError::Failed)?;
+    Ok(sealed)
+}
+
+fn remove_target_if_guarded_matches(published: &File, target: &Path) {
+    let Ok(current) = open_regular_file_guard(target, true, true) else {
+        return;
+    };
+    if guarded_files_match(published, &current).is_err() {
+        return;
+    }
+    drop(current);
+    let _ = fs::remove_file(target);
 }
 
 #[cfg(windows)]
@@ -345,7 +382,7 @@ fn sync_parent_directory(path: &Path) -> io::Result<()> {
     fs::File::open(parent_directory(path))?.sync_all()
 }
 
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 fn initialize_database(
     staging: &mut StagedVault,
     header: &[u8],
@@ -369,7 +406,7 @@ fn initialize_database(
     Ok(())
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn initialize_database(
     staging: &mut StagedVault,
     header: &[u8],
@@ -744,6 +781,26 @@ fn guarded_files_match(left: &File, right: &File) -> Result<(), ()> {
     Ok(())
 }
 
+#[cfg(windows)]
+fn guarded_files_match(left: &File, right: &File) -> Result<(), ()> {
+    let left = same_file::Handle::from_file(left.try_clone().map_err(|_| ())?).map_err(|_| ())?;
+    let right = same_file::Handle::from_file(right.try_clone().map_err(|_| ())?).map_err(|_| ())?;
+    if left != right {
+        return Err(());
+    }
+    Ok(())
+}
+
+#[cfg(not(any(unix, windows)))]
+fn guarded_files_match(left: &File, right: &File) -> Result<(), ()> {
+    let left = left.metadata().map_err(|_| ())?;
+    let right = right.metadata().map_err(|_| ())?;
+    if !left.is_file() || !right.is_file() || left.len() != right.len() {
+        return Err(());
+    }
+    Ok(())
+}
+
 #[cfg(unix)]
 fn guarded_file_matches_path(file: &File, path: &Path) -> Result<(), ()> {
     use std::os::unix::fs::MetadataExt;
@@ -762,17 +819,8 @@ fn guarded_file_matches_path(file: &File, path: &Path) -> Result<(), ()> {
 
 #[cfg(windows)]
 fn guarded_file_matches_path(file: &File, path: &Path) -> Result<(), ()> {
-    let guarded = file.metadata().map_err(|_| ())?;
-    let current = fs::symlink_metadata(path).map_err(|_| ())?;
-    if is_reparse_point(&guarded)
-        || is_reparse_point(&current)
-        || !guarded.is_file()
-        || !current.is_file()
-        || guarded.len() != current.len()
-    {
-        return Err(());
-    }
-    Ok(())
+    let current = open_regular_file_guard(path, true, true).map_err(|_| ())?;
+    guarded_files_match(file, &current)
 }
 
 #[cfg(not(any(unix, windows)))]
@@ -862,7 +910,7 @@ fn create_staging_reservation(path: &Path) -> io::Result<File> {
         .read(true)
         .write(true)
         .create_new(true)
-        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+        .share_mode(FILE_SHARE_READ)
         .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
         .open(path)
 }
@@ -1054,11 +1102,14 @@ mod tests {
     #[cfg(windows)]
     use rusqlite::OpenFlags;
 
-    #[cfg(windows)]
-    use super::acquire_sqlite_input_guards;
     use super::{
         CreateError, UnlockError, VaultAgent, parent_directory, reserve_staging_file,
         sqlite_sidecar, sync_parent_directory, validate_new_target,
+    };
+    #[cfg(windows)]
+    use super::{
+        acquire_sqlite_input_guards, initialize_database, publish_staged_vault,
+        seal_published_vault,
     };
     #[cfg(unix)]
     use super::{
@@ -1191,6 +1242,20 @@ mod tests {
 
         assert_eq!(
             agent.unlock(password("cancel password"), &cancellation),
+            Err(UnlockError::Cancelled)
+        );
+        assert!(!agent.is_unlocked());
+    }
+
+    #[test]
+    fn pre_cancelled_unlock_does_not_read_the_vault_path() {
+        let directory = TestDirectory::new();
+        let mut agent = VaultAgent::open_locked(directory.vault_path());
+        let cancellation = CancellationFlag::new();
+        cancellation.cancel();
+
+        assert_eq!(
+            agent.unlock(password("cancel before read"), &cancellation),
             Err(UnlockError::Cancelled)
         );
         assert!(!agent.is_unlocked());
@@ -1392,13 +1457,20 @@ mod tests {
 
     #[test]
     fn partial_staging_never_publishes_the_target_name() {
+        use std::io::Write;
+
         let directory = TestDirectory::new();
         let target = directory.vault_path();
         validate_new_target(&target).expect("new target must be accepted");
-        let staging =
+        let mut staging =
             reserve_staging_file(&target).expect("staging file must be reserved atomically");
 
-        fs::write(staging.path(), b"partial database").expect("partial fixture must be written");
+        staging
+            .reservation
+            .as_mut()
+            .expect("reservation must remain live")
+            .write_all(b"partial database")
+            .expect("partial fixture must be written through the reservation");
         assert!(
             !target.exists(),
             "the final path must not exist during initialization"
@@ -1415,11 +1487,18 @@ mod tests {
     fn staging_reservation_cannot_be_replaced_during_initialization() {
         let directory = TestDirectory::new();
         let target = directory.vault_path();
-        let staging =
+        let mut staging =
             reserve_staging_file(&target).expect("staging file must be reserved atomically");
         let replacement = directory.0.join("replacement.sqlite3");
         fs::write(&replacement, b"replacement").expect("replacement fixture must be written");
 
+        assert!(
+            fs::OpenOptions::new()
+                .write(true)
+                .open(staging.path())
+                .is_err(),
+            "the live reservation must deny external writers"
+        );
         assert!(
             fs::remove_file(staging.path()).is_err(),
             "the live reservation must deny deletion"
@@ -1429,6 +1508,43 @@ mod tests {
             "the live reservation must deny replacement"
         );
         assert!(replacement.exists());
+
+        initialize_database(&mut staging, b"header", b"manifest")
+            .expect("initialization through the reserved handle must succeed");
+        let image = fs::read(staging.path()).expect("staged database must remain readable");
+        assert_eq!(&image[..16], b"SQLite format 3\0");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn publication_rejects_a_same_size_replacement_after_linking() {
+        let directory = TestDirectory::new();
+        let target = directory.vault_path();
+        let mut staging =
+            reserve_staging_file(&target).expect("staging file must be reserved atomically");
+        initialize_database(&mut staging, b"header", b"manifest")
+            .expect("staged database must initialize");
+        let published = publish_staged_vault(&mut staging, &target)
+            .expect("the staged database must be linked and identity-checked");
+        staging
+            .remove_name()
+            .expect("the staging name must be removed");
+
+        let replacement_size = usize::try_from(
+            published
+                .metadata()
+                .expect("published metadata must be readable")
+                .len(),
+        )
+        .expect("test database size must fit in memory");
+        fs::remove_file(&target).expect("the deletion-sharing test guard must permit replacement");
+        fs::write(&target, vec![0_u8; replacement_size])
+            .expect("same-size replacement must be written");
+
+        assert!(
+            seal_published_vault(&published, &target).is_err(),
+            "stable Windows identity must reject a same-size replacement"
+        );
     }
 
     #[cfg(unix)]
