@@ -86,15 +86,37 @@ function parseHarnessList(output, label) {
   );
 }
 
+function normalizeHarnessTests(tests, targetIdentity, label) {
+  const isDoctestTarget = targetIdentity.includes("::doc:");
+  const normalized = tests.map((test) => ({
+    ...test,
+    name: isDoctestTarget ? test.name.replaceAll("\\", "/") : test.name,
+  }));
+  const keys = normalized.map((test) => `${test.name}\0${test.type}`);
+
+  if (new Set(keys).size !== keys.length) {
+    throw new Error(`${label} contains duplicate normalized test identities.`);
+  }
+
+  return normalized;
+}
+
 export function parseTestList(targetIdentity, output, ignoredOutput = "") {
   const qualifiedTarget = requireNonEmptyString(
     targetIdentity,
     "Cargo target identity",
   );
-  const listedTests = parseHarnessList(output, `${qualifiedTarget} test-list`);
-  const ignoredTests = parseHarnessList(
-    ignoredOutput,
-    `${qualifiedTarget} ignored-test-list`,
+  const listedLabel = `${qualifiedTarget} test-list`;
+  const ignoredLabel = `${qualifiedTarget} ignored-test-list`;
+  const listedTests = normalizeHarnessTests(
+    parseHarnessList(output, listedLabel),
+    qualifiedTarget,
+    listedLabel,
+  );
+  const ignoredTests = normalizeHarnessTests(
+    parseHarnessList(ignoredOutput, ignoredLabel),
+    qualifiedTarget,
+    ignoredLabel,
   );
   const listedKeys = new Set(
     listedTests.map((test) => `${test.name}\0${test.type}`),
@@ -146,10 +168,19 @@ function runCargo(arguments_, { cargo, cwd }) {
   return result.stdout;
 }
 
-export function describeCargoTargets(target) {
+export function describeCargoTargets(target, activeFeatures = new Set()) {
   const name = requireNonEmptyString(target.name, "Cargo target name");
   if (!Array.isArray(target.kind) || target.kind.length === 0) {
     throw new Error(`Cargo target ${name} has no target kind.`);
+  }
+
+  const requiredFeatures = target["required-features"] ?? [];
+  if (!Array.isArray(requiredFeatures)) {
+    throw new Error(`Cargo target ${name} required-features must be an array.`);
+  }
+
+  if (requiredFeatures.some((feature) => !activeFeatures.has(feature))) {
+    return [];
   }
 
   const kinds = new Set(target.kind);
@@ -217,24 +248,67 @@ export function collectInventory({
   cwd = repositoryRoot,
   target: rustTarget,
 } = {}) {
+  const metadataArguments = [
+    "metadata",
+    "--locked",
+    "--format-version",
+    "1",
+  ];
+  if (rustTarget !== undefined) {
+    metadataArguments.push(
+      "--filter-platform",
+      requireNonEmptyString(rustTarget, "Rust target"),
+    );
+  }
+
   const metadata = JSON.parse(
-    runCargo(
-      ["metadata", "--locked", "--no-deps", "--format-version", "1"],
-      { cargo, cwd },
-    ),
+    runCargo(metadataArguments, { cargo, cwd }),
   );
+  const policy = normalizePolicy(readPolicy(defaultPolicyPath));
+  const harnessFreeTargets = new Set(policy.harnessFreeTargets);
   const workspaceMembers = new Set(metadata.workspace_members);
+  const resolveNodes = metadata.resolve?.nodes;
+  if (!Array.isArray(resolveNodes)) {
+    throw new Error("Cargo metadata did not include resolved feature state.");
+  }
+
+  const activeFeaturesByPackage = new Map(
+    resolveNodes.map((node) => [node.id, new Set(node.features)]),
+  );
   const packages = metadata.packages
     .filter((package_) => workspaceMembers.has(package_.id))
     .sort((left, right) => compareText(left.name, right.name));
+  const discoveredTargets = new Set();
   const inventory = [];
 
   for (const package_ of packages) {
+    const activeFeatures =
+      activeFeaturesByPackage.get(package_.id) ?? new Set();
+    const allTargets = package_.targets.flatMap((target) =>
+      describeCargoTargets(
+        target,
+        new Set(target["required-features"] ?? []),
+      ),
+    );
+    for (const cargoTarget of allTargets) {
+      if (!cargoTarget.identity.startsWith("doc:")) {
+        discoveredTargets.add(`${package_.name}::${cargoTarget.identity}`);
+      }
+    }
+
     const targets = package_.targets
-      .flatMap(describeCargoTargets)
+      .flatMap((target) => describeCargoTargets(target, activeFeatures))
       .sort((left, right) => compareText(left.identity, right.identity));
 
     for (const cargoTarget of targets) {
+      const qualifiedTarget = `${package_.name}::${cargoTarget.identity}`;
+      if (harnessFreeTargets.has(qualifiedTarget)) {
+        inventory.push(
+          `${qualifiedTarget}::<harness-free-target>::target:active`,
+        );
+        continue;
+      }
+
       const arguments_ = [
         "test",
         "-p",
@@ -260,12 +334,22 @@ export function collectInventory({
       );
       inventory.push(
         ...parseTestList(
-          `${package_.name}::${cargoTarget.identity}`,
+          qualifiedTarget,
           output,
           ignoredOutput,
         ),
       );
     }
+  }
+
+  const staleHarnessFreeTargets = policy.harnessFreeTargets.filter(
+    (target) => !discoveredTargets.has(target),
+  );
+  if (staleHarnessFreeTargets.length > 0) {
+    throw new Error(
+      "Harness-free target policy entries do not match Cargo metadata:\n" +
+        formatTests(staleHarnessFreeTargets),
+    );
   }
 
   return normalizeInventory(inventory, "Rust test inventory");
@@ -282,6 +366,35 @@ function normalizePolicy(policy) {
 
   if (!Array.isArray(policy.platformOnlyTests)) {
     throw new Error("Parity policy platformOnlyTests must be an array.");
+  }
+
+  const harnessFreeTargets = policy.harnessFreeTargets ?? [];
+  if (!Array.isArray(harnessFreeTargets)) {
+    throw new Error("Parity policy harnessFreeTargets must be an array.");
+  }
+
+  const normalizedHarnessFreeTargets = harnessFreeTargets.map(
+    (target, index) => {
+      const normalized = requireNonEmptyString(
+        target,
+        `Harness-free target ${index}`,
+      );
+      if (
+        !normalized.includes("::") ||
+        normalized.includes("::doc:")
+      ) {
+        throw new Error(
+          `Harness-free target ${index} must use package::kind:name identity.`,
+        );
+      }
+      return normalized;
+    },
+  );
+  if (
+    new Set(normalizedHarnessFreeTargets).size !==
+    normalizedHarnessFreeTargets.length
+  ) {
+    throw new Error("Parity policy contains duplicate harness-free targets.");
   }
 
   const entries = policy.platformOnlyTests.map((entry, index) => {
@@ -315,7 +428,10 @@ function normalizePolicy(policy) {
     throw new Error("Parity policy contains duplicate platform/test entries.");
   }
 
-  return entries;
+  return {
+    harnessFreeTargets: normalizedHarnessFreeTargets.sort(compareText),
+    platformOnlyTests: entries,
+  };
 }
 
 function difference(left, right) {
@@ -338,7 +454,7 @@ export function compareInventories(windowsInventory, linuxInventory, policy) {
   const linuxSet = new Set(linux);
   const actualWindowsOnly = difference(windows, linuxSet);
   const actualLinuxOnly = difference(linux, windowsSet);
-  const policyEntries = normalizePolicy(policy);
+  const policyEntries = normalizePolicy(policy).platformOnlyTests;
   const expectedWindowsOnly = policyEntries
     .filter((entry) => entry.platform === "windows")
     .map((entry) => entry.test)

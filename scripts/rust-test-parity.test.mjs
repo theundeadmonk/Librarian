@@ -115,6 +115,79 @@ test("rustdoc timing summaries do not enter doctest inventories", () => {
   );
 });
 
+test("doctest path separators normalize across Windows and Linux", () => {
+  const windowsDoctests = parseTestList(
+    "librarian-example::doc:librarian_example",
+    [
+      "crates\\example\\src\\lib.rs - add_one (line 3): test",
+      "all doctests ran in 0.18s; merged doctests compilation took 0.18s",
+      "",
+    ].join("\n"),
+  );
+  const linuxDoctests = parseTestList(
+    "librarian-example::doc:librarian_example",
+    [
+      "crates/example/src/lib.rs - add_one (line 3): test",
+      "all doctests ran in 0.18s; merged doctests compilation took 0.18s",
+      "",
+    ].join("\n"),
+  );
+
+  assert.deepEqual(windowsDoctests, linuxDoctests);
+});
+
+test("targets behind inactive required features are not inventoried", () => {
+  const target = {
+    "required-features": ["desktop"],
+    kind: ["bin"],
+    name: "desktop-helper",
+    test: true,
+  };
+
+  assert.deepEqual(describeCargoTargets(target, new Set()), []);
+  assert.deepEqual(describeCargoTargets(target, new Set(["desktop"])), [
+    {
+      identity: "bin:desktop-helper",
+      selection: ["--bin", "desktop-helper"],
+    },
+  ]);
+});
+
+test("bench metadata does not claim to expose the harness setting", () => {
+  assert.deepEqual(
+    describeCargoTargets({
+      kind: ["bench"],
+      name: "criterion",
+      test: false,
+    }),
+    [
+      {
+        identity: "bench:criterion",
+        selection: ["--bench", "criterion"],
+      },
+    ],
+  );
+});
+
+test("harness-free target policy rejects duplicate identities", () => {
+  assert.throws(
+    () =>
+      compareInventories(
+        ["crate::shared"],
+        ["crate::shared"],
+        {
+          harnessFreeTargets: [
+            "crate::bench:criterion",
+            "crate::bench:criterion",
+          ],
+          platformOnlyTests: [],
+          version: 1,
+        },
+      ),
+    /duplicate harness-free targets/u,
+  );
+});
+
 test("active versus ignored status creates a parity difference", () => {
   const windowsTests = parseTestList(
     "librarian-example::lib:librarian_example",

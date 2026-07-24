@@ -1,5 +1,6 @@
 {
   "version": 1,
+  "harnessFreeTargets": [],
   "platformOnlyTests": [
     {
       "platform": "windows",

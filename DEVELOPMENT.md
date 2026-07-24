@@ -64,6 +64,13 @@ operating-system-specific test must be listed in
 for an undocumented difference and for a stale policy entry, so removing,
 renaming, ignoring, or accidentally excluding a Windows-only test is also
 visible. Aggregate test counts are not used as a substitute for test identity.
+The inventory follows Cargo's resolved feature set, excludes targets whose
+required features are inactive, and normalizes platform-specific path
+separators in documentation-test identities. Cargo's stable metadata does not
+expose the `harness` manifest setting. A target declared with `harness = false`
+must therefore also be named in `harnessFreeTargets` in
+`tests/rust-test-parity.json`; CI compares that executable at the target level
+without passing libtest arguments and rejects stale declarations.
 
 The foundation now includes the empty-vault lifecycle, encrypted key hierarchy,
 master-password unlock, and guarded local SQLite ownership described by issue
