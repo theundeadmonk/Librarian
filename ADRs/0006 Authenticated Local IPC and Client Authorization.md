@@ -570,7 +570,7 @@ Version 1 defaults:
 | Concurrent vault mutations | 1 |
 | Concurrent lock transitions | 1 |
 | Ordinary operation deadline | 5 seconds |
-| Password unlock deadline | 30 seconds |
+| Password KDF operation deadline (create or unlock) | 30 seconds |
 | Windows-mediated passkey transaction | 120 seconds |
 | Event queue per connection | 8 |
 

@@ -3,8 +3,8 @@ use librarian_agent_protocol::{
     ClientHello, ClientRole, Connection, ConnectionError, ConnectionLimits, CorrelationId,
     EndpointDescriptor, EventQueue, Frame, FrameError, FrameHeader, MAX_EVENT_QUEUE,
     MAX_PAYLOAD_BYTES, MessageKind, OperationCode, OperationRequest, ProtocolError,
-    PublicErrorCode, RequestEnvelope, ResponseEnvelope, RetryCategory, Version, encode_account,
-    encode_account_summaries,
+    PublicErrorCode, RequestEnvelope, ResponseEnvelope, RetryCategory, UNLOCK_TIMEOUT_MS, Version,
+    encode_account, encode_account_summaries,
 };
 use zeroize::Zeroizing;
 
@@ -441,6 +441,33 @@ fn request_ids_cancellation_backpressure_and_epochs_are_deterministic() {
         Err(BeginRequestError::Connection(ConnectionError::InvalidFrame))
     );
     assert!(connection.is_closed());
+}
+
+#[test]
+fn create_and_unlock_share_the_password_kdf_deadline_cap() {
+    let connection = connection(ClientRole::Desktop);
+    for (request_id, operation, idempotency_key) in [
+        (1, OperationCode::CreateVault, Some([0x31; 16])),
+        (2, OperationCode::UnlockMasterPassword, None),
+    ] {
+        let request = RequestEnvelope::new(
+            operation,
+            0,
+            u32::MAX,
+            idempotency_key,
+            Zeroizing::new(vec![0x80]),
+        )
+        .expect("bounded request");
+        let header = request_header(
+            request_id,
+            request.encode().expect("request must encode").len(),
+        );
+        let permit = connection
+            .begin_request(&header, &request, 9)
+            .expect("password KDF request must be admitted");
+        assert_eq!(permit.effective_timeout_ms(), UNLOCK_TIMEOUT_MS);
+        connection.finish(permit).expect("request must finish");
+    }
 }
 
 #[test]
