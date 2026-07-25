@@ -487,7 +487,10 @@ impl RequestEnvelope {
         idempotency_key: Option<[u8; 16]>,
         body: Zeroizing<Vec<u8>>,
     ) -> Result<Self, ProtocolError> {
-        if timeout_ms == 0 || body.len() > MAX_REQUEST_BODY_BYTES {
+        if timeout_ms == 0
+            || body.len() > MAX_REQUEST_BODY_BYTES
+            || (idempotency_key.is_some() && !operation.requires_idempotency_key())
+        {
             return Err(ProtocolError::InvariantViolation);
         }
         Ok(Self {

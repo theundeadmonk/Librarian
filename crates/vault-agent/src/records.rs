@@ -274,18 +274,20 @@ impl VaultAgent {
         }
         let path = self.path.clone().ok_or(AccountError::Failed)?;
         let next_manifest = prepared.manifest_envelope().to_vec();
-        if apply_record_mutation(
+        match apply_record_mutation(
             &path,
             &snapshot.header,
             &snapshot.manifest,
             &snapshot.records,
             &prepared,
             before_commit,
-        )
-        .is_err()
-        {
-            self.lock();
-            return Err(AccountError::Failed);
+        ) {
+            Ok(()) => {}
+            Err(StorageError::Aborted) => return Err(AccountError::Aborted),
+            Err(_) => {
+                self.lock();
+                return Err(AccountError::Failed);
+            }
         }
         if !self.operation_is_authorized(permit) {
             self.lock();

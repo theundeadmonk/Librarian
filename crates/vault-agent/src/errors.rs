@@ -19,6 +19,7 @@ pub(crate) enum StorageError {
     Randomness,
     Clock,
     Conflict,
+    Aborted,
 }
 
 /// A non-secret failure while creating a new local vault.
@@ -62,6 +63,7 @@ impl std::error::Error for UnlockError {}
 pub enum AccountError {
     Locked,
     NotFound,
+    Aborted,
     Failed,
 }
 
@@ -70,6 +72,7 @@ impl fmt::Display for AccountError {
         formatter.write_str(match self {
             Self::Locked => "the vault is locked",
             Self::NotFound => "website account was not found",
+            Self::Aborted => "website account operation was aborted",
             Self::Failed => "website account operation failed",
         })
     }

@@ -173,6 +173,14 @@ A hostile local process can still cause temporary denial of service by racing
 startup or repeatedly connecting. It cannot become an authenticated peer merely
 by winning that race.
 
+Within the agent process, a runtime also reserves the vault target before
+opening it. Existing targets retain a stable open file-identity handle in
+addition to their normalized canonical path, so hard links, alternate casing,
+and syntactic aliases cannot create two owners for one vault. Missing targets
+use a canonical parent plus a case-normalized final component on Windows; the
+reservation is upgraded to the published file identity while the ownership and
+commit gates are both held.
+
 ### Pipe security descriptor
 
 Do not use the default security descriptor. Create a protected DACL containing
@@ -475,6 +483,12 @@ After `ServerHello`:
   connection; and
 - disconnect or peer-process exit cancels all work owned by that connection.
 
+Admission, registration, cancel, disconnect, lock, and terminal response
+commitment share one ordering gate. An admitted request is registered before a
+lock or disconnect may complete. A terminal response remains behind that gate
+until the authenticated transport synchronously writes all bytes or reports
+failure; it cannot be queued for a later write after a lock acknowledgement.
+
 No authorization token, connection ID, request ID, nonce, or discovery field is
 accepted on a different connection. Captured frames are therefore unusable as
 authorization even before the operation-specific nonce and transaction checks
@@ -565,7 +579,7 @@ Version 1 defaults:
 | In-flight requests per connection | 4 |
 | In-flight requests globally | 32 |
 | Issued request IDs per connection lifetime | 65,536 |
-| Cached mutation idempotency outcomes per agent start | 1,024 |
+| Cached mutation idempotency outcomes in the replay window | 1,024 |
 | Concurrent password KDF operations | 1 |
 | Concurrent vault mutations | 1 |
 | Concurrent lock transitions | 1 |
@@ -614,7 +628,18 @@ The implementation binds each cached mutation result to an HMAC-SHA-256
 fingerprint of the complete canonical operation and body under a random
 per-agent-start key. Reusing a key for a different payload is a conflict, and
 the cache retains neither a plaintext credential nor a reusable unkeyed
-password digest.
+password digest. Only operations defined as idempotent mutations may carry a
+key; a key on a read, status, unlock, or lock request is rejected during
+canonical envelope validation. The cache is a bounded first-in, first-out
+replay window: admitting a new mutation evicts the oldest completed outcome
+when necessary, while in-flight keys remain reserved. Exhausting the window
+therefore cannot permanently disable mutations; clients must not rely on
+replay results after an entry has aged out.
+
+Cancellation, deadline, or epoch change observed at a mutation's commit gate
+uses a distinct rollback result. It does not masquerade as storage corruption
+and does not lock the shared vault session; only an actual integrity, storage,
+or cryptographic failure invalidates that session.
 
 ## Public error model
 
@@ -828,10 +853,11 @@ Issue #13 implements these layers as:
   security QoS, and guarded atomic discovery descriptor lifecycle; and
 - `crates/vault-agent::runtime`, containing the sole vault owner, global/KDF/
   mutation/lock admission, a commit gate that orders publication and terminal
-  response commitment against lock and sign-out, typed desktop dispatch,
-  encoded-size-aware bounded account paging, connection-bound cancellation,
-  lock epochs, core-failure state synchronization, sign-out shutdown, and
-  bounded keyed idempotency outcomes.
+  transport writes against lock, cancel, disconnect, and sign-out, typed
+  desktop dispatch, encoded-size-aware bounded account paging,
+  connection-bound cancellation, lock epochs, stable file-identity ownership,
+  core-failure state synchronization, sign-out shutdown, and bounded keyed
+  idempotency outcomes.
 
 The production entry point remains fail closed until issue #19 supplies the
 signed MSIX manifest, immutable role paths, package-local state path, and

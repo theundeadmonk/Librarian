@@ -211,6 +211,21 @@ fn secret_bodies_never_appear_in_debug_output() {
 }
 
 #[test]
+fn idempotency_keys_are_rejected_for_non_mutating_operations() {
+    assert_eq!(
+        RequestEnvelope::new(
+            OperationCode::GetAccount,
+            9,
+            5_000,
+            Some([0xA5; 16]),
+            Zeroizing::new(vec![0x81, 0x50]),
+        )
+        .map(|_| ()),
+        Err(ProtocolError::InvariantViolation)
+    );
+}
+
+#[test]
 fn response_errors_are_stable_and_detail_free() {
     let failure = ResponseEnvelope::failure(
         PublicErrorCode::Locked,

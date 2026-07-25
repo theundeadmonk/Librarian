@@ -3,18 +3,19 @@ use std::{
     path::PathBuf,
     sync::{
         Arc,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
+        mpsc,
     },
     thread,
     time::{Duration, Instant},
 };
 
 use librarian_agent_protocol::{
-    AgentState, CURRENT_VERSION, ClientHello, ClientRole, Connection, ConnectionLimits,
-    FrameHeader, MessageKind, OperationCode, OperationRequest, PublicErrorCode, RequestEnvelope,
-    ResponseEnvelope,
+    AgentState, CURRENT_VERSION, ClientHello, ClientRole, Connection, ConnectionError,
+    ConnectionLimits, FrameHeader, MessageKind, OperationCode, OperationRequest, PublicErrorCode,
+    RequestEnvelope, ResponseEnvelope,
 };
-use librarian_vault_agent::{AgentRuntime, RuntimeStartError};
+use librarian_vault_agent::{AgentRuntime, DispatchError, RuntimeStartError};
 use minicbor::Decoder;
 use zeroize::Zeroizing;
 
@@ -77,10 +78,23 @@ fn dispatch(
     operation: &OperationRequest,
     idempotency_key: Option<[u8; 16]>,
 ) -> ResponseEnvelope {
-    let operation_code = operation.operation();
+    let (request, header) =
+        request_parts(runtime, connection, request_id, operation, idempotency_key);
+    runtime
+        .dispatch(connection, &header, &request, copy_response)
+        .expect("request dispatch")
+}
+
+fn request_parts(
+    runtime: &AgentRuntime,
+    connection: &Connection,
+    request_id: u64,
+    operation: &OperationRequest,
+    idempotency_key: Option<[u8; 16]>,
+) -> (RequestEnvelope, FrameHeader) {
     let body = operation.encode().expect("operation body");
     let request = RequestEnvelope::new(
-        operation_code,
+        operation.operation(),
         runtime.unlock_epoch(),
         30_000,
         idempotency_key,
@@ -96,9 +110,12 @@ fn dispatch(
         request_id,
     )
     .expect("request header");
-    runtime
-        .dispatch(connection, &header, &request)
-        .expect("request dispatch")
+    (request, header)
+}
+
+fn copy_response(response: &ResponseEnvelope) -> Result<ResponseEnvelope, DispatchError> {
+    let encoded = response.encode().map_err(|_| DispatchError::Internal)?;
+    ResponseEnvelope::decode(&encoded).map_err(|_| DispatchError::Internal)
 }
 
 fn create(password: &str) -> OperationRequest {
@@ -247,6 +264,127 @@ fn desktop_protocol_crud_is_typed_paged_idempotent_and_lock_bound() {
 }
 
 #[test]
+fn secret_response_write_completes_before_lock_acknowledgement() {
+    let directory = TestDirectory::new();
+    let runtime = Arc::new(AgentRuntime::start(directory.vault_path()).expect("runtime starts"));
+    let setup_client = connection(
+        ClientRole::Desktop,
+        runtime.state(),
+        runtime.unlock_epoch(),
+        9,
+    );
+    assert_eq!(
+        dispatch(
+            &runtime,
+            &setup_client,
+            1,
+            &create("response barrier password"),
+            Some([0x11; 16]),
+        )
+        .error(),
+        None
+    );
+    let added = dispatch(
+        &runtime,
+        &setup_client,
+        2,
+        &OperationRequest::AddAccount { fields: fields() },
+        Some([0x12; 16]),
+    );
+    let account_id = decode_account_id(added.body());
+
+    let get_client = Arc::new(connection(
+        ClientRole::Desktop,
+        runtime.state(),
+        runtime.unlock_epoch(),
+        19,
+    ));
+    let get_operation = OperationRequest::GetAccount { id: account_id };
+    let (get_request, get_header) = request_parts(&runtime, &get_client, 1, &get_operation, None);
+    let (write_started_tx, write_started_rx) = mpsc::channel();
+    let (release_write_tx, release_write_rx) = mpsc::channel();
+    let get_runtime = Arc::clone(&runtime);
+    let get_worker = thread::spawn(move || {
+        get_runtime
+            .dispatch(&get_client, &get_header, &get_request, |response| {
+                write_started_tx.send(()).expect("write started");
+                release_write_rx.recv().expect("release response write");
+                copy_response(response)
+            })
+            .expect("get dispatch")
+    });
+    write_started_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("secret response entered transport writer");
+
+    let lock_runtime = Arc::clone(&runtime);
+    let lock_client = connection(
+        ClientRole::Desktop,
+        runtime.state(),
+        runtime.unlock_epoch(),
+        29,
+    );
+    let (lock_done_tx, lock_done_rx) = mpsc::channel();
+    let lock_worker = thread::spawn(move || {
+        let response = dispatch(
+            &lock_runtime,
+            &lock_client,
+            1,
+            &OperationRequest::Lock,
+            None,
+        );
+        lock_done_tx.send(response).expect("lock result");
+    });
+    assert!(
+        matches!(
+            lock_done_rx.recv_timeout(Duration::from_millis(100)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        ),
+        "lock must not acknowledge while a secret response write is pending"
+    );
+
+    release_write_tx.send(()).expect("release response");
+    let retrieved = get_worker.join().expect("get worker");
+    assert!(
+        retrieved
+            .body()
+            .windows(b"RUNTIME-PASSWORD-CANARY-CA1C88".len())
+            .any(|window| window == b"RUNTIME-PASSWORD-CANARY-CA1C88")
+    );
+    let locked = lock_done_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("lock completes after response write");
+    assert_eq!(locked.error(), None);
+    lock_worker.join().expect("lock worker");
+    assert_eq!(runtime.state(), AgentState::Locked);
+}
+
+#[test]
+fn disconnect_closes_admission_before_returning() {
+    let directory = TestDirectory::new();
+    let runtime = AgentRuntime::start(directory.vault_path()).expect("runtime starts");
+    let client = connection(
+        ClientRole::Desktop,
+        runtime.state(),
+        runtime.unlock_epoch(),
+        39,
+    );
+    runtime.disconnect(&client).expect("disconnect");
+
+    let operation = OperationRequest::Status;
+    let (request, header) = request_parts(&runtime, &client, 1, &operation, None);
+    let writer_called = AtomicBool::new(false);
+    assert!(matches!(
+        runtime.dispatch(&client, &header, &request, |response| {
+            writer_called.store(true, Ordering::Release);
+            copy_response(response)
+        }),
+        Err(DispatchError::Connection(ConnectionError::ConnectionClosed))
+    ));
+    assert!(!writer_called.load(Ordering::Acquire));
+}
+
+#[test]
 fn core_integrity_failure_locks_runtime_advances_epoch_and_allows_unlock_attempt() {
     let directory = TestDirectory::new();
     let path = directory.vault_path();
@@ -328,7 +466,7 @@ fn role_authorization_precedes_operation_body_decoding() {
     .expect("request header");
 
     let response = runtime
-        .dispatch(&native_host, &header, &request)
+        .dispatch(&native_host, &header, &request, copy_response)
         .expect("unauthorized request is terminal");
     assert_eq!(
         response.error(),
@@ -391,7 +529,7 @@ fn cancellation_wins_an_in_flight_password_unlock() {
     let worker_client = Arc::clone(&unlock_client);
     let worker = thread::spawn(move || {
         worker_runtime
-            .dispatch(&worker_client, &header, &request)
+            .dispatch(&worker_client, &header, &request, copy_response)
             .expect("unlock dispatch")
     });
 
@@ -573,6 +711,35 @@ fn vault_path_has_exactly_one_runtime_owner() {
         AgentRuntime::start(&path).err(),
         Some(RuntimeStartError::AlreadyOwned)
     );
+    let dotted_alias = path
+        .parent()
+        .expect("vault parent")
+        .join(".")
+        .join("vault.sqlite3");
+    assert_eq!(
+        AgentRuntime::start(dotted_alias).err(),
+        Some(RuntimeStartError::AlreadyOwned)
+    );
     drop(first);
-    AgentRuntime::start(path).expect("ownership releases on clean shutdown");
+    AgentRuntime::start(&path).expect("ownership releases on clean shutdown");
+
+    fs::write(&path, b"existing target identity").expect("existing target");
+    let existing = AgentRuntime::start(&path).expect("existing vault path");
+    let hard_link_alias = path
+        .parent()
+        .expect("vault parent")
+        .join("vault-hard-link.sqlite3");
+    fs::hard_link(&path, &hard_link_alias).expect("hard-link alias");
+    assert_eq!(
+        AgentRuntime::start(hard_link_alias).err(),
+        Some(RuntimeStartError::AlreadyOwned),
+        "filesystem aliases must not acquire a second ownership lease"
+    );
+    #[cfg(windows)]
+    assert_eq!(
+        AgentRuntime::start(path.parent().expect("vault parent").join("VAULT.SQLITE3")).err(),
+        Some(RuntimeStartError::AlreadyOwned),
+        "Windows-equivalent casing must not acquire a second ownership lease"
+    );
+    drop(existing);
 }
