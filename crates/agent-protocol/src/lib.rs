@@ -24,7 +24,8 @@ pub use operations::{
     encode_account_summaries, encode_empty_result, encode_status,
 };
 pub use session::{
-    BeginRequestError, Connection, ConnectionError, ConnectionLimits, RequestPermit,
+    BeginRequestError, Connection, ConnectionError, ConnectionLimits, RequestCompletion,
+    RequestPermit,
 };
 pub use types::{
     AgentState, ClientRole, CorrelationId, OperationCode, PublicErrorCode, RetryCategory, Version,

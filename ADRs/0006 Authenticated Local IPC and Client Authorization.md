@@ -610,6 +610,12 @@ after reconnecting. A mutating request requires an operation-specific
 idempotency key and status check designed in issue #13; it must not be blindly
 replayed after a timeout or disconnect.
 
+The implementation binds each cached mutation result to an HMAC-SHA-256
+fingerprint of the complete canonical operation and body under a random
+per-agent-start key. Reusing a key for a different payload is a conflict, and
+the cache retains neither a plaintext credential nor a reusable unkeyed
+password digest.
+
 ## Public error model
 
 Only authenticated peers receive protocol errors. Version 1 exposes:
@@ -821,10 +827,11 @@ Issue #13 implements these layers as:
   token/AppModel observation, retained process handles, anonymous client
   security QoS, and guarded atomic discovery descriptor lifecycle; and
 - `crates/vault-agent::runtime`, containing the sole vault owner, global/KDF/
-  mutation/lock admission, a commit gate that orders publication against lock
-  and sign-out, typed desktop dispatch, bounded account paging,
-  connection-bound cancellation, lock epochs, sign-out shutdown, and bounded
-  in-memory idempotency outcomes.
+  mutation/lock admission, a commit gate that orders publication and terminal
+  response commitment against lock and sign-out, typed desktop dispatch,
+  encoded-size-aware bounded account paging, connection-bound cancellation,
+  lock epochs, core-failure state synchronization, sign-out shutdown, and
+  bounded keyed idempotency outcomes.
 
 The production entry point remains fail closed until issue #19 supplies the
 signed MSIX manifest, immutable role paths, package-local state path, and

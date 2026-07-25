@@ -431,6 +431,7 @@ name = "librarian-vault-agent"
 version = "0.1.0"
 dependencies = [
  "getrandom",
+ "hmac",
  "librarian-agent-protocol",
  "librarian-vault-core",
  "librarian-vault-format",
@@ -438,6 +439,7 @@ dependencies = [
  "rusqlite",
  "rustix",
  "same-file",
+ "sha2",
  "zeroize",
 ]
 

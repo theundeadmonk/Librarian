@@ -123,6 +123,16 @@ fn fields() -> librarian_agent_protocol::AccountFields {
     .expect("bounded account fields")
 }
 
+fn different_fields() -> librarian_agent_protocol::AccountFields {
+    librarian_agent_protocol::AccountFields::new(
+        "Different Runtime Example",
+        "https://different-runtime.example",
+        "different-runtime-user@example.test",
+        "DIFFERENT-RUNTIME-PASSWORD-CANARY-7A13D2",
+    )
+    .expect("bounded account fields")
+}
+
 fn decode_account_id(body: &[u8]) -> [u8; 16] {
     let mut decoder = Decoder::new(body);
     assert_eq!(decoder.array().expect("array"), Some(1));
@@ -174,10 +184,21 @@ fn desktop_protocol_crud_is_typed_paged_idempotent_and_lock_bound() {
     assert_eq!(replayed.error(), None);
     assert_eq!(replayed.body(), added.body());
 
-    let listed = dispatch(
+    let conflicting_reuse = dispatch(
         &runtime,
         &client,
         4,
+        &OperationRequest::AddAccount {
+            fields: different_fields(),
+        },
+        Some([2; 16]),
+    );
+    assert_eq!(conflicting_reuse.error(), Some(PublicErrorCode::Conflict));
+
+    let listed = dispatch(
+        &runtime,
+        &client,
+        5,
         &OperationRequest::ListAccountSummaries {
             offset: 0,
             limit: 1,
@@ -195,7 +216,7 @@ fn desktop_protocol_crud_is_typed_paged_idempotent_and_lock_bound() {
     let retrieved = dispatch(
         &runtime,
         &client,
-        5,
+        6,
         &OperationRequest::GetAccount { id: account_id },
         None,
     );
@@ -207,14 +228,14 @@ fn desktop_protocol_crud_is_typed_paged_idempotent_and_lock_bound() {
             .any(|window| window == b"RUNTIME-PASSWORD-CANARY-CA1C88")
     );
 
-    let locked = dispatch(&runtime, &client, 6, &OperationRequest::Lock, None);
+    let locked = dispatch(&runtime, &client, 7, &OperationRequest::Lock, None);
     assert_eq!(locked.error(), None);
     assert_eq!(runtime.state(), AgentState::Locked);
 
     let stale = dispatch(
         &runtime,
         &client,
-        7,
+        8,
         &OperationRequest::GetAccount { id: account_id },
         None,
     );
@@ -223,6 +244,60 @@ fn desktop_protocol_crud_is_typed_paged_idempotent_and_lock_bound() {
         !format!("{retrieved:?}").contains("RUNTIME-PASSWORD-CANARY-CA1C88"),
         "response debug output must redact plaintext"
     );
+}
+
+#[test]
+fn core_integrity_failure_locks_runtime_advances_epoch_and_allows_unlock_attempt() {
+    let directory = TestDirectory::new();
+    let path = directory.vault_path();
+    let runtime = AgentRuntime::start(&path).expect("runtime starts");
+    let client = connection(
+        ClientRole::Desktop,
+        runtime.state(),
+        runtime.unlock_epoch(),
+        11,
+    );
+    assert_eq!(
+        dispatch(
+            &runtime,
+            &client,
+            1,
+            &create("integrity failure integration password"),
+            Some([0x11; 16]),
+        )
+        .error(),
+        None
+    );
+    let unlocked_epoch = runtime.unlock_epoch();
+    fs::write(&path, b"intentionally corrupted vault fixture").expect("corrupt vault fixture");
+
+    let failed = dispatch(
+        &runtime,
+        &client,
+        2,
+        &OperationRequest::ListAccountSummaries {
+            offset: 0,
+            limit: 1,
+        },
+        None,
+    );
+    assert_eq!(failed.error(), Some(PublicErrorCode::OperationFailed));
+    assert_eq!(runtime.state(), AgentState::Locked);
+    assert!(runtime.unlock_epoch() > unlocked_epoch);
+
+    let unlock_attempt = dispatch(
+        &runtime,
+        &client,
+        3,
+        &unlock("integrity failure integration password"),
+        None,
+    );
+    assert_eq!(
+        unlock_attempt.error(),
+        Some(PublicErrorCode::OperationFailed),
+        "a synchronized runtime must attempt unlock instead of returning conflict"
+    );
+    assert_eq!(runtime.state(), AgentState::Locked);
 }
 
 #[test]

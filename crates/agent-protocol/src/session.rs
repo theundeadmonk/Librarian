@@ -87,6 +87,13 @@ pub enum BeginRequestError {
     MissingIdempotencyKey,
 }
 
+/// Atomic terminal state observed when the server commits a response.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RequestCompletion {
+    Active,
+    Cancelled,
+}
+
 impl From<ConnectionError> for BeginRequestError {
     fn from(value: ConnectionError) -> Self {
         Self::Connection(value)
@@ -328,13 +335,16 @@ impl Connection {
     /// # Errors
     ///
     /// Unknown or duplicate completion is connection-fatal.
-    pub fn finish(&self, permit: RequestPermit) -> Result<(), ConnectionError> {
+    pub fn finish(&self, permit: RequestPermit) -> Result<RequestCompletion, ConnectionError> {
         let mut state = self.lock_state()?;
-        if state.in_flight.remove(&permit.request_id).is_none() {
+        let Some(request_state) = state.in_flight.remove(&permit.request_id) else {
             state.closed = true;
             return Err(ConnectionError::InvalidFrame);
-        }
-        Ok(())
+        };
+        Ok(match request_state {
+            RequestState::Active => RequestCompletion::Active,
+            RequestState::Cancelled => RequestCompletion::Cancelled,
+        })
     }
 
     /// Cancels all in-flight work and closes this connection.

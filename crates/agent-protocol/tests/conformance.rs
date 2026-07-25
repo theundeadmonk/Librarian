@@ -3,8 +3,8 @@ use librarian_agent_protocol::{
     ClientHello, ClientRole, Connection, ConnectionError, ConnectionLimits, CorrelationId,
     EndpointDescriptor, EventQueue, Frame, FrameError, FrameHeader, MAX_EVENT_QUEUE,
     MAX_PAYLOAD_BYTES, MessageKind, OperationCode, OperationRequest, ProtocolError,
-    PublicErrorCode, RequestEnvelope, ResponseEnvelope, RetryCategory, UNLOCK_TIMEOUT_MS, Version,
-    encode_account, encode_account_summaries,
+    PublicErrorCode, RequestCompletion, RequestEnvelope, ResponseEnvelope, RetryCategory,
+    UNLOCK_TIMEOUT_MS, Version, encode_account, encode_account_summaries,
 };
 use zeroize::Zeroizing;
 
@@ -423,7 +423,7 @@ fn request_ids_cancellation_backpressure_and_epochs_are_deterministic() {
         .cancel(&cancel)
         .expect("cancel must be idempotent");
     assert!(connection.is_cancelled(permit));
-    connection.finish(permit).expect("request must finish once");
+    assert_eq!(connection.finish(permit), Ok(RequestCompletion::Cancelled));
     connection
         .cancel(&cancel)
         .expect("completed cancellation must be ignored");
@@ -466,7 +466,7 @@ fn create_and_unlock_share_the_password_kdf_deadline_cap() {
             .begin_request(&header, &request, 9)
             .expect("password KDF request must be admitted");
         assert_eq!(permit.effective_timeout_ms(), UNLOCK_TIMEOUT_MS);
-        connection.finish(permit).expect("request must finish");
+        assert_eq!(connection.finish(permit), Ok(RequestCompletion::Active));
     }
 }
 
@@ -489,7 +489,7 @@ fn fifth_concurrent_request_is_busy_without_exceeding_the_bound() {
     );
     assert_eq!(connection.in_flight_count(), 4);
     for permit in permits {
-        connection.finish(permit).expect("finish request");
+        assert_eq!(connection.finish(permit), Ok(RequestCompletion::Active));
     }
     assert_eq!(connection.in_flight_count(), 0);
     assert!(!connection.is_closed());

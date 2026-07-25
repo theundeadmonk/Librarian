@@ -9,10 +9,12 @@ repository.workspace = true
 
 [dependencies]
 getrandom = "=0.4.3"
+hmac = "=0.13.0"
 librarian-agent-protocol = { path = "../agent-protocol" }
 librarian-vault-core = { path = "../vault-core" }
 librarian-vault-format = { path = "../vault-format" }
 rusqlite = { version = "=0.40.1", default-features = false, features = ["backup", "bundled", "limits", "serialize"] }
+sha2 = "=0.11.0"
 zeroize = { version = "=1.9.0", features = ["std"] }
 
 [target.'cfg(unix)'.dependencies]

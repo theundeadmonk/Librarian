@@ -68,6 +68,7 @@ const MAX_IMAGE_CHARACTERS: usize = 32_768;
 const MAX_TOKEN_INFORMATION_BYTES: u32 = 1_048_576;
 const SYSTEM_SID: &str = "S-1-5-18";
 const AGENT_INSTANCE_NAME: &str = r"Local\Librarian.Agent.Singleton.v1";
+const PIPE_NAME_PREFIX: &str = r"\\.\pipe\LOCAL\Librarian.Agent.v1.";
 const HEX: &[u8; 16] = b"0123456789abcdef";
 
 /// Redacted, stable transport failures. Raw Windows errors never cross the
@@ -810,7 +811,19 @@ fn random_pipe_name() -> Result<String, TransportError> {
         suffix.push(char::from(HEX[usize::from(byte >> 4)]));
         suffix.push(char::from(HEX[usize::from(byte & 0x0f)]));
     }
-    Ok(format!(r"\\.\pipe\LOCAL\Librarian.Agent.v1.{suffix}"))
+    Ok(format!("{PIPE_NAME_PREFIX}{suffix}"))
+}
+
+fn valid_local_pipe_name(pipe_name: &str) -> bool {
+    pipe_name
+        .strip_prefix(PIPE_NAME_PREFIX)
+        .is_some_and(|suffix| {
+            suffix.len() == 32
+                && suffix
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+                && suffix.bytes().any(|byte| byte != b'0')
+        })
 }
 
 #[derive(Clone, Copy)]
@@ -871,6 +884,9 @@ impl PipeConnection {
     ) -> Result<Self, TransportError> {
         if policy.role != ComponentRole::Agent {
             return Err(TransportError::Internal);
+        }
+        if !valid_local_pipe_name(pipe_name) {
+            return Err(TransportError::AccessDenied);
         }
         let wide_name = wide_string(pipe_name)?;
         let timeout_ms = duration_millis(timeout);
@@ -1296,12 +1312,42 @@ mod tests {
     fn random_pipe_names_are_scoped_and_distinct() {
         let first = random_pipe_name().expect("random endpoint");
         let second = random_pipe_name().expect("random endpoint");
-        assert!(first.starts_with(r"\\.\pipe\LOCAL\Librarian.Agent.v1."));
-        assert_eq!(
-            first.len(),
-            r"\\.\pipe\LOCAL\Librarian.Agent.v1.".len() + 32
-        );
+        assert!(first.starts_with(PIPE_NAME_PREFIX));
+        assert_eq!(first.len(), PIPE_NAME_PREFIX.len() + 32);
         assert_ne!(first, second);
+        assert!(valid_local_pipe_name(&first));
+        for invalid in [
+            r"\\server\pipe\LOCAL\Librarian.Agent.v1.0123456789abcdef0123456789abcdef",
+            r"\\.\pipe\Librarian.Agent.v1.0123456789abcdef0123456789abcdef",
+            r"\\.\pipe\LOCAL\Librarian.Agent.v1.0123456789abcdef",
+            r"\\.\pipe\LOCAL\Librarian.Agent.v1.00000000000000000000000000000000",
+            r"\\.\pipe\LOCAL\Librarian.Agent.v1.0123456789abcdef0123456789abcdeG",
+            r"\\.\pipe\LOCAL\Librarian.Agent.v1.0123456789abcdef0123456789ABCDE",
+            r"\\.\pipe\LOCAL\Librarian.Agent.v1.0123456789abcdef0123456789abcdef\extra",
+        ] {
+            assert!(!valid_local_pipe_name(invalid), "{invalid}");
+        }
+        let policy = PeerPolicy {
+            role: ComponentRole::Agent,
+            session_id: 0,
+            user_sid: String::new(),
+            logon_sid: String::new(),
+            maximum_integrity_rid: 0,
+            image_path: PathBuf::new(),
+            package_full_name: String::new(),
+            package_family_name: String::new(),
+            application_user_model_id: None,
+        };
+        assert!(matches!(
+            PipeConnection::connect(
+                r"\\remote.example\pipe\Librarian",
+                1,
+                1,
+                &policy,
+                Duration::ZERO,
+            ),
+            Err(TransportError::AccessDenied)
+        ));
     }
 
     #[test]

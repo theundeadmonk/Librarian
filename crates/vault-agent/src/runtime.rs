@@ -9,13 +9,16 @@ use std::{
     time::{Duration, Instant},
 };
 
+use hmac::{Hmac, KeyInit, Mac};
 use librarian_agent_protocol::{
     AccountView, AgentState, BeginRequestError, Connection, ConnectionError, CorrelationId,
     FrameHeader, MAX_IN_FLIGHT_GLOBAL, OperationCode, OperationRequest, ProtocolError,
-    PublicErrorCode, RequestEnvelope, ResponseEnvelope, RetryCategory, encode_account,
-    encode_account_id, encode_account_summaries, encode_empty_result, encode_status,
+    PublicErrorCode, RequestCompletion, RequestEnvelope, RequestPermit, ResponseEnvelope,
+    RetryCategory, encode_account, encode_account_id, encode_account_summaries,
+    encode_empty_result, encode_status,
 };
 use librarian_vault_core::{CancellationFlag, MasterPassword};
+use sha2::Sha256;
 use zeroize::Zeroizing;
 
 use crate::{
@@ -54,7 +57,7 @@ struct RequestKey {
 }
 
 struct CachedOutcome {
-    operation: OperationCode,
+    request_fingerprint: [u8; 32],
     error: Option<PublicErrorCode>,
     retry: RetryCategory,
     body: Zeroizing<Vec<u8>>,
@@ -212,6 +215,7 @@ pub struct AgentRuntime {
     coordinator: Arc<Coordinator>,
     idempotency: Mutex<BTreeMap<[u8; 16], CachedOutcome>>,
     idempotency_in_flight: Mutex<BTreeSet<[u8; 16]>>,
+    idempotency_fingerprint_key: Zeroizing<[u8; 32]>,
     ownership: OwnershipLease,
 }
 
@@ -226,6 +230,12 @@ impl AgentRuntime {
         let vault_path = vault_path.as_ref();
         if !vault_path.is_absolute() {
             return Err(RuntimeStartError::InvalidVaultPath);
+        }
+        let mut idempotency_fingerprint_key = Zeroizing::new([0_u8; 32]);
+        getrandom::fill(&mut *idempotency_fingerprint_key)
+            .map_err(|_| RuntimeStartError::Internal)?;
+        if *idempotency_fingerprint_key == [0; 32] {
+            return Err(RuntimeStartError::Internal);
         }
         let bound_path = bind_ownership_path(vault_path)?;
         let mut owned = owned_vault_paths()
@@ -252,6 +262,7 @@ impl AgentRuntime {
             coordinator: Arc::new(Coordinator::new()),
             idempotency: Mutex::new(BTreeMap::new()),
             idempotency_in_flight: Mutex::new(BTreeSet::new()),
+            idempotency_fingerprint_key,
             ownership: OwnershipLease(bound_path),
         })
     }
@@ -306,6 +317,7 @@ impl AgentRuntime {
     ///
     /// Returns `Internal` only if cancellation state is poisoned.
     pub fn disconnect(&self, connection_id: [u8; 16]) -> Result<(), DispatchError> {
+        let _commit = lock(&self.coordinator.commit_gate)?;
         self.coordinator.cancel_connection(connection_id)
     }
 
@@ -419,8 +431,11 @@ impl AgentRuntime {
         };
 
         let outcome = if let Some(idempotency_key) = envelope.idempotency_key() {
+            let request_fingerprint =
+                self.request_fingerprint(envelope.operation(), envelope.body())?;
             self.execute_idempotent(
                 *idempotency_key,
+                request_fingerprint,
                 operation,
                 permit.unlock_epoch(),
                 &registration,
@@ -429,20 +444,27 @@ impl AgentRuntime {
         } else {
             self.execute(operation, permit.unlock_epoch(), &registration, deadline)?
         };
-        connection.finish(permit)?;
-        outcome.into_response(correlation)
+        self.finish_dispatch(
+            connection,
+            permit,
+            &registration,
+            deadline,
+            outcome,
+            correlation,
+        )
     }
 
     fn execute_idempotent(
         &self,
         key: [u8; 16],
+        request_fingerprint: [u8; 32],
         operation: OperationRequest,
         request_epoch: u64,
         registration: &RequestRegistration,
         deadline: Instant,
     ) -> Result<ExecutionOutcome, DispatchError> {
         if let Some(cached) = lock(&self.idempotency)?.get(&key) {
-            if cached.operation != operation.operation() {
+            if cached.request_fingerprint != request_fingerprint {
                 return Ok(ExecutionOutcome::failure(
                     PublicErrorCode::Conflict,
                     RetryCategory::Never,
@@ -471,14 +493,13 @@ impl AgentRuntime {
                 key,
             }
         };
-        let operation_code = operation.operation();
         let outcome = self.execute(operation, request_epoch, registration, deadline)?;
         if should_cache(&outcome) {
             let mut cache = lock(&self.idempotency)?;
             cache.insert(
                 key,
                 CachedOutcome {
-                    operation: operation_code,
+                    request_fingerprint,
                     error: outcome.error,
                     retry: outcome.retry,
                     body: Zeroizing::new(outcome.body.to_vec()),
@@ -487,6 +508,61 @@ impl AgentRuntime {
         }
         drop(reservation);
         Ok(outcome)
+    }
+
+    fn request_fingerprint(
+        &self,
+        operation: OperationCode,
+        body: &[u8],
+    ) -> Result<[u8; 32], DispatchError> {
+        let mut mac = Hmac::<Sha256>::new_from_slice(&*self.idempotency_fingerprint_key)
+            .map_err(|_| DispatchError::Internal)?;
+        mac.update(b"Librarian idempotency request v1\0");
+        mac.update(&(operation as u16).to_be_bytes());
+        mac.update(body);
+        Ok(mac.finalize().into_bytes().into())
+    }
+
+    fn finish_dispatch(
+        &self,
+        connection: &Connection,
+        permit: RequestPermit,
+        registration: &RequestRegistration,
+        deadline: Instant,
+        mut outcome: ExecutionOutcome,
+        correlation: CorrelationId,
+    ) -> Result<ResponseEnvelope, DispatchError> {
+        let _commit = lock(&self.coordinator.commit_gate)?;
+        let completion = connection.finish(permit)?;
+        if completion == RequestCompletion::Cancelled {
+            outcome = ExecutionOutcome::cancelled();
+        } else if outcome.error.is_none() {
+            if registration.cancellation.is_cancelled() && permit.operation() != OperationCode::Lock
+            {
+                outcome = ExecutionOutcome::cancelled();
+            } else if Instant::now() >= deadline {
+                outcome = ExecutionOutcome::deadline();
+            } else if !self.success_is_still_authorized(permit) {
+                outcome = ExecutionOutcome::locked();
+            }
+        }
+        outcome.into_response(correlation)
+    }
+
+    fn success_is_still_authorized(&self, permit: RequestPermit) -> bool {
+        match permit.operation() {
+            OperationCode::Status | OperationCode::Lock => true,
+            OperationCode::CreateVault | OperationCode::UnlockMasterPassword => {
+                !self.coordinator.lock_active.load(Ordering::Acquire)
+                    && self.state() == AgentState::Unlocked
+            }
+            operation if operation.requires_unlocked_epoch() => {
+                !self.coordinator.lock_active.load(Ordering::Acquire)
+                    && self.state() == AgentState::Unlocked
+                    && self.coordinator.epoch() == permit.unlock_epoch()
+            }
+            _ => false,
+        }
     }
 
     fn execute(
@@ -733,6 +809,23 @@ impl AgentRuntime {
             });
     }
 
+    fn account_error_after_core(
+        &self,
+        mut vault: MutexGuard<'_, VaultAgent>,
+        error: AccountError,
+    ) -> Result<ExecutionOutcome, DispatchError> {
+        if error != AccountError::Failed {
+            return Ok(map_account_error(error));
+        }
+        vault.lock();
+        self.set_locked_unless_shutting_down();
+        drop(vault);
+        let _commit = lock(&self.coordinator.commit_gate)?;
+        self.set_locked_unless_shutting_down();
+        self.coordinator.advance_epoch()?;
+        Ok(ExecutionOutcome::failed())
+    }
+
     fn list_accounts(
         &self,
         offset: u32,
@@ -744,13 +837,14 @@ impl AgentRuntime {
         if let Some(outcome) = self.pre_secret_operation(request_epoch, registration, deadline) {
             return Ok(outcome);
         }
+        let response_offset = offset;
         let offset = usize::try_from(offset).map_err(|_| DispatchError::Internal)?;
         let limit = usize::from(limit);
         let mut vault = lock(&self.vault)?;
         let result = vault.list_website_account_page(offset, limit);
         let (accounts, has_more) = match result {
             Ok(page) => page,
-            Err(error) => return Ok(map_account_error(error)),
+            Err(error) => return self.account_error_after_core(vault, error),
         };
         if let Some(outcome) =
             self.post_secret_operation(&mut vault, request_epoch, registration, deadline)
@@ -758,21 +852,8 @@ impl AgentRuntime {
             drop(accounts);
             return Ok(outcome);
         }
-        let next_offset = if has_more {
-            offset
-                .checked_add(accounts.len())
-                .and_then(|value| u32::try_from(value).ok())
-        } else {
-            None
-        };
-        if has_more && next_offset.is_none() {
-            return Ok(ExecutionOutcome::failed());
-        }
         let views: Vec<_> = accounts.iter().map(account_view).collect();
-        Ok(ExecutionOutcome::success(encode_account_summaries(
-            &views,
-            next_offset,
-        )?))
+        Self::encode_summary_page(&views, response_offset, has_more)
     }
 
     fn get_account(
@@ -788,7 +869,7 @@ impl AgentRuntime {
         let mut vault = lock(&self.vault)?;
         let account = match vault.get_website_account(RecordId::from_bytes(id)) {
             Ok(account) => account,
-            Err(error) => return Ok(map_account_error(error)),
+            Err(error) => return self.account_error_after_core(vault, error),
         };
         if let Some(outcome) =
             self.post_secret_operation(&mut vault, request_epoch, registration, deadline)
@@ -840,6 +921,7 @@ impl AgentRuntime {
             Ok(id) => Ok(ExecutionOutcome::success(encode_account_id(
                 *id.as_bytes(),
             )?)),
+            Err(AccountError::Failed) => self.account_error_after_core(vault, AccountError::Failed),
             Err(error) => {
                 if let Some(outcome) =
                     self.post_secret_operation(&mut vault, request_epoch, registration, deadline)
@@ -893,6 +975,7 @@ impl AgentRuntime {
         );
         match result {
             Ok(()) => Ok(ExecutionOutcome::success(encode_empty_result()?)),
+            Err(AccountError::Failed) => self.account_error_after_core(vault, AccountError::Failed),
             Err(error) => {
                 if let Some(outcome) =
                     self.post_secret_operation(&mut vault, request_epoch, registration, deadline)
@@ -939,6 +1022,7 @@ impl AgentRuntime {
             });
         match result {
             Ok(()) => Ok(ExecutionOutcome::success(encode_empty_result()?)),
+            Err(AccountError::Failed) => self.account_error_after_core(vault, AccountError::Failed),
             Err(error) => {
                 if let Some(outcome) =
                     self.post_secret_operation(&mut vault, request_epoch, registration, deadline)
@@ -977,12 +1061,63 @@ impl AgentRuntime {
         registration: &RequestRegistration,
         deadline: Instant,
     ) -> Option<ExecutionOutcome> {
-        let outcome = self.pre_secret_operation(request_epoch, registration, deadline);
-        if outcome.is_some() {
+        if self.coordinator.lock_active.load(Ordering::Acquire)
+            || self.state() != AgentState::Unlocked
+            || self.coordinator.epoch() != request_epoch
+        {
             vault.lock();
             self.set_locked_unless_shutting_down();
+            Some(ExecutionOutcome::locked())
+        } else if registration.cancellation.is_cancelled() {
+            Some(ExecutionOutcome::cancelled())
+        } else if Instant::now() >= deadline {
+            Some(ExecutionOutcome::deadline())
+        } else {
+            None
         }
-        outcome
+    }
+
+    fn encode_summary_page(
+        views: &[AccountView<'_>],
+        offset: u32,
+        source_has_more: bool,
+    ) -> Result<ExecutionOutcome, DispatchError> {
+        if views.is_empty() {
+            if source_has_more {
+                return Ok(ExecutionOutcome::failed());
+            }
+            return encode_account_summaries(views, None)
+                .map(ExecutionOutcome::success)
+                .map_err(DispatchError::from);
+        }
+
+        let mut lower = 1_usize;
+        let mut upper = views.len();
+        let mut best = None;
+        while lower <= upper {
+            let count = lower + (upper - lower) / 2;
+            let has_more = source_has_more || count < views.len();
+            let next_offset = if has_more {
+                Some(
+                    offset
+                        .checked_add(u32::try_from(count).map_err(|_| DispatchError::Internal)?)
+                        .ok_or(DispatchError::Internal)?,
+                )
+            } else {
+                None
+            };
+            match encode_account_summaries(&views[..count], next_offset) {
+                Ok(body) => {
+                    best = Some(body);
+                    lower = count + 1;
+                }
+                Err(ProtocolError::TooLarge) => {
+                    upper = count - 1;
+                }
+                Err(_) => return Err(DispatchError::Internal),
+            }
+        }
+        Ok(best.map_or_else(ExecutionOutcome::failed, ExecutionOutcome::success))
     }
 }
 
@@ -1161,6 +1296,91 @@ fn lock<T>(mutex: &Mutex<T>) -> Result<MutexGuard<'_, T>, DispatchError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use librarian_agent_protocol::{
+        CURRENT_VERSION, ClientHello, ClientRole, ConnectionLimits, MessageKind,
+    };
+    use minicbor::Decoder;
+
+    static TEST_DIRECTORY_COUNTER: AtomicU64 = AtomicU64::new(1);
+    const TEST_BUILD_ID: [u8; 32] = [0xB4; 32];
+
+    struct TestDirectory(PathBuf);
+
+    impl TestDirectory {
+        fn new() -> Self {
+            let sequence = TEST_DIRECTORY_COUNTER.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir().join(format!(
+                "librarian-runtime-unit-{}-{sequence}",
+                std::process::id()
+            ));
+            fs::create_dir(&path).expect("runtime unit-test directory");
+            Self(path)
+        }
+
+        fn vault_path(&self) -> PathBuf {
+            self.0.join("vault.sqlite3")
+        }
+    }
+
+    impl Drop for TestDirectory {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn connection(state: AgentState, epoch: u64, marker: u8) -> Connection {
+        let hello = ClientHello::new(
+            [marker; 32],
+            CURRENT_VERSION,
+            CURRENT_VERSION,
+            ClientRole::Desktop,
+            TEST_BUILD_ID,
+            Vec::new(),
+        )
+        .expect("client hello");
+        Connection::negotiate(
+            ClientRole::Desktop,
+            TEST_BUILD_ID,
+            &hello,
+            &[],
+            [marker.wrapping_add(1); 32],
+            [marker.wrapping_add(2); 16],
+            state,
+            epoch,
+            ConnectionLimits::default(),
+        )
+        .expect("connection")
+        .0
+    }
+
+    fn admitted_request(
+        runtime: &AgentRuntime,
+        connection: &Connection,
+        request_id: u64,
+        operation: &OperationRequest,
+    ) -> (RequestEnvelope, FrameHeader, RequestPermit) {
+        let body = operation.encode().expect("operation body");
+        let request = RequestEnvelope::new(
+            operation.operation(),
+            runtime.unlock_epoch(),
+            5_000,
+            None,
+            body,
+        )
+        .expect("request");
+        let header = FrameHeader::new(
+            MessageKind::Request,
+            CURRENT_VERSION,
+            request.encode().expect("request bytes").len(),
+            *connection.connection_id(),
+            request_id,
+        )
+        .expect("header");
+        let permit = connection
+            .begin_request(&header, &request, runtime.unlock_epoch())
+            .expect("request admission");
+        (request, header, permit)
+    }
 
     #[test]
     fn global_and_serial_resource_permits_are_exact_and_reusable() {
@@ -1178,5 +1398,150 @@ mod tests {
         assert!(FlagPermit::acquire(&flag).is_none());
         drop(permit);
         assert!(FlagPermit::acquire(&flag).is_some());
+    }
+
+    #[test]
+    fn terminal_commit_suppresses_cancelled_and_stale_successes() {
+        let directory = TestDirectory::new();
+        let runtime = AgentRuntime::start(directory.vault_path()).expect("runtime");
+
+        let status_connection = connection(runtime.state(), runtime.unlock_epoch(), 7);
+        let (_request, _header, permit) =
+            admitted_request(&runtime, &status_connection, 1, &OperationRequest::Status);
+        let registration = runtime
+            .coordinator
+            .register(RequestKey {
+                connection_id: *status_connection.connection_id(),
+                request_id: 1,
+            })
+            .expect("registration");
+        let cancel = FrameHeader::new(
+            MessageKind::Cancel,
+            CURRENT_VERSION,
+            0,
+            *status_connection.connection_id(),
+            1,
+        )
+        .expect("cancel");
+        status_connection.cancel(&cancel).expect("cancel request");
+        let cancelled = runtime
+            .finish_dispatch(
+                &status_connection,
+                permit,
+                &registration,
+                Instant::now() + Duration::from_secs(1),
+                ExecutionOutcome::success(Zeroizing::new(b"SECRET-CANARY".to_vec())),
+                CorrelationId::new([0x31; 16]),
+            )
+            .expect("terminal response");
+        assert_eq!(cancelled.error(), Some(PublicErrorCode::Cancelled));
+        assert!(cancelled.body().is_empty());
+
+        runtime
+            .state
+            .store(AgentState::Unlocked as u8, Ordering::Release);
+        let secret_connection = connection(runtime.state(), runtime.unlock_epoch(), 17);
+        let (_request, _header, permit) = admitted_request(
+            &runtime,
+            &secret_connection,
+            1,
+            &OperationRequest::GetAccount { id: [0x41; 16] },
+        );
+        let registration = runtime
+            .coordinator
+            .register(RequestKey {
+                connection_id: *secret_connection.connection_id(),
+                request_id: 1,
+            })
+            .expect("registration");
+        runtime
+            .state
+            .store(AgentState::Locked as u8, Ordering::Release);
+        runtime
+            .coordinator
+            .advance_epoch_without_cancellation()
+            .expect("epoch transition");
+        let stale = runtime
+            .finish_dispatch(
+                &secret_connection,
+                permit,
+                &registration,
+                Instant::now() + Duration::from_secs(1),
+                ExecutionOutcome::success(Zeroizing::new(b"SECRET-CANARY".to_vec())),
+                CorrelationId::new([0x32; 16]),
+            )
+            .expect("terminal response");
+        assert_eq!(stale.error(), Some(PublicErrorCode::Locked));
+        assert!(stale.body().is_empty());
+    }
+
+    #[test]
+    fn request_local_cancellation_does_not_lock_the_shared_session() {
+        let directory = TestDirectory::new();
+        let runtime = AgentRuntime::start(directory.vault_path()).expect("runtime");
+        runtime
+            .state
+            .store(AgentState::Unlocked as u8, Ordering::Release);
+        let epoch = runtime.unlock_epoch();
+        let registration = runtime
+            .coordinator
+            .register(RequestKey {
+                connection_id: [0x51; 16],
+                request_id: 1,
+            })
+            .expect("registration");
+        registration.cancellation.cancel();
+
+        let mut vault = lock(&runtime.vault).expect("vault lock");
+        let outcome = runtime
+            .post_secret_operation(
+                &mut vault,
+                epoch,
+                &registration,
+                Instant::now() + Duration::from_secs(1),
+            )
+            .expect("cancel outcome");
+        drop(vault);
+        assert_eq!(outcome.error, Some(PublicErrorCode::Cancelled));
+        assert_eq!(runtime.state(), AgentState::Unlocked);
+        assert_eq!(runtime.unlock_epoch(), epoch);
+    }
+
+    #[test]
+    fn summary_pages_shrink_to_the_bounded_response_size() {
+        let service_name = "s".repeat(256);
+        let permitted_origin = "o".repeat(2_048);
+        let username = "u".repeat(1_024);
+        let views: Vec<_> = (0_u8..100)
+            .map(|marker| AccountView {
+                id: [marker; 16],
+                revision: u64::MAX,
+                created_at_ms: u64::MAX,
+                modified_at_ms: u64::MAX,
+                service_name: &service_name,
+                permitted_origin: &permitted_origin,
+                username: &username,
+                password: "SUMMARY-PASSWORD-MUST-NOT-ENCODE",
+            })
+            .collect();
+
+        let outcome = AgentRuntime::encode_summary_page(&views, 0, false).expect("bounded page");
+        assert_eq!(outcome.error, None);
+        assert!(outcome.body.len() < librarian_agent_protocol::MAX_PAYLOAD_BYTES);
+        assert!(
+            !outcome
+                .body
+                .windows(15)
+                .any(|window| window == b"SUMMARY-PASSWOR")
+        );
+        let mut decoder = Decoder::new(&outcome.body);
+        assert_eq!(decoder.array().expect("outer array"), Some(2));
+        let next_offset = decoder.u32().expect("partial page offset");
+        let count = decoder
+            .array()
+            .expect("summary array")
+            .expect("fixed array");
+        assert!(count > 0 && count < 100);
+        assert_eq!(u64::from(next_offset), count);
     }
 }
