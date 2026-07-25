@@ -6,7 +6,7 @@ use std::{
 };
 
 use librarian_vault_core::{
-    CancellationFlag, MasterPassword, RecoveryKey, UnlockedVault, create_vault, unlock_empty_vault,
+    CancellationFlag, MasterPassword, RecoveryKey, UnlockedVault, create_vault, unlock_vault,
 };
 
 use crate::{
@@ -15,7 +15,7 @@ use crate::{
         ensure_sidecars_absent_with_ancestor_guards, remove_file_with_ancestor_guards,
         sync_parent_directory_with_ancestor_guards,
     },
-    sqlite::{initialize_database, read_empty_vault_from_guards, read_guarded_empty_vault},
+    sqlite::{initialize_database, read_guarded_vault, read_vault_from_guards},
     storage::{
         publish_staged_vault, remove_target_if_guarded_matches, reserve_staging_file,
         seal_published_vault_with_ancestor_guards, validate_new_target, verify_published_vault,
@@ -36,10 +36,12 @@ pub struct OperationPermit {
 /// This type intentionally does not implement `Debug` because it owns the
 /// unlocked core session.
 pub struct VaultAgent {
-    path: Option<PathBuf>,
-    session: Option<UnlockedVault>,
-    session_id: Option<u64>,
-    authorization_epoch: u64,
+    pub(super) path: Option<PathBuf>,
+    pub(super) session: Option<UnlockedVault>,
+    pub(super) authenticated_header: Option<Vec<u8>>,
+    pub(super) authenticated_manifest: Option<Vec<u8>>,
+    pub(super) session_id: Option<u64>,
+    pub(super) authorization_epoch: u64,
 }
 
 impl VaultAgent {
@@ -116,6 +118,8 @@ impl VaultAgent {
             Self {
                 path: Some(path),
                 session: Some(session),
+                authenticated_header: Some(header),
+                authenticated_manifest: Some(manifest),
                 session_id: Some(session_id),
                 authorization_epoch: 1,
             },
@@ -129,6 +133,8 @@ impl VaultAgent {
         Self {
             path: bind_vault_path(path.as_ref()).ok(),
             session: None,
+            authenticated_header: None,
+            authenticated_manifest: None,
             session_id: None,
             authorization_epoch: 0,
         }
@@ -170,11 +176,12 @@ impl VaultAgent {
             return Err(UnlockError::Cancelled);
         }
         let path = self.path.clone().ok_or(UnlockError::Failed)?;
-        let mut snapshot = read_guarded_empty_vault(&path).map_err(|_| UnlockError::Failed)?;
-        let session = match unlock_empty_vault(
+        let mut snapshot = read_guarded_vault(&path).map_err(|_| UnlockError::Failed)?;
+        let session = match unlock_vault(
             password,
             &snapshot.header,
             &snapshot.manifest,
+            &snapshot.records,
             cancellation,
         ) {
             Ok(session) => session,
@@ -188,10 +195,12 @@ impl VaultAgent {
         if cancellation.is_cancelled() {
             return Err(UnlockError::Cancelled);
         }
-        let (current_header, current_manifest) =
-            read_empty_vault_from_guards(&path, &mut snapshot.input_guards, || {}, || {})
-                .map_err(|_| UnlockError::Failed)?;
-        if current_header != snapshot.header || current_manifest != snapshot.manifest {
+        let current = read_vault_from_guards(&path, &mut snapshot.input_guards, || {}, || {})
+            .map_err(|_| UnlockError::Failed)?;
+        if current.header != snapshot.header
+            || current.manifest != snapshot.manifest
+            || current.records != snapshot.records
+        {
             return Err(UnlockError::Failed);
         }
         let Some(session_id) = next_session_id() else {
@@ -201,6 +210,8 @@ impl VaultAgent {
             return Err(UnlockError::Failed);
         }
         self.session = Some(session);
+        self.authenticated_header = Some(snapshot.header);
+        self.authenticated_manifest = Some(snapshot.manifest);
         self.session_id = Some(session_id);
         if cancellation.is_cancelled() {
             self.lock();
@@ -212,6 +223,8 @@ impl VaultAgent {
     /// Drops and zeroizes reusable key state, invalidating existing permits.
     pub fn lock(&mut self) {
         self.session = None;
+        self.authenticated_header = None;
+        self.authenticated_manifest = None;
         self.session_id = None;
         let _ = self.advance_authorization_epoch();
     }
@@ -259,7 +272,7 @@ fn next_session_id() -> Option<u64> {
         .ok()
 }
 
-fn unix_time_ms() -> Result<u64, StorageError> {
+pub(crate) fn unix_time_ms() -> Result<u64, StorageError> {
     let duration = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|_| StorageError::Clock)?;

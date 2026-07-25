@@ -112,7 +112,10 @@ The ADR also specifies locked metadata, deterministic encoding, KDF parameters,
 corruption behavior, rollback limits, copy-on-write migration, sensitive-memory
 rules, vectors, and the independent review gate. It remains **Proposed** until
 that review is complete. The current code therefore stays
-`FormatReadiness::ScaffoldOnly` and cannot store credentials.
+`FormatReadiness::ScaffoldOnly`: the trusted Rust path can exercise encrypted
+website-account records with disposable values, but no product client may
+store real credentials or reach those operations before the release gates
+below are complete.
 
 ## Local protocols
 

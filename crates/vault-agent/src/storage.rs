@@ -15,7 +15,7 @@ use crate::{
         open_regular_file_guard_with_ancestor_guards, parent_directory,
         remove_file_with_ancestor_guards, sqlite_sidecar,
     },
-    sqlite::{GuardedEmptyVault, read_guarded_empty_vault},
+    sqlite::{GuardedVault, read_guarded_empty_vault},
 };
 
 pub(crate) const MAX_STAGING_ATTEMPTS: u64 = 128;
@@ -156,7 +156,7 @@ pub(crate) fn verify_published_vault(
     target: &Path,
     expected_header: &[u8],
     expected_manifest: &[u8],
-) -> Result<GuardedEmptyVault, CreateError> {
+) -> Result<GuardedVault, CreateError> {
     let snapshot = read_guarded_empty_vault(target).map_err(|_| CreateError::Failed)?;
     guarded_files_match(published, &snapshot.input_guards.database)
         .map_err(|_| CreateError::Failed)?;

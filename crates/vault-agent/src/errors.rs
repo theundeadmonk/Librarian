@@ -18,6 +18,7 @@ pub(crate) enum StorageError {
     ResourceLimit,
     Randomness,
     Clock,
+    Conflict,
 }
 
 /// A non-secret failure while creating a new local vault.
@@ -55,3 +56,23 @@ impl fmt::Display for UnlockError {
 }
 
 impl std::error::Error for UnlockError {}
+
+/// Deliberately small public result classes for website-account operations.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AccountError {
+    Locked,
+    NotFound,
+    Failed,
+}
+
+impl fmt::Display for AccountError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Locked => "the vault is locked",
+            Self::NotFound => "website account was not found",
+            Self::Failed => "website account operation failed",
+        })
+    }
+}
+
+impl std::error::Error for AccountError {}

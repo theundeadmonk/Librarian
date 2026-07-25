@@ -8,11 +8,15 @@
 mod errors;
 mod filesystem;
 mod lifecycle;
+mod records;
 mod snapshot;
 mod sqlite;
 mod storage;
 
-pub use errors::{CreateError, UnlockError};
+pub use errors::{AccountError, CreateError, UnlockError};
+pub use librarian_vault_core::{
+    RecordId, WebsiteAccount, WebsiteAccountInput, WebsiteAccountInputError,
+};
 pub use lifecycle::{OperationPermit, VaultAgent};
 
 #[cfg(test)]

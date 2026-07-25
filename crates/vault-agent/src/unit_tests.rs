@@ -6,15 +6,16 @@ mod tests {
         sync::atomic::{AtomicU64, Ordering},
     };
 
-    use librarian_vault_core::{CancellationFlag, MasterPassword};
+    use librarian_vault_core::{CancellationFlag, MasterPassword, WebsiteAccountInput};
     use rusqlite::Connection;
     #[cfg(windows)]
     use rusqlite::OpenFlags;
 
+    use crate::errors::StorageError;
     #[cfg(any(unix, windows))]
     use crate::read_empty_vault_with_connection_hooks;
     use crate::{
-        CreateError, UnlockError, VaultAgent, parent_directory, reserve_staging_file,
+        AccountError, CreateError, UnlockError, VaultAgent, parent_directory, reserve_staging_file,
         sqlite_sidecar, sync_parent_directory, validate_new_target,
     };
     #[cfg(windows)]
@@ -62,6 +63,16 @@ mod tests {
         VaultAgent::create(path, password(value))
             .expect("test vault must be created")
             .0
+    }
+
+    fn account_input(label: &str) -> WebsiteAccountInput {
+        WebsiteAccountInput::new(
+            label,
+            "https://unit.example",
+            "unit-user",
+            "unit-test-password",
+        )
+        .expect("unit-test account input must be valid")
     }
 
     #[test]
@@ -1201,6 +1212,111 @@ mod tests {
             !image
                 .windows(marker.len())
                 .any(|window| window == marker.as_bytes())
+        );
+    }
+
+    #[test]
+    fn interrupted_record_transaction_commits_neither_row_nor_manifest() {
+        let directory = TestDirectory::new();
+        let path = directory.vault_path();
+        let mut agent = create_test_vault(&path, "interrupted transaction password");
+
+        assert_eq!(
+            agent
+                .add_website_account_with_before_commit(account_input("Interrupted"), || Err(
+                    StorageError::Sqlite
+                ))
+                .err(),
+            Some(AccountError::Failed)
+        );
+        assert!(!agent.is_unlocked());
+        drop(agent);
+
+        let mut restarted = VaultAgent::open_locked(&path);
+        restarted
+            .unlock(
+                password("interrupted transaction password"),
+                &CancellationFlag::new(),
+            )
+            .expect("rolled-back vault must remain authentic");
+        assert!(
+            restarted
+                .list_website_accounts()
+                .expect("rolled-back vault must remain empty")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn record_mutation_rejects_oversized_sidecars_before_sqlite_opens() {
+        let directory = TestDirectory::new();
+        let path = directory.vault_path();
+        let mut agent = create_test_vault(&path, "oversized mutation sidecar password");
+        let shm = sqlite_sidecar(&path, "-shm");
+        File::create(&shm)
+            .and_then(|file| file.set_len(crate::MAX_SQLITE_SHM_BYTES + 1))
+            .expect("oversized shared-memory fixture must be created");
+
+        assert_eq!(
+            agent
+                .add_website_account(account_input("Oversized Sidecar"))
+                .err(),
+            Some(AccountError::Failed)
+        );
+        assert!(!agent.is_unlocked());
+        assert_eq!(
+            fs::metadata(shm)
+                .expect("oversized sidecar must remain available")
+                .len(),
+            crate::MAX_SQLITE_SHM_BYTES + 1
+        );
+    }
+
+    #[test]
+    fn lock_before_plaintext_return_discards_the_result() {
+        let directory = TestDirectory::new();
+        let path = directory.vault_path();
+        let mut agent = create_test_vault(&path, "lock race record password");
+        let id = agent
+            .add_website_account(account_input("Lock Race"))
+            .expect("account must be added");
+
+        assert_eq!(
+            agent
+                .get_website_account_with_before_return(id, VaultAgent::lock)
+                .err(),
+            Some(AccountError::Locked)
+        );
+        assert!(!agent.is_unlocked());
+    }
+
+    #[test]
+    fn sqlite_primary_key_rejects_duplicate_record_identifiers() {
+        let directory = TestDirectory::new();
+        let path = directory.vault_path();
+        let mut agent = create_test_vault(&path, "duplicate identifier password");
+        agent
+            .add_website_account(account_input("Duplicate"))
+            .expect("account must be added");
+        agent.lock();
+        drop(agent);
+
+        let connection = Connection::open(&path).expect("test database must open");
+        let (record_id, envelope): (Vec<u8>, Vec<u8>) = connection
+            .query_row(
+                "SELECT record_id, envelope FROM encrypted_records LIMIT 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("record fixture must exist");
+        assert!(
+            connection
+                .execute(
+                    "INSERT INTO encrypted_records(record_id, envelope) VALUES (?1, ?2)",
+                    rusqlite::params![record_id, envelope],
+                )
+                .is_err(),
+            "duplicate identifiers must fail at the SQLite boundary"
         );
     }
 
