@@ -233,6 +233,9 @@ The descriptor:
 - is removed by stable file identity if validation, durability, or ancestor
   revalidation fails after atomic replacement, without deleting a concurrently
   substituted file;
+- is deleted through the same no-follow, owner-verified handle that was opened
+  with delete access, both during failed-publication cleanup and ordinary
+  removal; a pathname replacement is preserved and reported as a conflict;
 - is removed before intentional shutdown; and
 - is considered stale unless the connected server independently passes the
   complete peer-verification sequence.
@@ -501,6 +504,16 @@ commitment share one ordering gate. An admitted request is registered before a
 lock or disconnect may complete. A terminal response remains behind that gate
 until the authenticated transport synchronously writes all bytes or reports
 failure; it cannot be queued for a later write after a lock acknowledgement.
+Status state and unlock epoch are captured together while this gate is held.
+Likewise, replaying a cached create-vault result refreshes its status and epoch
+at terminal commitment instead of returning the snapshot cached by the
+original request.
+
+After a secret-bearing request waits for the vault mutex, it repeats the
+cancellation, monotonic-deadline, lock-state, and epoch checks before doing
+cryptographic work. Authentication of account pages and mutation snapshots
+repeats those checks before every encrypted record, so large vaults do not turn
+one admission check into an uninterruptible scan.
 
 No authorization token, connection ID, request ID, nonce, or discovery field is
 accepted on a different connection. Captured frames are therefore unusable as
@@ -869,8 +882,10 @@ Issue #13 implements these layers as:
   transport writes against lock, cancel, disconnect, and sign-out, typed
   desktop dispatch, encoded-size-aware bounded account paging,
   connection-bound cancellation, lock epochs, stable file-identity ownership,
-  core-failure state synchronization, sign-out shutdown, and bounded keyed
-  idempotency outcomes.
+  per-record authority checks during authenticated reads and mutations,
+  coherent status snapshots, core-failure state synchronization, sign-out
+  shutdown, and bounded keyed idempotency outcomes whose replayed state is
+  refreshed at terminal commitment.
 
 The production entry point remains fail closed until issue #19 supplies the
 signed MSIX manifest, immutable role paths, package-local state path, and

@@ -653,6 +653,14 @@ impl AgentRuntime {
                 outcome = ExecutionOutcome::locked();
             }
         }
+        if outcome.error.is_none()
+            && matches!(
+                context.permit.operation(),
+                OperationCode::Status | OperationCode::CreateVault
+            )
+        {
+            outcome = ExecutionOutcome::success(encode_status(self.state(), self.unlock_epoch())?);
+        }
         let response = outcome.into_response(context.correlation)?;
         let write_result = write_response(&response);
         drop(context);
@@ -689,10 +697,7 @@ impl AgentRuntime {
             return Ok(ExecutionOutcome::deadline());
         }
         match operation {
-            OperationRequest::Status => Ok(ExecutionOutcome::success(encode_status(
-                self.state(),
-                self.unlock_epoch(),
-            )?)),
+            OperationRequest::Status => Ok(ExecutionOutcome::success(Zeroizing::new(Vec::new()))),
             OperationRequest::CreateVault { master_password } => {
                 self.create_vault(&master_password, registration, deadline)
             }
@@ -965,9 +970,17 @@ impl AgentRuntime {
         let offset = usize::try_from(offset).map_err(|_| DispatchError::Internal)?;
         let limit = usize::from(limit);
         let mut vault = lock(&self.vault)?;
-        let result = vault.list_website_account_page(offset, limit);
+        if let Some(outcome) = self.pre_secret_operation(request_epoch, registration, deadline) {
+            return Ok(outcome);
+        }
+        let result = vault.list_website_account_page_with_check(offset, limit, || {
+            self.secret_operation_should_abort(request_epoch, registration, deadline)
+        });
         let (accounts, has_more) = match result {
             Ok(page) => page,
+            Err(AccountError::Aborted) => {
+                return self.abort_after_core(&mut vault, request_epoch, registration, deadline);
+            }
             Err(error) => return self.account_error_after_core(vault, error),
         };
         if let Some(outcome) =
@@ -991,8 +1004,16 @@ impl AgentRuntime {
             return Ok(outcome);
         }
         let mut vault = lock(&self.vault)?;
-        let account = match vault.get_website_account(RecordId::from_bytes(id)) {
+        if let Some(outcome) = self.pre_secret_operation(request_epoch, registration, deadline) {
+            return Ok(outcome);
+        }
+        let account = match vault.get_website_account_with_check(RecordId::from_bytes(id), || {
+            self.secret_operation_should_abort(request_epoch, registration, deadline)
+        }) {
             Ok(account) => account,
+            Err(AccountError::Aborted) => {
+                return self.abort_after_core(&mut vault, request_epoch, registration, deadline);
+            }
             Err(error) => return self.account_error_after_core(vault, error),
         };
         if let Some(outcome) =
@@ -1026,27 +1047,34 @@ impl AgentRuntime {
         let cancellation = Arc::clone(&registration.cancellation);
         let mut _commit_guard = None;
         let mut vault = lock(&self.vault)?;
-        let result = vault.add_website_account_with_before_commit(input, || {
-            let guard = coordinator
-                .commit_gate
-                .lock()
-                .map_err(|_| crate::errors::StorageError::Conflict)?;
-            if coordinator.epoch() != request_epoch
-                || coordinator.lock_active.load(Ordering::Acquire)
-                || cancellation.is_cancelled()
-                || Instant::now() >= deadline
-            {
-                return Err(crate::errors::StorageError::Aborted);
-            }
-            _commit_guard = Some(guard);
-            Ok(())
-        });
+        if let Some(outcome) = self.pre_secret_operation(request_epoch, registration, deadline) {
+            return Ok(outcome);
+        }
+        let result = vault.add_website_account_with_before_commit_and_check(
+            input,
+            || self.secret_operation_should_abort(request_epoch, registration, deadline),
+            || {
+                let guard = coordinator
+                    .commit_gate
+                    .lock()
+                    .map_err(|_| crate::errors::StorageError::Conflict)?;
+                if coordinator.epoch() != request_epoch
+                    || coordinator.lock_active.load(Ordering::Acquire)
+                    || cancellation.is_cancelled()
+                    || Instant::now() >= deadline
+                {
+                    return Err(crate::errors::StorageError::Aborted);
+                }
+                _commit_guard = Some(guard);
+                Ok(())
+            },
+        );
         match result {
             Ok(id) => Ok(ExecutionOutcome::success(encode_account_id(
                 *id.as_bytes(),
             )?)),
             Err(AccountError::Aborted) => {
-                self.mutation_abort_after_core(&mut vault, request_epoch, registration, deadline)
+                self.abort_after_core(&mut vault, request_epoch, registration, deadline)
             }
             Err(AccountError::Failed) => self.account_error_after_core(vault, AccountError::Failed),
             Err(error) => {
@@ -1081,9 +1109,13 @@ impl AgentRuntime {
         let cancellation = Arc::clone(&registration.cancellation);
         let mut _commit_guard = None;
         let mut vault = lock(&self.vault)?;
-        let result = vault.update_website_account_with_before_commit(
+        if let Some(outcome) = self.pre_secret_operation(request_epoch, registration, deadline) {
+            return Ok(outcome);
+        }
+        let result = vault.update_website_account_with_before_commit_and_check(
             RecordId::from_bytes(id),
             input,
+            || self.secret_operation_should_abort(request_epoch, registration, deadline),
             || {
                 let guard = coordinator
                     .commit_gate
@@ -1103,7 +1135,7 @@ impl AgentRuntime {
         match result {
             Ok(()) => Ok(ExecutionOutcome::success(encode_empty_result()?)),
             Err(AccountError::Aborted) => {
-                self.mutation_abort_after_core(&mut vault, request_epoch, registration, deadline)
+                self.abort_after_core(&mut vault, request_epoch, registration, deadline)
             }
             Err(AccountError::Failed) => self.account_error_after_core(vault, AccountError::Failed),
             Err(error) => {
@@ -1134,8 +1166,13 @@ impl AgentRuntime {
         let cancellation = Arc::clone(&registration.cancellation);
         let mut _commit_guard = None;
         let mut vault = lock(&self.vault)?;
-        let result =
-            vault.delete_website_account_with_before_commit(RecordId::from_bytes(id), || {
+        if let Some(outcome) = self.pre_secret_operation(request_epoch, registration, deadline) {
+            return Ok(outcome);
+        }
+        let result = vault.delete_website_account_with_before_commit_and_check(
+            RecordId::from_bytes(id),
+            || self.secret_operation_should_abort(request_epoch, registration, deadline),
+            || {
                 let guard = coordinator
                     .commit_gate
                     .lock()
@@ -1149,11 +1186,12 @@ impl AgentRuntime {
                 }
                 _commit_guard = Some(guard);
                 Ok(())
-            });
+            },
+        );
         match result {
             Ok(()) => Ok(ExecutionOutcome::success(encode_empty_result()?)),
             Err(AccountError::Aborted) => {
-                self.mutation_abort_after_core(&mut vault, request_epoch, registration, deadline)
+                self.abort_after_core(&mut vault, request_epoch, registration, deadline)
             }
             Err(AccountError::Failed) => self.account_error_after_core(vault, AccountError::Failed),
             Err(error) => {
@@ -1167,7 +1205,7 @@ impl AgentRuntime {
         }
     }
 
-    fn mutation_abort_after_core(
+    fn abort_after_core(
         &self,
         vault: &mut VaultAgent,
         request_epoch: u64,
@@ -1176,6 +1214,19 @@ impl AgentRuntime {
     ) -> Result<ExecutionOutcome, DispatchError> {
         self.post_secret_operation(vault, request_epoch, registration, deadline)
             .ok_or(DispatchError::Internal)
+    }
+
+    fn secret_operation_should_abort(
+        &self,
+        request_epoch: u64,
+        registration: &RequestRegistration,
+        deadline: Instant,
+    ) -> bool {
+        self.coordinator.lock_active.load(Ordering::Acquire)
+            || registration.cancellation.is_cancelled()
+            || Instant::now() >= deadline
+            || self.state() != AgentState::Unlocked
+            || self.coordinator.epoch() != request_epoch
     }
 
     fn pre_secret_operation(
@@ -1629,6 +1680,15 @@ mod tests {
         ResponseEnvelope::decode(&encoded).map_err(|_| DispatchError::Internal)
     }
 
+    fn decode_status_response(response: &ResponseEnvelope) -> (AgentState, u64) {
+        let mut decoder = Decoder::new(response.body());
+        assert_eq!(decoder.array().expect("status array"), Some(2));
+        let state = decode_state(decoder.u8().expect("status state"));
+        let epoch = decoder.u64().expect("status epoch");
+        assert_eq!(decoder.position(), response.body().len());
+        (state, epoch)
+    }
+
     #[test]
     fn global_and_serial_resource_permits_are_exact_and_reusable() {
         let counter = AtomicUsize::new(0);
@@ -1790,6 +1850,176 @@ mod tests {
             .expect("terminal response");
         assert_eq!(stale.error(), Some(PublicErrorCode::Locked));
         assert!(stale.body().is_empty());
+    }
+
+    #[test]
+    fn terminal_commit_refreshes_status_snapshot() {
+        let directory = TestDirectory::new();
+        let runtime = AgentRuntime::start(directory.vault_path()).expect("runtime");
+        runtime
+            .state
+            .store(AgentState::Unlocked as u8, Ordering::Release);
+        runtime
+            .coordinator
+            .advance_epoch_without_cancellation()
+            .expect("first epoch");
+        let stale_epoch = runtime.unlock_epoch();
+
+        let status_connection = connection(runtime.state(), stale_epoch, 71);
+        let (_request, _header, status_permit) =
+            admitted_request(&runtime, &status_connection, 1, &OperationRequest::Status);
+        let status_registration = runtime
+            .coordinator
+            .register(RequestKey {
+                connection_id: *status_connection.connection_id(),
+                request_id: 1,
+            })
+            .expect("status registration");
+        runtime
+            .state
+            .store(AgentState::Locked as u8, Ordering::Release);
+        runtime
+            .coordinator
+            .advance_epoch_without_cancellation()
+            .expect("lock epoch");
+        let current_epoch = runtime.unlock_epoch();
+        let status = runtime
+            .finish_dispatch(
+                DispatchContext {
+                    connection: &status_connection,
+                    permit: status_permit,
+                    _global: CounterPermit::acquire(
+                        &runtime.coordinator.global_in_flight,
+                        MAX_IN_FLIGHT_GLOBAL,
+                    )
+                    .expect("status global permit"),
+                    registration: status_registration,
+                    deadline: Instant::now() + Duration::from_secs(1),
+                    correlation: CorrelationId::new([0x71; 16]),
+                },
+                ExecutionOutcome::success(
+                    encode_status(AgentState::Unlocked, stale_epoch).expect("stale status body"),
+                ),
+                copy_response,
+            )
+            .expect("status response");
+        assert_eq!(
+            decode_status_response(&status),
+            (AgentState::Locked, current_epoch)
+        );
+    }
+
+    #[test]
+    fn terminal_commit_refreshes_replayed_create_epoch() {
+        let directory = TestDirectory::new();
+        let runtime = AgentRuntime::start(directory.vault_path()).expect("runtime");
+        runtime
+            .state
+            .store(AgentState::Unlocked as u8, Ordering::Release);
+        runtime
+            .coordinator
+            .advance_epoch_without_cancellation()
+            .expect("creation epoch");
+        let stale_epoch = runtime.unlock_epoch();
+        runtime
+            .coordinator
+            .advance_epoch_without_cancellation()
+            .expect("unlock epoch");
+        let replay_epoch = runtime.unlock_epoch();
+        let create_connection = connection(runtime.state(), replay_epoch, 81);
+        let create = OperationRequest::CreateVault {
+            master_password: Zeroizing::new("replayed create password".to_owned()),
+        };
+        let body = create.encode().expect("create body");
+        let envelope =
+            RequestEnvelope::new(OperationCode::CreateVault, 0, 5_000, Some([0x81; 16]), body)
+                .expect("create envelope");
+        let header = FrameHeader::new(
+            MessageKind::Request,
+            CURRENT_VERSION,
+            envelope.encode().expect("create bytes").len(),
+            *create_connection.connection_id(),
+            1,
+        )
+        .expect("create header");
+        let create_permit = create_connection
+            .begin_request(&header, &envelope, replay_epoch)
+            .expect("create admission");
+        let create_registration = runtime
+            .coordinator
+            .register(RequestKey {
+                connection_id: *create_connection.connection_id(),
+                request_id: 1,
+            })
+            .expect("create registration");
+        let replay = runtime
+            .finish_dispatch(
+                DispatchContext {
+                    connection: &create_connection,
+                    permit: create_permit,
+                    _global: CounterPermit::acquire(
+                        &runtime.coordinator.global_in_flight,
+                        MAX_IN_FLIGHT_GLOBAL,
+                    )
+                    .expect("create global permit"),
+                    registration: create_registration,
+                    deadline: Instant::now() + Duration::from_secs(1),
+                    correlation: CorrelationId::new([0x81; 16]),
+                },
+                ExecutionOutcome::success(
+                    encode_status(AgentState::Unlocked, stale_epoch)
+                        .expect("cached create status body"),
+                ),
+                copy_response,
+            )
+            .expect("replayed create response");
+        assert_eq!(
+            decode_status_response(&replay),
+            (AgentState::Unlocked, replay_epoch)
+        );
+    }
+
+    #[test]
+    fn page_deadline_is_rechecked_after_waiting_for_the_vault_mutex() {
+        let directory = TestDirectory::new();
+        let path = directory.vault_path();
+        let runtime = Arc::new(AgentRuntime::start(&path).expect("runtime"));
+        let password = MasterPassword::new("page deadline password").expect("password");
+        let (created, recovery_key) = VaultAgent::create(&path, password).expect("vault");
+        drop(recovery_key);
+        *lock(&runtime.vault).expect("vault lock") = created;
+        runtime
+            .state
+            .store(AgentState::Unlocked as u8, Ordering::Release);
+        runtime
+            .coordinator
+            .advance_epoch_without_cancellation()
+            .expect("unlock epoch");
+        let epoch = runtime.unlock_epoch();
+        let registration = runtime
+            .coordinator
+            .register(RequestKey {
+                connection_id: [0x91; 16],
+                request_id: 1,
+            })
+            .expect("registration");
+
+        let held_vault = lock(&runtime.vault).expect("hold vault mutex");
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let worker_runtime = Arc::clone(&runtime);
+        let deadline = Instant::now() + Duration::from_millis(500);
+        let worker = std::thread::spawn(move || {
+            started_tx.send(()).expect("worker start");
+            worker_runtime.list_accounts(0, 10, epoch, &registration, deadline)
+        });
+        started_rx.recv().expect("worker started");
+        std::thread::sleep(Duration::from_millis(700));
+        drop(held_vault);
+
+        let outcome = worker.join().expect("page worker").expect("page outcome");
+        assert_eq!(outcome.error, Some(PublicErrorCode::DeadlineExceeded));
+        assert_eq!(runtime.state(), AgentState::Unlocked);
+        assert_eq!(runtime.unlock_epoch(), epoch);
     }
 
     #[test]

@@ -3,6 +3,7 @@ use std::{
     ffi::c_void,
     fs::{self, File, OpenOptions},
     io::{Read, Write},
+    mem::size_of,
     os::windows::{
         ffi::OsStrExt,
         fs::{MetadataExt, OpenOptionsExt},
@@ -19,12 +20,15 @@ use windows_sys::Win32::{
         Authorization::{ConvertStringSidToSidW, GetSecurityInfo, SE_FILE_OBJECT},
         EqualSid, OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID,
     },
-    Storage::FileSystem::{MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW},
+    Storage::FileSystem::{
+        DELETE, FILE_DISPOSITION_INFO, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES,
+        FileDispositionInfo, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
+        READ_CONTROL, SetFileInformationByHandle,
+    },
 };
 
 const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
 const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
-const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
 const FILE_SHARE_READ: u32 = 0x0000_0001;
 const FILE_SHARE_WRITE: u32 = 0x0000_0002;
 const FILE_SHARE_DELETE: u32 = 0x0000_0004;
@@ -203,20 +207,28 @@ impl EndpointDescriptorStore {
     ///
     /// Rejects redirected/non-regular targets and removal failures.
     pub fn remove(&self) -> Result<(), DiscoveryError> {
+        self.remove_with_before_delete(|| {})
+    }
+
+    fn remove_with_before_delete(
+        &self,
+        before_delete: impl FnOnce(),
+    ) -> Result<(), DiscoveryError> {
         let guards = acquire_ancestor_guards(&self.path)?;
-        let file = match open_regular(&self.path, false, true, &self.owner_sid) {
+        let file = match open_regular_for_delete(&self.path, &self.owner_sid) {
             Ok(file) => file,
             Err(DiscoveryError::Unavailable) => return Ok(()),
             Err(error) => return Err(error),
         };
-        let expected = same_file::Handle::from_file(file).map_err(|_| DiscoveryError::Internal)?;
-        let current =
-            same_file::Handle::from_file(open_regular(&self.path, false, true, &self.owner_sid)?)
-                .map_err(|_| DiscoveryError::Internal)?;
-        if expected != current {
+        before_delete();
+        let deletion = delete_file_by_handle(&file);
+        drop(file);
+        let absence = ensure_path_absent(&self.path);
+        if absence == Err(DiscoveryError::Replaced) {
             return Err(DiscoveryError::Replaced);
         }
-        fs::remove_file(&self.path).map_err(|_| DiscoveryError::Internal)?;
+        deletion?;
+        absence?;
         sync_parent_directory(&self.path)?;
         revalidate_ancestor_guards(&guards)
     }
@@ -322,6 +334,23 @@ fn open_regular(
     Ok(file)
 }
 
+fn open_regular_for_delete(path: &Path, owner_sid: &str) -> Result<File, DiscoveryError> {
+    let file = OpenOptions::new()
+        .access_mode(FILE_READ_ATTRIBUTES | READ_CONTROL | DELETE)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+        .map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                DiscoveryError::Unavailable
+            } else {
+                DiscoveryError::Redirected
+            }
+        })?;
+    verify_regular(&file, owner_sid)?;
+    Ok(file)
+}
+
 fn verify_regular(file: &File, owner_sid: &str) -> Result<(), DiscoveryError> {
     let metadata = file.metadata().map_err(|_| DiscoveryError::Redirected)?;
     if !metadata.is_file() || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
@@ -398,13 +427,51 @@ fn remove_if_same_file(
     expected: &same_file::Handle,
     owner_sid: &str,
 ) -> Result<(), DiscoveryError> {
-    let current = same_file::Handle::from_file(open_regular(path, true, true, owner_sid)?)
-        .map_err(|_| DiscoveryError::Internal)?;
+    let file = open_regular_for_delete(path, owner_sid)?;
+    let current =
+        same_file::Handle::from_file(file.try_clone().map_err(|_| DiscoveryError::Internal)?)
+            .map_err(|_| DiscoveryError::Internal)?;
     if &current != expected {
         return Err(DiscoveryError::Replaced);
     }
-    fs::remove_file(path).map_err(|_| DiscoveryError::Internal)?;
+    let deletion = delete_file_by_handle(&file);
+    drop(current);
+    drop(file);
+    let absence = ensure_path_absent(path);
+    if absence == Err(DiscoveryError::Replaced) {
+        return Err(DiscoveryError::Replaced);
+    }
+    deletion?;
+    absence?;
     sync_parent_directory(path)
+}
+
+fn delete_file_by_handle(file: &File) -> Result<(), DiscoveryError> {
+    let disposition = FILE_DISPOSITION_INFO { DeleteFile: true };
+    let size =
+        u32::try_from(size_of::<FILE_DISPOSITION_INFO>()).map_err(|_| DiscoveryError::Internal)?;
+    // SAFETY: `file` is a retained regular-file handle opened with DELETE
+    // access. The fixed disposition structure remains live for the call.
+    if unsafe {
+        SetFileInformationByHandle(
+            file.as_raw_handle(),
+            FileDispositionInfo,
+            (&raw const disposition).cast(),
+            size,
+        )
+    } == 0
+    {
+        return Err(DiscoveryError::Internal);
+    }
+    Ok(())
+}
+
+fn ensure_path_absent(path: &Path) -> Result<(), DiscoveryError> {
+    match fs::symlink_metadata(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Ok(_) => Err(DiscoveryError::Replaced),
+        Err(_) => Err(DiscoveryError::Internal),
+    }
 }
 
 fn move_replace(source: &Path, target: &Path) -> Result<(), DiscoveryError> {
@@ -581,6 +648,33 @@ mod tests {
             Err(DiscoveryError::Internal)
         });
         assert_eq!(result, Err(DiscoveryError::Internal));
+        assert_eq!(store.load(), Ok(replacement));
+    }
+
+    #[test]
+    fn removal_deletes_the_verified_handle_not_a_replacement_path() {
+        let directory = TestDirectory::new();
+        let path = directory.descriptor_path();
+        let store = directory.store();
+        store.publish(&descriptor()).expect("initial descriptor");
+        let replacement = EndpointDescriptor::new(
+            r"\\.\pipe\LOCAL\Librarian.Agent.v1.abcdef0123456789abcdef0123456789".to_owned(),
+            43,
+            75,
+            "Librarian_1.0.0.0_x64__publisher".to_owned(),
+            1,
+            1,
+            [0xC5; 32],
+        )
+        .expect("replacement descriptor");
+        let replacement_bytes = replacement.encode();
+
+        let result = store.remove_with_before_delete(|| {
+            fs::remove_file(&path).expect("unlink verified descriptor");
+            fs::write(&path, &replacement_bytes).expect("install replacement");
+        });
+
+        assert_eq!(result, Err(DiscoveryError::Replaced));
         assert_eq!(store.load(), Ok(replacement));
     }
 

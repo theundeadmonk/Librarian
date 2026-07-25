@@ -1292,6 +1292,93 @@ mod tests {
     }
 
     #[test]
+    fn account_page_authentication_honors_mid_visit_cancellation() {
+        let directory = TestDirectory::new();
+        let path = directory.vault_path();
+        let mut agent = create_test_vault(&path, "page cancellation password");
+        agent
+            .add_website_account(account_input("Page Cancellation"))
+            .expect("account must be added");
+        let mut checks = 0_usize;
+
+        assert_eq!(
+            agent
+                .list_website_account_page_with_check(0, 100, || {
+                    checks = checks.saturating_add(1);
+                    true
+                })
+                .err(),
+            Some(AccountError::Aborted)
+        );
+        assert_eq!(checks, 1);
+        assert!(agent.is_unlocked());
+    }
+
+    #[test]
+    fn account_mutation_authentication_honors_mid_visit_cancellation() {
+        let directory = TestDirectory::new();
+        let path = directory.vault_path();
+        let mut agent = create_test_vault(&path, "mutation cancellation password");
+        let id = agent
+            .add_website_account(account_input("Existing"))
+            .expect("account must be added");
+
+        let mut add_committed = false;
+        assert_eq!(
+            agent
+                .add_website_account_with_before_commit_and_check(
+                    account_input("Cancelled Add"),
+                    || true,
+                    || {
+                        add_committed = true;
+                        Ok(())
+                    },
+                )
+                .err(),
+            Some(AccountError::Aborted)
+        );
+        assert!(!add_committed);
+
+        let mut update_committed = false;
+        assert_eq!(
+            agent
+                .update_website_account_with_before_commit_and_check(
+                    id,
+                    account_input("Cancelled Update"),
+                    || true,
+                    || {
+                        update_committed = true;
+                        Ok(())
+                    },
+                )
+                .err(),
+            Some(AccountError::Aborted)
+        );
+        assert!(!update_committed);
+
+        let mut delete_committed = false;
+        assert_eq!(
+            agent
+                .delete_website_account_with_before_commit_and_check(
+                    id,
+                    || true,
+                    || {
+                        delete_committed = true;
+                        Ok(())
+                    },
+                )
+                .err(),
+            Some(AccountError::Aborted)
+        );
+        assert!(!delete_committed);
+        assert!(agent.is_unlocked());
+        assert!(
+            agent.get_website_account(id).is_ok(),
+            "existing account must remain authenticated"
+        );
+    }
+
+    #[test]
     fn sqlite_primary_key_rejects_duplicate_record_identifiers() {
         let directory = TestDirectory::new();
         let path = directory.vault_path();

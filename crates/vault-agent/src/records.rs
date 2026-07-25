@@ -64,16 +64,26 @@ impl VaultAgent {
         offset: usize,
         limit: usize,
     ) -> Result<(Vec<WebsiteAccount>, bool), AccountError> {
+        self.list_website_account_page_with_check(offset, limit, || false)
+    }
+
+    pub(crate) fn list_website_account_page_with_check(
+        &mut self,
+        offset: usize,
+        limit: usize,
+        should_cancel: impl FnMut() -> bool,
+    ) -> Result<(Vec<WebsiteAccount>, bool), AccountError> {
         let permit = self.require_operation()?;
         let snapshot = self.load_authenticated_snapshot()?;
         let result = {
             let session = self.session.as_ref().ok_or(AccountError::Locked)?;
-            session.list_website_account_page(
+            session.list_website_account_page_with_check(
                 &snapshot.header,
                 &snapshot.manifest,
                 &snapshot.records,
                 offset,
                 limit,
+                should_cancel,
             )
         };
         let page = self.map_read(result)?;
@@ -104,6 +114,16 @@ impl VaultAgent {
         input: WebsiteAccountInput,
         before_commit: impl FnOnce() -> Result<(), StorageError>,
     ) -> Result<(), AccountError> {
+        self.update_website_account_with_before_commit_and_check(id, input, || false, before_commit)
+    }
+
+    pub(crate) fn update_website_account_with_before_commit_and_check(
+        &mut self,
+        id: RecordId,
+        input: WebsiteAccountInput,
+        should_cancel: impl FnMut() -> bool,
+        before_commit: impl FnOnce() -> Result<(), StorageError>,
+    ) -> Result<(), AccountError> {
         let permit = self.require_operation()?;
         let snapshot = self.load_authenticated_snapshot()?;
         let committed_at_ms = unix_time_ms().map_err(|_| {
@@ -112,13 +132,14 @@ impl VaultAgent {
         })?;
         let prepared = {
             let session = self.session.as_ref().ok_or(AccountError::Locked)?;
-            session.prepare_update_website_account(
+            session.prepare_update_website_account_with_check(
                 &snapshot.header,
                 &snapshot.manifest,
                 &snapshot.records,
                 id,
                 input,
                 committed_at_ms,
+                should_cancel,
             )
         };
         let prepared = self.map_preparation(prepared)?;
@@ -141,6 +162,15 @@ impl VaultAgent {
         id: RecordId,
         before_commit: impl FnOnce() -> Result<(), StorageError>,
     ) -> Result<(), AccountError> {
+        self.delete_website_account_with_before_commit_and_check(id, || false, before_commit)
+    }
+
+    pub(crate) fn delete_website_account_with_before_commit_and_check(
+        &mut self,
+        id: RecordId,
+        should_cancel: impl FnMut() -> bool,
+        before_commit: impl FnOnce() -> Result<(), StorageError>,
+    ) -> Result<(), AccountError> {
         let permit = self.require_operation()?;
         let snapshot = self.load_authenticated_snapshot()?;
         let committed_at_ms = unix_time_ms().map_err(|_| {
@@ -149,12 +179,13 @@ impl VaultAgent {
         })?;
         let prepared = {
             let session = self.session.as_ref().ok_or(AccountError::Locked)?;
-            session.prepare_delete_website_account(
+            session.prepare_delete_website_account_with_check(
                 &snapshot.header,
                 &snapshot.manifest,
                 &snapshot.records,
                 id,
                 committed_at_ms,
+                should_cancel,
             )
         };
         let prepared = self.map_preparation(prepared)?;
@@ -167,6 +198,15 @@ impl VaultAgent {
         input: WebsiteAccountInput,
         before_commit: impl FnOnce() -> Result<(), StorageError>,
     ) -> Result<RecordId, AccountError> {
+        self.add_website_account_with_before_commit_and_check(input, || false, before_commit)
+    }
+
+    pub(crate) fn add_website_account_with_before_commit_and_check(
+        &mut self,
+        input: WebsiteAccountInput,
+        should_cancel: impl FnMut() -> bool,
+        before_commit: impl FnOnce() -> Result<(), StorageError>,
+    ) -> Result<RecordId, AccountError> {
         let permit = self.require_operation()?;
         let snapshot = self.load_authenticated_snapshot()?;
         let committed_at_ms = unix_time_ms().map_err(|_| {
@@ -175,12 +215,13 @@ impl VaultAgent {
         })?;
         let prepared = {
             let session = self.session.as_ref().ok_or(AccountError::Locked)?;
-            session.prepare_add_website_account(
+            session.prepare_add_website_account_with_check(
                 &snapshot.header,
                 &snapshot.manifest,
                 &snapshot.records,
                 input,
                 committed_at_ms,
+                should_cancel,
             )
         };
         let prepared = self.map_preparation(prepared)?;
@@ -200,6 +241,31 @@ impl VaultAgent {
         };
         let account = self.map_read(result)?;
         before_return(self);
+        if !self.operation_is_authorized(permit) {
+            drop(account);
+            return Err(AccountError::Locked);
+        }
+        Ok(account)
+    }
+
+    pub(crate) fn get_website_account_with_check(
+        &mut self,
+        id: RecordId,
+        should_cancel: impl FnMut() -> bool,
+    ) -> Result<WebsiteAccount, AccountError> {
+        let permit = self.require_operation()?;
+        let snapshot = self.load_authenticated_snapshot()?;
+        let result = {
+            let session = self.session.as_ref().ok_or(AccountError::Locked)?;
+            session.get_website_account_with_check(
+                &snapshot.header,
+                &snapshot.manifest,
+                &snapshot.records,
+                id,
+                should_cancel,
+            )
+        };
+        let account = self.map_read(result)?;
         if !self.operation_is_authorized(permit) {
             drop(account);
             return Err(AccountError::Locked);
@@ -313,6 +379,7 @@ impl VaultAgent {
         match result {
             Ok(prepared) => Ok(prepared),
             Err(RecordOperationError::NotFound) => Err(AccountError::NotFound),
+            Err(RecordOperationError::Cancelled) => Err(AccountError::Aborted),
             Err(RecordOperationError::Failed) => {
                 self.lock();
                 Err(AccountError::Failed)
@@ -324,6 +391,7 @@ impl VaultAgent {
         match result {
             Ok(value) => Ok(value),
             Err(RecordOperationError::NotFound) => Err(AccountError::NotFound),
+            Err(RecordOperationError::Cancelled) => Err(AccountError::Aborted),
             Err(RecordOperationError::Failed) => {
                 self.lock();
                 Err(AccountError::Failed)

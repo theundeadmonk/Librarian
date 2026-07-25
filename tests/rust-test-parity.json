@@ -19,6 +19,11 @@
     },
     {
       "platform": "windows",
+      "test": "librarian-windows-ipc::lib:librarian_windows_ipc::discovery::tests::removal_deletes_the_verified_handle_not_a_replacement_path::test:active",
+      "rationale": "Exercises Windows handle-based descriptor deletion and proves a pathname replacement is preserved after the original file is verified."
+    },
+    {
+      "platform": "windows",
       "test": "librarian-windows-ipc::lib:librarian_windows_ipc::discovery::tests::redirected_descriptors_fail_and_inflight_replacement_is_blocked::test:active",
       "rationale": "Exercises Windows reparse-point rejection and file-sharing guards that block descriptor deletion or replacement during a read."
     },
