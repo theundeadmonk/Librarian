@@ -571,6 +571,7 @@ namespace
         bool first_instance)
     {
         DWORD open_mode = PIPE_ACCESS_DUPLEX;
+        open_mode |= FILE_FLAG_OVERLAPPED;
         if (first_instance)
         {
             open_mode |= FILE_FLAG_FIRST_PIPE_INSTANCE;
@@ -589,12 +590,121 @@ namespace
             security));
     }
 
-    void accept_pipe(HANDLE pipe)
+    [[noreturn]] void cancel_pending_io(
+        HANDLE handle,
+        OVERLAPPED& overlapped,
+        std::string const& reason)
     {
-        if (!ConnectNamedPipe(pipe, nullptr) &&
-            GetLastError() != ERROR_PIPE_CONNECTED)
+        if (!CancelIoEx(handle, &overlapped) &&
+            GetLastError() != ERROR_NOT_FOUND)
         {
+            ExitProcess(3);
+        }
+        if (WaitForSingleObject(overlapped.hEvent, child_timeout_ms) !=
+            WAIT_OBJECT_0)
+        {
+            ExitProcess(3);
+        }
+
+        DWORD ignored = 0;
+        GetOverlappedResult(handle, &overlapped, &ignored, FALSE);
+        throw std::runtime_error(reason);
+    }
+
+    [[nodiscard]] DWORD wait_for_pipe_io(
+        HANDLE handle,
+        OVERLAPPED& overlapped,
+        HANDLE peer_process,
+        std::string const& operation)
+    {
+        std::array<HANDLE, 2> const waits{
+            overlapped.hEvent,
+            peer_process,
+        };
+        DWORD const wait = WaitForMultipleObjects(
+            peer_process == nullptr ? 1 : 2,
+            waits.data(),
+            FALSE,
+            child_timeout_ms);
+        if (wait == WAIT_OBJECT_0)
+        {
+            DWORD transferred = 0;
+            if (!GetOverlappedResult(
+                    handle,
+                    &overlapped,
+                    &transferred,
+                    FALSE))
+            {
+                throw_last_error(operation);
+            }
+            return transferred;
+        }
+        if (peer_process != nullptr && wait == WAIT_OBJECT_0 + 1)
+        {
+            cancel_pending_io(
+                handle,
+                overlapped,
+                operation + " stopped because the peer process exited.");
+        }
+        if (wait == WAIT_TIMEOUT)
+        {
+            cancel_pending_io(
+                handle,
+                overlapped,
+                operation + " timed out.");
+        }
+        if (wait == WAIT_FAILED)
+        {
+            DWORD const error = GetLastError();
+            cancel_pending_io(
+                handle,
+                overlapped,
+                operation + " wait failed with Windows error " +
+                    std::to_string(error));
+        }
+        cancel_pending_io(
+            handle,
+            overlapped,
+            operation + " produced an unexpected wait result.");
+    }
+
+    void accept_pipe(HANDLE pipe, HANDLE peer_process = nullptr)
+    {
+        unique_handle const event(CreateEventW(
+            nullptr,
+            TRUE,
+            FALSE,
+            nullptr));
+        if (!event)
+        {
+            throw_last_error("CreateEventW(ConnectNamedPipe)");
+        }
+        OVERLAPPED overlapped{};
+        overlapped.hEvent = event.get();
+
+        if (ConnectNamedPipe(pipe, &overlapped))
+        {
+            return;
+        }
+
+        DWORD const error = GetLastError();
+        if (error == ERROR_PIPE_CONNECTED)
+        {
+            return;
+        }
+        if (error != ERROR_IO_PENDING)
+        {
+            SetLastError(error);
             throw_last_error("ConnectNamedPipe");
+        }
+        if (wait_for_pipe_io(
+                pipe,
+                overlapped,
+                peer_process,
+                "ConnectNamedPipe") != 0)
+        {
+            throw std::runtime_error(
+                "ConnectNamedPipe transferred unexpected bytes.");
         }
     }
 
@@ -608,6 +718,7 @@ namespace
                 0,
                 nullptr,
                 OPEN_EXISTING,
+                FILE_FLAG_OVERLAPPED |
                 SECURITY_SQOS_PRESENT |
                     SECURITY_ANONYMOUS |
                     SECURITY_EFFECTIVE_ONLY,
@@ -625,24 +736,75 @@ namespace
         throw_last_error("CreateFileW(named pipe)");
     }
 
-    [[nodiscard]] std::byte read_byte(HANDLE handle)
+    [[nodiscard]] std::byte read_byte(
+        HANDLE handle,
+        HANDLE peer_process = nullptr)
     {
+        unique_handle const event(CreateEventW(
+            nullptr,
+            TRUE,
+            FALSE,
+            nullptr));
+        if (!event)
+        {
+            throw_last_error("CreateEventW(ReadFile)");
+        }
+        OVERLAPPED overlapped{};
+        overlapped.hEvent = event.get();
+
         std::byte value{};
         DWORD read = 0;
-        if (!ReadFile(handle, &value, 1, &read, nullptr) || read != 1)
+        if (!ReadFile(handle, &value, 1, &read, &overlapped))
         {
-            throw_last_error("ReadFile");
+            DWORD const error = GetLastError();
+            if (error != ERROR_IO_PENDING)
+            {
+                SetLastError(error);
+                throw_last_error("ReadFile");
+            }
+            read = wait_for_pipe_io(
+                handle,
+                overlapped,
+                peer_process,
+                "ReadFile");
         }
+        require(read == 1, "ReadFile did not return exactly one byte.");
         return value;
     }
 
-    void write_byte(HANDLE handle, std::byte value)
+    void write_byte(
+        HANDLE handle,
+        std::byte value,
+        HANDLE peer_process = nullptr)
     {
-        DWORD written = 0;
-        if (!WriteFile(handle, &value, 1, &written, nullptr) || written != 1)
+        unique_handle const event(CreateEventW(
+            nullptr,
+            TRUE,
+            FALSE,
+            nullptr));
+        if (!event)
         {
-            throw_last_error("WriteFile");
+            throw_last_error("CreateEventW(WriteFile)");
         }
+        OVERLAPPED overlapped{};
+        overlapped.hEvent = event.get();
+
+        DWORD written = 0;
+        if (!WriteFile(handle, &value, 1, &written, &overlapped))
+        {
+            DWORD const error = GetLastError();
+            if (error != ERROR_IO_PENDING)
+            {
+                SetLastError(error);
+                throw_last_error("WriteFile");
+            }
+            written = wait_for_pipe_io(
+                handle,
+                overlapped,
+                peer_process,
+                "WriteFile");
+        }
+        require(written == 1, "WriteFile did not write exactly one byte.");
     }
 
     [[nodiscard]] std::wstring quote_argument(std::wstring const& value)
@@ -785,14 +947,15 @@ namespace
         try
         {
             require(
-                read_byte(pipe.get()) == server_authorized,
+                read_byte(pipe.get(), server.process.get()) ==
+                    server_authorized,
                 "Server returned an invalid authorization marker.");
         }
         catch (std::runtime_error const&)
         {
             return 20;
         }
-        write_byte(pipe.get(), client_payload);
+        write_byte(pipe.get(), client_payload, server.process.get());
         return 0;
     }
 
@@ -810,10 +973,13 @@ namespace
             throw_last_error("SetEvent");
         }
         accept_pipe(pipe.get());
-
-        std::byte ignored{};
-        DWORD read = 0;
-        ReadFile(pipe.get(), &ignored, 1, &read, nullptr);
+        try
+        {
+            static_cast<void>(read_byte(pipe.get()));
+        }
+        catch (std::runtime_error const&)
+        {
+        }
         return 0;
     }
 
@@ -902,6 +1068,41 @@ namespace
             "FILE_FLAG_FIRST_PIPE_INSTANCE allowed a duplicate server.");
     }
 
+    void test_peer_exit_cancels_pending_accept()
+    {
+        pipe_security security = make_pipe_security();
+        std::wstring const name = random_pipe_name();
+        unique_handle const pipe =
+            create_pipe(name, &security.attributes, true);
+        if (!pipe)
+        {
+            throw_last_error("CreateNamedPipeW(peer exit)");
+        }
+
+        child_process const child = launch_child(
+            current_image_path(),
+            {L"--exit"},
+            false);
+        require(
+            wait_for_child(child) == 0,
+            "Peer-exit fixture did not exit cleanly.");
+
+        bool cancelled = false;
+        try
+        {
+            accept_pipe(pipe.get(), child.process.get());
+        }
+        catch (std::runtime_error const& error)
+        {
+            cancelled =
+                std::string_view(error.what()).find("peer process exited") !=
+                std::string_view::npos;
+        }
+        require(
+            cancelled,
+            "Pending pipe accept did not stop when the peer process exited.");
+    }
+
     void test_mutual_peer_attestation()
     {
         pipe_security security = make_pipe_security();
@@ -923,7 +1124,7 @@ namespace
                 image,
             },
             false);
-        accept_pipe(pipe.get());
+        accept_pipe(pipe.get(), child.process.get());
 
         ULONG client_pid = 0;
         if (!GetNamedPipeClientProcessId(pipe.get(), &client_pid))
@@ -944,9 +1145,12 @@ namespace
             client,
             "Authenticated client process exited before payload exchange.");
 
-        write_byte(pipe.get(), server_authorized);
+        write_byte(
+            pipe.get(),
+            server_authorized,
+            child.process.get());
         require(
-            read_byte(pipe.get()) == client_payload,
+            read_byte(pipe.get(), child.process.get()) == client_payload,
             "Client payload was not bound to the authenticated connection.");
         require(wait_for_child(child) == 0, "Expected client failed.");
     }
@@ -973,7 +1177,7 @@ namespace
                 image,
             },
             false);
-        accept_pipe(pipe.get());
+        accept_pipe(pipe.get(), child.process.get());
 
         ULONG client_pid = 0;
         if (!GetNamedPipeClientProcessId(pipe.get(), &client_pid))
@@ -1056,10 +1260,11 @@ namespace
             std::function<void()> run;
         };
 
-        std::array<test_case, 6> const tests{{
+        std::array<test_case, 7> const tests{{
             {L"identity policy fails closed", test_identity_policy},
             {L"pipe DACL is logon-session scoped", test_pipe_security_descriptor},
             {L"first pipe instance blocks duplicates", test_first_instance_blocks_duplicate},
+            {L"peer exit cancels pending accept", test_peer_exit_cancels_pending_accept},
             {L"client and server attest each other", test_mutual_peer_attestation},
             {L"server rejects a copied client", test_server_rejects_copied_client},
             {L"client rejects a copied server", test_client_rejects_copied_server},
@@ -1117,6 +1322,10 @@ int wmain(int argc, wchar_t* argv[])
         if (argc == 2 && std::wstring_view(argv[1]) == L"--self-test")
         {
             return self_test();
+        }
+        if (argc == 2 && std::wstring_view(argv[1]) == L"--exit")
+        {
+            return 0;
         }
         if (argc == 5 && std::wstring_view(argv[1]) == L"--client")
         {

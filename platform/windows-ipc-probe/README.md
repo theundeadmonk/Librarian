@@ -15,6 +15,8 @@ store real credentials. Production implementation belongs to
 - missing package identity fails the production policy;
 - the pipe DACL contains only LocalSystem and the current logon SID;
 - `FILE_FLAG_FIRST_PIPE_INSTANCE` rejects a duplicate server;
+- overlapped pipe accept and marker I/O stop on peer exit or a ten-second
+  deadline;
 - both client and server query and validate the kernel-reported peer PID before
   exchanging an application byte;
 - a server rejects the executable copied to an unapproved path; and
@@ -40,10 +42,11 @@ Expected probe result:
 [PASS] identity policy fails closed
 [PASS] pipe DACL is logon-session scoped
 [PASS] first pipe instance blocks duplicates
+[PASS] peer exit cancels pending accept
 [PASS] client and server attest each other
 [PASS] server rejects a copied client
 [PASS] client rejects a copied server
-6 passed; 0 failed
+7 passed; 0 failed
 ```
 
 ## Deliberate limitations

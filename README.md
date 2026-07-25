@@ -30,9 +30,8 @@ Android, macOS, iPhone, iPad, Linux, non-Chromium browsers, family features, and
 
 These Markdown files also form an Obsidian vault. Product behavior in the MVP
 specification is normative. Architecture records marked **Accepted** define the
-Slice 1 baseline; proposed cryptography and authenticated-IPC decisions plus
-unresolved recovery, signing, and production-security gates remain explicitly
-tracked.
+Slice 1 baseline; the proposed cryptography decision and unresolved recovery,
+signing, and production-security gates remain explicitly tracked.
 
 ## Development approach
 

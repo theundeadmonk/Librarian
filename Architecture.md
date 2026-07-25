@@ -182,8 +182,8 @@ The Rust core should expose a narrow C-compatible or generated binding surface r
 - [[ADRs/0002 Portable Rust Core and Native Platform Shells]]
 - [[ADRs/0003 Windows MVP Component Boundaries]]
 - [[ADRs/0004 Windows MVP Technology Baseline]]
+- [[ADRs/0006 Authenticated Local IPC and Client Authorization]]
 
 ## Proposed decisions under review
 
 - [[ADRs/0005 Vault Key Hierarchy and Encrypted Record Format]]
-- [[ADRs/0006 Authenticated Local IPC and Client Authorization]]

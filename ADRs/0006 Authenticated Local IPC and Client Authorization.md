@@ -1,7 +1,8 @@
 # ADR 0006: Authenticated Local IPC and Client Authorization
 
-**Status:** Proposed — merging the decision PR accepts this Slice 1 design
+**Status:** Accepted
 **Date:** 2026-07-25
+**Accepted:** 2026-07-25
 **Specification version:** 1.0
 **Scope:** Windows 11 local vault-agent transport, peer identity, framing, lifecycle, and per-client authorization
 **Decision issue:** [#12](https://github.com/theundeadmonk/Librarian/issues/12)
@@ -320,11 +321,11 @@ header. Multi-byte integers use network byte order.
 | 4 | 1 | Header version | `1` |
 | 5 | 1 | Message kind | Closed enum |
 | 6 | 2 | Flags | Must be zero |
-| 8 | 2 | Protocol major | Negotiated exact major |
-| 10 | 2 | Protocol minor | Negotiated minor |
+| 8 | 2 | Protocol major | Zero for `client_hello`; selected exact major otherwise |
+| 10 | 2 | Protocol minor | Zero for `client_hello`; selected exact minor otherwise |
 | 12 | 4 | Payload length | `0..65536` before allocation |
 | 16 | 16 | Connection ID | Zero only for `ClientHello`; server-random afterward |
-| 32 | 8 | Request ID | Big-endian, connection-local, strictly increasing |
+| 32 | 8 | Request ID | Big-endian; message-kind rules below |
 
 The decoder must read the header into a fixed-size buffer, validate it, enforce
 the payload bound before allocation, read exactly the declared bytes, and
@@ -378,6 +379,13 @@ use zeroizing ownership from allocation through final response disposal.
 
 Peer authentication precedes the protocol handshake.
 
+The `ClientHello` frame uses zero for the header’s protocol major, protocol
+minor, connection ID, and request ID. Zero is an explicit pre-negotiation
+sentinel, not a supported protocol version. The server validates the fixed
+header and bounded payload under only the header-version rules before decoding
+the offered protocol range. Any other value in those four fields rejects the
+connection.
+
 `ClientHello` payload:
 
 ```text
@@ -414,10 +422,14 @@ authority.
 ```
 
 The server generates the nonzero connection ID in the `ServerHello` header.
+That header carries the selected protocol major and minor and a zero request
+ID. Every subsequent request, response, cancellation, and event carries the
+selected exact version and nonzero connection ID.
 
 Version rules:
 
 - Version 1 accepts protocol major 1 only.
+- Offered bounds must be nonzero and well ordered.
 - There is no major-version downgrade.
 - Select the highest common minor version only when every required feature is
   supported.
@@ -434,9 +446,19 @@ Version rules:
 After `ServerHello`:
 
 - the 128-bit connection ID must match every frame;
-- request IDs begin at 1 and strictly increase;
-- a reused, zero, decreasing, or wrapped request ID closes the connection;
-- a response echoes exactly one request ID and is terminal;
+- only `request` frames allocate IDs: the client begins at 1 and each later
+  request ID is strictly greater than the last request ID sent;
+- a zero, reused, decreasing, or wrapped `request` ID closes the connection;
+- a `response` echoes the exact ID of one in-flight request and is terminal;
+  responses may arrive in any order, but an unknown, duplicate, or already
+  terminal response ID closes the client connection;
+- a `cancel` header carries the nonzero ID of the target request. It allocates
+  no new ID and does not change the request high-water mark. Repeating a cancel
+  for the same connection-local ID is allowed; cancellation of an already
+  terminal request is ignored, while zero or a never-issued ID closes the
+  connection;
+- `event` frames use request ID zero, allocate no ID, and receive no response;
+- `ClientHello` and `ServerHello` use request ID zero as specified above;
 - an operation that depends on unlocked state includes the last observed unlock
   epoch and fails if it is stale;
 - the agent captures the current epoch again before side effects and before
@@ -646,10 +668,12 @@ The probe proves:
 2. an unpackaged process cannot satisfy the production package requirement;
 3. the pipe DACL contains only LocalSystem and the current logon SID;
 4. `FILE_FLAG_FIRST_PIPE_INSTANCE` rejects a duplicate server;
-5. client and server authenticate the kernel-reported peer PID and executable
+5. overlapped accept and marker I/O stop on peer exit or a ten-second
+   deadline rather than hanging the authoritative build;
+6. client and server authenticate the kernel-reported peer PID and executable
    before exchanging an application byte;
-6. the server rejects the same executable copied to an unapproved path; and
-7. the client rejects a copied executable that squats on the expected pipe
+7. the server rejects the same executable copied to an unapproved path; and
+8. the client rejects a copied executable that squats on the expected pipe
    name.
 
 The probe uses disposable marker bytes only. It opens clients with anonymous
@@ -661,10 +685,11 @@ Observed on the supported Windows 11 development machine:
 [PASS] identity policy fails closed
 [PASS] pipe DACL is logon-session scoped
 [PASS] first pipe instance blocks duplicates
+[PASS] peer exit cancels pending accept
 [PASS] client and server attest each other
 [PASS] server rejects a copied client
 [PASS] client rejects a copied server
-6 passed; 0 failed
+7 passed; 0 failed
 ```
 
 The probe deliberately verifies that missing package identity fails the
@@ -684,10 +709,10 @@ and #20 add package and end-to-end cases.
 | Client impersonation | Unknown executable, copied executable, wrong package, wrong AUMID, wrong user, wrong logon SID, wrong session, elevated peer, and exited peer |
 | Multi-instance interception | Full pre-created pool, duplicate instance attempt, listener loss and endpoint rotation |
 | Impersonation abuse | Client uses anonymous security QoS; server has no impersonation path |
-| Framing | Partial header, bad magic, bad header version, unknown kind, nonzero flags, length 65,537, early EOF, trailing data, slow read, and frame flood |
+| Framing | Partial header, bad magic, bad header version, invalid pre-negotiation version, unknown kind, nonzero flags, length 65,537, early EOF, trailing data, slow read, and frame flood |
 | CBOR | Nonpreferred integers, indefinite values, map, tag, float, invalid UTF-8, excessive depth, wrong array length, unknown field, and noncanonical re-encoding |
 | Authorization | Every operation attempted by every unauthorized role |
-| Replay | Reused, decreasing, wrapped, cross-connection, stale-epoch, and post-restart request identifiers |
+| Replay | Zero/reused/decreasing/wrapped request, unknown/duplicate response, invalid cancel target, nonzero event ID, cross-connection ID, stale epoch, and post-restart request |
 | Versioning | Old minor, future minor, wrong major, no common version, unknown required feature, and mixed package versions |
 | Lifecycle | Starting, locked, unlocking, lock race, cancellation race, disconnect, peer exit, agent crash, restart, update, repair, sign-out, and stale client |
 | Resource use | Ninth connection, fifth per-client request, 33rd global request, KDF flood, mutation flood, event backpressure, and deadline expiry |
