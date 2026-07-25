@@ -374,7 +374,7 @@ fn token_integrity_rid(buffer: &AlignedBuffer) -> Result<u32, TransportError> {
     Ok(unsafe { *rid })
 }
 
-fn sid_to_string(sid: PSID) -> Result<String, TransportError> {
+pub(crate) fn sid_to_string(sid: PSID) -> Result<String, TransportError> {
     if sid.is_null() {
         return Err(TransportError::AccessDenied);
     }
@@ -1352,22 +1352,34 @@ mod tests {
         if current.observation.package_full_name.is_some() {
             return;
         }
+        let mut observation = current.observation.clone();
+        // Hosted Windows runners may execute with an elevated token. Isolate
+        // the missing-package invariant so the test does not depend on which
+        // earlier fail-closed identity check applies to the runner itself.
+        observation.elevated = false;
+        observation.app_container = false;
+        observation.integrity_rid = observation.integrity_rid.min(
+            u32::try_from(
+                windows_sys::Win32::System::SystemServices::SECURITY_MANDATORY_MEDIUM_RID,
+            )
+            .expect("medium RID is positive"),
+        );
         let policy = PeerPolicy {
             role: ComponentRole::Desktop,
-            session_id: current.observation.session_id,
-            user_sid: current.observation.user_sid.clone(),
-            logon_sid: current.observation.logon_sid.clone(),
+            session_id: observation.session_id,
+            user_sid: observation.user_sid.clone(),
+            logon_sid: observation.logon_sid.clone(),
             maximum_integrity_rid: u32::try_from(
                 windows_sys::Win32::System::SystemServices::SECURITY_MANDATORY_MEDIUM_RID,
             )
             .expect("medium RID is positive"),
-            image_path: current.observation.image_path.clone(),
+            image_path: observation.image_path.clone(),
             package_full_name: "Librarian_Production".to_owned(),
             package_family_name: "Librarian_Publisher".to_owned(),
             application_user_model_id: Some("Librarian.Desktop".to_owned()),
         };
         assert_eq!(
-            authorize_peer(&current.observation, &policy),
+            authorize_peer(&observation, &policy),
             Err(PeerAuthorizationError::MissingPackageIdentity)
         );
     }

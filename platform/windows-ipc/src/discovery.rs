@@ -434,6 +434,42 @@ mod tests {
         fn descriptor_path(&self) -> PathBuf {
             self.0.join("agent-endpoint-v1.cbor")
         }
+
+        fn store(&self) -> EndpointDescriptorStore {
+            let mut store =
+                EndpointDescriptorStore::new(self.descriptor_path()).expect("descriptor store");
+            let probe_path = self.0.join("default-owner-probe");
+            let probe = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&probe_path)
+                .expect("owner probe");
+            let mut owner: PSID = ptr::null_mut();
+            let mut descriptor: PSECURITY_DESCRIPTOR = ptr::null_mut();
+            // SAFETY: the probe handle is live and the requested outputs point
+            // to writable storage. The returned descriptor owns `owner`.
+            let status = unsafe {
+                GetSecurityInfo(
+                    probe.as_raw_handle(),
+                    SE_FILE_OBJECT,
+                    OWNER_SECURITY_INFORMATION,
+                    &raw mut owner,
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                    &raw mut descriptor,
+                )
+            };
+            assert_eq!(status, ERROR_SUCCESS);
+            assert!(!owner.is_null());
+            assert!(!descriptor.is_null());
+            let _descriptor = LocalAllocation(descriptor);
+            store.owner_sid =
+                crate::platform::sid_to_string(owner).expect("default file-owner SID");
+            drop(probe);
+            fs::remove_file(probe_path).expect("remove owner probe");
+            store
+        }
     }
 
     impl Drop for TestDirectory {
@@ -458,7 +494,7 @@ mod tests {
     #[test]
     fn publish_load_replace_and_remove_are_canonical() {
         let directory = TestDirectory::new();
-        let store = EndpointDescriptorStore::new(directory.descriptor_path()).expect("store");
+        let store = directory.store();
         let expected = descriptor();
         store.publish(&expected).expect("publish");
         assert_eq!(store.load(), Ok(expected.clone()));
@@ -472,7 +508,7 @@ mod tests {
     fn truncated_oversized_and_future_descriptors_fail_closed() {
         let directory = TestDirectory::new();
         let path = directory.descriptor_path();
-        let store = EndpointDescriptorStore::new(&path).expect("store");
+        let store = directory.store();
 
         fs::write(&path, [0x88, 0x01]).expect("truncated fixture");
         assert_eq!(store.load(), Err(DiscoveryError::Malformed));
@@ -491,9 +527,15 @@ mod tests {
     fn redirected_descriptors_fail_and_inflight_replacement_is_blocked() {
         let directory = TestDirectory::new();
         let path = directory.descriptor_path();
-        let store = EndpointDescriptorStore::new(&path).expect("store");
+        let store = directory.store();
         let expected = descriptor();
         store.publish(&expected).expect("publish");
+
+        let wrong_owner = EndpointDescriptorStore {
+            path: path.clone(),
+            owner_sid: "S-1-5-18".to_owned(),
+        };
+        assert_eq!(wrong_owner.load(), Err(DiscoveryError::Redirected));
 
         let replacement = directory.0.join("replacement.cbor");
         fs::write(&replacement, descriptor().encode()).expect("replacement");
