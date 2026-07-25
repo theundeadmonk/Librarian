@@ -249,9 +249,22 @@ $msbuildArguments = @(
 )
 
 Invoke-CheckedProcess `
-    -Label "WinUI and Windows passkey boundary build" `
+    -Label "Windows native boundaries build" `
     -FilePath $toolchain.MSBuild `
     -Arguments $msbuildArguments `
+    -WorkingDirectory $repoRoot
+
+$ipcProbe = Join-Path $repoRoot (
+    "artifacts\bin\$Platform\$Configuration\Librarian.WindowsIpcProbe.exe"
+)
+if (-not (Test-Path $ipcProbe)) {
+    throw "The Windows local IPC security probe was not built at '$ipcProbe'."
+}
+
+Invoke-CheckedProcess `
+    -Label "Windows local IPC peer-verification probe" `
+    -FilePath $ipcProbe `
+    -Arguments @("--self-test") `
     -WorkingDirectory $repoRoot
 
 $gitMetadata = Join-Path $repoRoot ".git"

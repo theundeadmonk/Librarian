@@ -24,3 +24,4 @@ This note records settled product choices. Proposed ideas belong in [[Open Quest
 | 2026-07-22 | 1Password and LastPass import is a fast follow, not MVP scope. | Manual entry and native capture prove the product before importer complexity is added. |
 | 2026-07-22 | Extension-only access is post-MVP. | Public and managed computers require a different security and recovery architecture. |
 | 2026-07-22 | Windows third-party passkey-provider feasibility is proven. | The local spike registered and enabled a provider, then created, authenticated with, and deleted a test passkey through Chrome. |
+| 2026-07-25 | Trusted local clients use mutually authenticated, logon-scoped Windows named pipes with exact per-role authorization. | Endpoint discovery and same-user access are not proof of identity; both peers must validate the connected packaged process before a bounded operation may cross the vault boundary. |

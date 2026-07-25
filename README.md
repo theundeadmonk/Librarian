@@ -28,7 +28,11 @@ Android, macOS, iPhone, iPad, Linux, non-Chromium browsers, family features, and
 - [Open questions and decision gates](Open%20Questions.md)
 - [Research index](Research.md)
 
-These Markdown files also form an Obsidian vault. Product behavior in the MVP specification is normative. Architecture records marked **Accepted** define the Slice 1 baseline; unresolved cryptography, IPC, recovery, signing, and production-security decisions remain explicitly tracked.
+These Markdown files also form an Obsidian vault. Product behavior in the MVP
+specification is normative. Architecture records marked **Accepted** define the
+Slice 1 baseline; proposed cryptography and authenticated-IPC decisions plus
+unresolved recovery, signing, and production-security gates remain explicitly
+tracked.
 
 ## Development approach
 
