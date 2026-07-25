@@ -1445,11 +1445,20 @@ fn ownership_record(path: &Path) -> Result<OwnershipRecord, RuntimeStartError> {
             }
             let normalized_path = path
                 .canonicalize()
-                .map_err(|_| RuntimeStartError::InvalidVaultPath)
-                .and_then(normalize_ownership_path)?;
+                .map_err(|_| RuntimeStartError::InvalidVaultPath)?;
+            #[cfg(windows)]
+            let normalized_path = normalize_ownership_path(normalized_path)?;
+            #[cfg(not(windows))]
+            let normalized_path = normalize_ownership_path(normalized_path);
+            #[cfg(windows)]
+            let identity = file_identity(path, &metadata)?;
+            #[cfg(unix)]
+            let identity = file_identity(path, &metadata);
+            #[cfg(not(any(windows, unix)))]
+            let identity = return Err(RuntimeStartError::InvalidVaultPath);
             Ok(OwnershipRecord {
                 normalized_path,
-                identity: Some(file_identity(path, &metadata)?),
+                identity: Some(identity),
             })
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -1463,8 +1472,12 @@ fn ownership_record(path: &Path) -> Result<OwnershipRecord, RuntimeStartError> {
             let parent = parent
                 .canonicalize()
                 .map_err(|_| RuntimeStartError::InvalidVaultPath)?;
+            #[cfg(windows)]
+            let normalized_path = normalize_ownership_path(parent.join(name))?;
+            #[cfg(not(windows))]
+            let normalized_path = normalize_ownership_path(parent.join(name));
             Ok(OwnershipRecord {
-                normalized_path: normalize_ownership_path(parent.join(name))?,
+                normalized_path,
                 identity: None,
             })
         }
@@ -1482,8 +1495,8 @@ fn normalize_ownership_path(path: PathBuf) -> Result<PathBuf, RuntimeStartError>
 }
 
 #[cfg(not(windows))]
-fn normalize_ownership_path(path: PathBuf) -> Result<PathBuf, RuntimeStartError> {
-    Ok(path)
+fn normalize_ownership_path(path: PathBuf) -> PathBuf {
+    path
 }
 
 #[cfg(windows)]
@@ -1494,18 +1507,13 @@ fn file_identity(path: &Path, _: &fs::Metadata) -> Result<FileIdentity, RuntimeS
 }
 
 #[cfg(unix)]
-fn file_identity(_: &Path, metadata: &fs::Metadata) -> Result<FileIdentity, RuntimeStartError> {
+fn file_identity(_: &Path, metadata: &fs::Metadata) -> FileIdentity {
     use std::os::unix::fs::MetadataExt;
 
-    Ok(FileIdentity {
+    FileIdentity {
         volume: metadata.dev(),
         file: metadata.ino(),
-    })
-}
-
-#[cfg(not(any(windows, unix)))]
-fn file_identity(_: &Path, _: &fs::Metadata) -> Result<FileIdentity, RuntimeStartError> {
-    Err(RuntimeStartError::InvalidVaultPath)
+    }
 }
 
 fn next_ownership_token() -> Result<u64, RuntimeStartError> {
