@@ -14,7 +14,11 @@ These items are intentionally unresolved. They should be answered through feasib
 ## Windows and browser feasibility
 
 - Confirm packaging, registration, upgrades, and removal of the native passkey component.
-- Define and authenticate the native messaging protocol between the extension and desktop app.
+- Define the Chrome native-messaging protocol between the extension and native
+  host through
+  [issue #16](https://github.com/theundeadmonk/Librarian/issues/16). The
+  host-to-agent boundary follows
+  [[ADRs/0006 Authenticated Local IPC and Client Authorization]].
 - Decide what the extension should do when the native app is missing, locked, updating, or incompatible.
 - Test form detection against multi-step, dynamically rendered, embedded, and unusual sign-in forms.
 - Define strict origin-matching rules and the UI for suspicious or ambiguous matches.
@@ -65,7 +69,13 @@ The remaining blocking questions are:
   SQLite binding and schema, vault-layer encryption, migrations, and corruption
   behavior in [[ADRs/0005 Vault Key Hierarchy and Encrypted Record Format]]
   through [issue #9](https://github.com/theundeadmonk/Librarian/issues/9).
-- Select and threat-model the authenticated local IPC transport, peer verification, protocol versioning, client authorization, agent lifecycle, and incompatible-state behavior in [issue #12](https://github.com/theundeadmonk/Librarian/issues/12).
+- Implement the accepted
+  [[ADRs/0006 Authenticated Local IPC and Client Authorization|authenticated local IPC design]]
+  through [issue #13](https://github.com/theundeadmonk/Librarian/issues/13).
+  Signed-package, wrong-signer, cross-user, and mixed-version acceptance remain
+  release gates owned by
+  [issue #19](https://github.com/theundeadmonk/Librarian/issues/19) and
+  [issue #20](https://github.com/theundeadmonk/Librarian/issues/20).
 - Define and validate signed application, provider, native-host, and extension update behavior through [issue #19](https://github.com/theundeadmonk/Librarian/issues/19).
 - Prove the deterministic and real-browser acceptance strategy without production credentials or external production services in [issue #20](https://github.com/theundeadmonk/Librarian/issues/20).
 

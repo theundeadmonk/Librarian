@@ -6,7 +6,7 @@
 **Related product specification:** [[MVP]]
 **Decision issue:** [#6 — Accept the initial Windows MVP architecture baseline](https://github.com/theundeadmonk/Librarian/issues/6)
 
-This note defines the accepted technical shape of Librarian for the Windows MVP. The linked architecture decision records are authoritative for the choices they cover. Cryptography, recovery authorization, exact local IPC, database encryption, signing, and production security remain explicit follow-up decisions; accepting this baseline does not silently resolve them.
+This note defines the accepted technical shape of Librarian for the Windows MVP. The linked architecture decision records are authoritative for the choices they cover. Cryptography, recovery authorization, signing, and production security remain explicit follow-up decisions; accepting this baseline does not silently resolve them.
 
 [[Threat Model]] defines the security assets, attacker capabilities, boundary ownership, invariants, and negative-test obligations that every Slice 1 implementation must preserve.
 
@@ -121,8 +121,18 @@ below are complete.
 
 Use two distinct, versioned protocols:
 
-- **Extension protocol:** Chromium native messaging between the extension and the native host. Requests include the verified browser origin, operation type, and a short-lived correlation identifier. Responses disclose no more than the selected operation requires.
-- **Trusted local protocol:** authenticated local IPC between the native clients and vault agent. The exact Windows transport, peer verification, process lifecycle, and authorization model remain an implementation decision owned by [issue #12](https://github.com/theundeadmonk/Librarian/issues/12).
+- **Extension protocol:** Chromium native messaging between the extension and
+  the native host. Requests include the verified browser origin, operation
+  type, and a short-lived correlation identifier. Responses disclose no more
+  than the selected operation requires. Its exact schema and browser-specific
+  authorization remain owned by
+  [issue #16](https://github.com/theundeadmonk/Librarian/issues/16).
+- **Trusted local protocol:** mutually authenticated, local-only Windows named
+  pipes between the desktop app, native host, passkey provider, and vault
+  agent. [[ADRs/0006 Authenticated Local IPC and Client Authorization]]
+  specifies peer process and package verification, logon-session isolation,
+  framing, versioning, lifecycle, and the closed capability set for each
+  client.
 
 Do not expose the agent as a general local API. Unknown message versions, clients, operations, or fields must be rejected.
 
@@ -152,7 +162,7 @@ The initial implementation baseline is documented in [[ADRs/0004 Windows MVP Tec
 
 - Accepted threat model and data-flow inventory.
 - Accepted cryptography, key hierarchy, storage format, and recovery design.
-- Accepted IPC authentication and authorization design.
+- Accepted [[ADRs/0006 Authenticated Local IPC and Client Authorization|IPC authentication and authorization design]].
 - Deterministic interoperability and corruption test vectors.
 - Verified packaging, signing, and update behavior.
 - Focused independent security review of the agent, provider, extension boundary, backup, and dependencies.
@@ -172,6 +182,7 @@ The Rust core should expose a narrow C-compatible or generated binding surface r
 - [[ADRs/0002 Portable Rust Core and Native Platform Shells]]
 - [[ADRs/0003 Windows MVP Component Boundaries]]
 - [[ADRs/0004 Windows MVP Technology Baseline]]
+- [[ADRs/0006 Authenticated Local IPC and Client Authorization]]
 
 ## Proposed decisions under review
 

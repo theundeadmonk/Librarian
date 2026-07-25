@@ -40,7 +40,10 @@ The bootstrap command only validates the machine. It does not change system sett
 
 ## Build and test
 
-One command formats-checks, lints, tests, restores locked dependencies, and builds the Rust workspace, Chromium extension, WinUI app, and Windows passkey boundary:
+One command formats-checks, lints, tests, restores locked dependencies, builds
+the Rust workspace, Chromium extension, WinUI app, Windows passkey boundary,
+and Windows local-IPC security probe, then runs the probe's hostile-client
+checks:
 
 ```powershell
 powershell.exe -NoProfile -File .\scripts\build.ps1 -Configuration Release -Platform x64
@@ -81,10 +84,12 @@ single website-account CRUD subset from issues #10 and #11. Each mutation
 commits one opaque record envelope and the next encrypted manifest generation
 in the same immediate transaction. Account origins use the pinned WHATWG URL
 parser and are stored as exact normalized HTTP(S) origins. Browser site access,
-authenticated IPC, native messaging, Windows Hello, and production passkey
-storage remain disabled until their security gates and implementation issues
-are complete. Tests use uniquely identifiable disposable values; do not use
-the current build with real credentials.
+production authenticated IPC, native messaging, Windows Hello, and production
+passkey storage remain disabled until their security gates and implementation
+issues are complete. The Windows local-IPC probe validates operating-system
+assumptions with disposable marker bytes; it is not the issue #13 production
+transport. Tests use uniquely identifiable disposable values; do not use the
+current build with real credentials.
 
 ## Dependency updates
 
