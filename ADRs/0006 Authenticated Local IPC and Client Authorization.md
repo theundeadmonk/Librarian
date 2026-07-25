@@ -124,6 +124,12 @@ This decision was reviewed against primary sources current on 2026-07-25:
 Run one non-elevated vault agent for one Windows logon session. The agent is
 not a Windows service and does not listen across user sessions.
 
+Before creating listeners, the agent holds the protected, session-local named
+mutex `Local\Librarian.Agent.Singleton.v1` for its process lifetime. An
+existing object fails startup closed. A same-session process can therefore
+cause denial of service by squatting the name, but cannot become an
+authenticated agent or make a second agent open the vault.
+
 The agent creates an eight-instance pipe pool before publishing discovery
 metadata:
 
@@ -558,8 +564,11 @@ Version 1 defaults:
 | Peer verification plus handshake | 2 seconds |
 | In-flight requests per connection | 4 |
 | In-flight requests globally | 32 |
+| Issued request IDs per connection lifetime | 65,536 |
+| Cached mutation idempotency outcomes per agent start | 1,024 |
 | Concurrent password KDF operations | 1 |
 | Concurrent vault mutations | 1 |
+| Concurrent lock transitions | 1 |
 | Ordinary operation deadline | 5 seconds |
 | Password unlock deadline | 30 seconds |
 | Windows-mediated passkey transaction | 120 seconds |
@@ -800,6 +809,27 @@ Issue #13 should implement this decision in three layers:
 
 The probe is evidence, not reusable production code. Copying its broad C++
 test harness into the agent is prohibited.
+
+Issue #13 implements these layers as:
+
+- `crates/agent-protocol`, containing the checked-in CDDL, fixed frame codec,
+  canonical operation bodies and results, closed role table, negotiation,
+  replay/cancellation state machine, bounded event queue, and arbitrary-input
+  conformance tests;
+- `platform/windows-ipc`, containing the complete listener pool, protected
+  DACL and single-agent mutex, overlapped deadline/peer-exit I/O, mutual
+  token/AppModel observation, retained process handles, anonymous client
+  security QoS, and guarded atomic discovery descriptor lifecycle; and
+- `crates/vault-agent::runtime`, containing the sole vault owner, global/KDF/
+  mutation/lock admission, a commit gate that orders publication against lock
+  and sign-out, typed desktop dispatch, bounded account paging,
+  connection-bound cancellation, lock epochs, sign-out shutdown, and bounded
+  in-memory idempotency outcomes.
+
+The production entry point remains fail closed until issue #19 supplies the
+signed MSIX manifest, immutable role paths, package-local state path, and
+positive packaged identity fixture. There is no runtime switch that downgrades
+the production peer policy to unpackaged path trust.
 
 ## Consequences
 

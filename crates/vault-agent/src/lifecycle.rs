@@ -17,8 +17,9 @@ use crate::{
     },
     sqlite::{initialize_database, read_guarded_vault, read_vault_from_guards},
     storage::{
-        publish_staged_vault, remove_target_if_guarded_matches, reserve_staging_file,
-        seal_published_vault_with_ancestor_guards, validate_new_target, verify_published_vault,
+        publish_staged_vault_with_before_link, remove_target_if_guarded_matches,
+        reserve_staging_file, seal_published_vault_with_ancestor_guards, validate_new_target,
+        verify_published_vault,
     },
 };
 
@@ -57,6 +58,14 @@ impl VaultAgent {
         path: impl AsRef<Path>,
         password: MasterPassword,
     ) -> Result<(Self, RecoveryKey), CreateError> {
+        Self::create_with_before_publish(path, password, || Ok(()))
+    }
+
+    pub(crate) fn create_with_before_publish(
+        path: impl AsRef<Path>,
+        password: MasterPassword,
+        before_publish: impl FnOnce() -> Result<(), CreateError>,
+    ) -> Result<(Self, RecoveryKey), CreateError> {
         let path = bind_vault_path(path.as_ref()).map_err(|_| CreateError::Failed)?;
         validate_new_target(&path)?;
         let mut staging = reserve_staging_file(&path)?;
@@ -69,7 +78,8 @@ impl VaultAgent {
         initialize_database(&mut staging, &header, &manifest).map_err(|_| CreateError::Failed)?;
         ensure_sidecars_absent_with_ancestor_guards(staging.ancestor_guards(), staging.path())
             .map_err(|_| CreateError::Failed)?;
-        let published_guard = publish_staged_vault(&mut staging, &path)?;
+        let published_guard =
+            publish_staged_vault_with_before_link(&mut staging, &path, before_publish)?;
         if staging.remove_name().is_err() {
             drop(published_guard);
             let _ = remove_file_with_ancestor_guards(staging.ancestor_guards(), &path);

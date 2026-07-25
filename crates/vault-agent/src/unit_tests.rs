@@ -796,6 +796,7 @@ mod tests {
                 .expect("reserved staging name must be removed after identity validation");
             fs::write(&staging_path, b"attacker replacement")
                 .expect("replacement staging name must be created");
+            Ok(())
         });
 
         assert!(matches!(result, Err(CreateError::Failed)));

@@ -52,6 +52,38 @@ impl VaultAgent {
         self.list_website_accounts_with_before_return(|_| {})
     }
 
+    /// Authenticates the complete snapshot while retaining at most `limit`
+    /// decrypted accounts.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Locked` without touching storage. Corruption, stale state, or
+    /// an invalid page range returns `Failed` and locks the agent.
+    pub fn list_website_account_page(
+        &mut self,
+        offset: usize,
+        limit: usize,
+    ) -> Result<(Vec<WebsiteAccount>, bool), AccountError> {
+        let permit = self.require_operation()?;
+        let snapshot = self.load_authenticated_snapshot()?;
+        let result = {
+            let session = self.session.as_ref().ok_or(AccountError::Locked)?;
+            session.list_website_account_page(
+                &snapshot.header,
+                &snapshot.manifest,
+                &snapshot.records,
+                offset,
+                limit,
+            )
+        };
+        let page = self.map_read(result)?;
+        if !self.operation_is_authorized(permit) {
+            drop(page);
+            return Err(AccountError::Locked);
+        }
+        Ok(page)
+    }
+
     /// Replaces the user-authored fields of one authenticated account.
     ///
     /// # Errors
@@ -62,6 +94,15 @@ impl VaultAgent {
         &mut self,
         id: RecordId,
         input: WebsiteAccountInput,
+    ) -> Result<(), AccountError> {
+        self.update_website_account_with_before_commit(id, input, || Ok(()))
+    }
+
+    pub(crate) fn update_website_account_with_before_commit(
+        &mut self,
+        id: RecordId,
+        input: WebsiteAccountInput,
+        before_commit: impl FnOnce() -> Result<(), StorageError>,
     ) -> Result<(), AccountError> {
         let permit = self.require_operation()?;
         let snapshot = self.load_authenticated_snapshot()?;
@@ -81,7 +122,7 @@ impl VaultAgent {
             )
         };
         let prepared = self.map_preparation(prepared)?;
-        self.persist_mutation(permit, &snapshot, prepared, || Ok(()))?;
+        self.persist_mutation(permit, &snapshot, prepared, before_commit)?;
         Ok(())
     }
 
@@ -92,6 +133,14 @@ impl VaultAgent {
     /// Returns `NotFound` only for an authenticated snapshot. Every other
     /// unsuccessful mutation invalidates the current session.
     pub fn delete_website_account(&mut self, id: RecordId) -> Result<(), AccountError> {
+        self.delete_website_account_with_before_commit(id, || Ok(()))
+    }
+
+    pub(crate) fn delete_website_account_with_before_commit(
+        &mut self,
+        id: RecordId,
+        before_commit: impl FnOnce() -> Result<(), StorageError>,
+    ) -> Result<(), AccountError> {
         let permit = self.require_operation()?;
         let snapshot = self.load_authenticated_snapshot()?;
         let committed_at_ms = unix_time_ms().map_err(|_| {
@@ -109,7 +158,7 @@ impl VaultAgent {
             )
         };
         let prepared = self.map_preparation(prepared)?;
-        self.persist_mutation(permit, &snapshot, prepared, || Ok(()))?;
+        self.persist_mutation(permit, &snapshot, prepared, before_commit)?;
         Ok(())
     }
 

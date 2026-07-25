@@ -16,6 +16,7 @@ use super::{
 
 const RECORD_LABEL_PREFIX: &[u8] = b"librarian/vault/v1/record/";
 const MAX_RECORD_ID_ATTEMPTS: usize = 128;
+const MAX_WEBSITE_ACCOUNT_PAGE_SIZE: usize = 100;
 
 /// A stable, random identifier with no embedded timestamp or semantic value.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -250,6 +251,43 @@ impl UnlockedVault {
         visit_authenticated_records(self, records, None, |account| accounts.push(account))
             .map_err(|_| RecordOperationError::Failed)?;
         Ok(accounts)
+    }
+
+    /// Fully authenticates a snapshot while retaining only one bounded account
+    /// page in plaintext.
+    ///
+    /// # Errors
+    ///
+    /// Any stale generation, malformed row, digest mismatch, unsupported
+    /// record, authentication failure, or invalid page range returns `Failed`.
+    pub fn list_website_account_page(
+        &self,
+        header_bytes: &[u8],
+        manifest_envelope_bytes: &[u8],
+        records: &[EncryptedRecord],
+        offset: usize,
+        limit: usize,
+    ) -> Result<(Vec<WebsiteAccount>, bool), RecordOperationError> {
+        if limit == 0 || limit > MAX_WEBSITE_ACCOUNT_PAGE_SIZE {
+            return Err(RecordOperationError::Failed);
+        }
+        self.authenticate_snapshot_metadata(header_bytes, manifest_envelope_bytes)?;
+        let end = offset
+            .checked_add(limit)
+            .ok_or(RecordOperationError::Failed)?;
+        let mut index = 0_usize;
+        let mut accounts = Vec::with_capacity(limit);
+        let mut has_more = false;
+        visit_authenticated_records(self, records, None, |account| {
+            if index >= offset && index < end {
+                accounts.push(account);
+            } else if index >= end {
+                has_more = true;
+            }
+            index = index.saturating_add(1);
+        })
+        .map_err(|_| RecordOperationError::Failed)?;
+        Ok((accounts, has_more))
     }
 
     /// Fully authenticates a snapshot and returns one matching account.

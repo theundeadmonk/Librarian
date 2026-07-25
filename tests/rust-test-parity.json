@@ -4,6 +4,51 @@
   "platformOnlyTests": [
     {
       "platform": "windows",
+      "test": "librarian-windows-ipc::lib:librarian_windows_ipc::discovery::tests::publish_load_replace_and_remove_are_canonical::test:active",
+      "rationale": "Exercises guarded Windows package-local descriptor publication, atomic replacement, canonical loading, durability, and shutdown removal."
+    },
+    {
+      "platform": "windows",
+      "test": "librarian-windows-ipc::lib:librarian_windows_ipc::discovery::tests::redirected_descriptors_fail_and_inflight_replacement_is_blocked::test:active",
+      "rationale": "Exercises Windows reparse-point rejection and file-sharing guards that block descriptor deletion or replacement during a read."
+    },
+    {
+      "platform": "windows",
+      "test": "librarian-windows-ipc::lib:librarian_windows_ipc::discovery::tests::truncated_oversized_and_future_descriptors_fail_closed::test:active",
+      "rationale": "Exercises Windows guarded reads while rejecting truncated, over-limit, and future-schema discovery files before trust."
+    },
+    {
+      "platform": "windows",
+      "test": "librarian-windows-ipc::lib:librarian_windows_ipc::platform::tests::current_process_identity_fields_are_queryable::test:active",
+      "rationale": "Queries Windows access-token, integrity, session, process-image, creation-time, and AppModel identity fields used for mutual named-pipe authentication."
+    },
+    {
+      "platform": "windows",
+      "test": "librarian-windows-ipc::lib:librarian_windows_ipc::platform::tests::first_instance_flag_blocks_a_duplicate_server::test:active",
+      "rationale": "Exercises the protected session-local single-agent mutex and Windows FILE_FLAG_FIRST_PIPE_INSTANCE endpoint-squatting protection across the complete named-pipe listener pool."
+    },
+    {
+      "platform": "windows",
+      "test": "librarian-windows-ipc::lib:librarian_windows_ipc::platform::tests::protected_dacl_is_constructible_for_current_logon::test:active",
+      "rationale": "Validates the Windows protected pipe DACL contains only LocalSystem and the current logon SID."
+    },
+    {
+      "platform": "windows",
+      "test": "librarian-windows-ipc::lib:librarian_windows_ipc::platform::tests::random_pipe_names_are_scoped_and_distinct::test:active",
+      "rationale": "Validates Windows local named-pipe endpoint syntax and per-start cryptographic randomization."
+    },
+    {
+      "platform": "windows",
+      "test": "librarian-windows-ipc::lib:librarian_windows_ipc::platform::tests::unpackaged_current_process_cannot_satisfy_production_policy::test:active",
+      "rationale": "Exercises Windows AppModel queries and proves missing MSIX package identity fails the production peer policy."
+    },
+    {
+      "platform": "windows",
+      "test": "librarian-windows-ipc::lib:librarian_windows_ipc::platform::tests::unpackaged_hostile_client_is_rejected_before_bytes_and_listener_is_reused::test:active",
+      "rationale": "Connects a same-user unpackaged Windows process and verifies pre-protocol rejection without sacrificing a listener instance."
+    },
+    {
+      "platform": "windows",
       "test": "librarian-vault-agent::lib:librarian_vault_agent::unit_tests::tests::checked_vault_file_cannot_be_replaced_before_sqlite_opens::test:active",
       "rationale": "Exercises Windows file-share locks that prevent vault replacement before SQLite opens the guarded file."
     },
