@@ -175,8 +175,11 @@ impl FrameHeader {
             MessageKind::ServerHello | MessageKind::Event => {
                 !zero_version && !zero_connection && zero_request
             }
-            MessageKind::Request | MessageKind::Response | MessageKind::Cancel => {
+            MessageKind::Request | MessageKind::Response => {
                 !zero_version && !zero_connection && !zero_request
+            }
+            MessageKind::Cancel => {
+                !zero_version && !zero_connection && !zero_request && self.payload_length == 0
             }
         };
         if !valid {

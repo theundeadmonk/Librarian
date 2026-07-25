@@ -85,6 +85,14 @@ impl EndpointDescriptorStore {
     /// Fails closed for path redirection, replacement, durability, random, or
     /// publication failures.
     pub fn publish(&self, descriptor: &EndpointDescriptor) -> Result<(), DiscoveryError> {
+        self.publish_with_after_move(descriptor, || Ok(()))
+    }
+
+    fn publish_with_after_move(
+        &self,
+        descriptor: &EndpointDescriptor,
+        after_move: impl FnOnce() -> Result<(), DiscoveryError>,
+    ) -> Result<(), DiscoveryError> {
         let guards = acquire_ancestor_guards(&self.path)?;
         let bytes = descriptor.encode();
         if bytes.len() > MAX_ENDPOINT_DESCRIPTOR_BYTES {
@@ -99,19 +107,25 @@ impl EndpointDescriptorStore {
             .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
             .open(&temporary_path)
             .map_err(|_| DiscoveryError::Internal)?;
+        let mut expected = None;
+        let mut moved = false;
         let result = (|| {
             verify_regular(&temporary, &self.owner_sid)?;
             temporary
                 .write_all(&bytes)
                 .and_then(|()| temporary.sync_all())
                 .map_err(|_| DiscoveryError::Internal)?;
-            let expected = same_file::Handle::from_file(
-                temporary
-                    .try_clone()
-                    .map_err(|_| DiscoveryError::Internal)?,
-            )
-            .map_err(|_| DiscoveryError::Internal)?;
+            expected = Some(
+                same_file::Handle::from_file(
+                    temporary
+                        .try_clone()
+                        .map_err(|_| DiscoveryError::Internal)?,
+                )
+                .map_err(|_| DiscoveryError::Internal)?,
+            );
             move_replace(&temporary_path, &self.path)?;
+            moved = true;
+            after_move()?;
             // The retained staging handle has read/write access and delete
             // sharing, so this identity check must reciprocally share both.
             let published = open_regular(&self.path, true, true, &self.owner_sid)?;
@@ -121,7 +135,7 @@ impl EndpointDescriptorStore {
                     .map_err(|_| DiscoveryError::Internal)?,
             )
             .map_err(|_| DiscoveryError::Internal)?;
-            if expected != actual {
+            if expected.as_ref() != Some(&actual) {
                 return Err(DiscoveryError::Replaced);
             }
             sync_parent_directory(&self.path)?;
@@ -129,7 +143,13 @@ impl EndpointDescriptorStore {
             Ok(())
         })();
         if result.is_err() {
-            let _ = fs::remove_file(&temporary_path);
+            if moved {
+                if let Some(expected) = expected.as_ref() {
+                    let _ = remove_if_same_file(&self.path, expected, &self.owner_sid);
+                }
+            } else {
+                let _ = fs::remove_file(&temporary_path);
+            }
         }
         result
     }
@@ -373,6 +393,20 @@ fn guarded_length(file: &File) -> Result<usize, DiscoveryError> {
     usize::try_from(length).map_err(|_| DiscoveryError::Oversized)
 }
 
+fn remove_if_same_file(
+    path: &Path,
+    expected: &same_file::Handle,
+    owner_sid: &str,
+) -> Result<(), DiscoveryError> {
+    let current = same_file::Handle::from_file(open_regular(path, true, true, owner_sid)?)
+        .map_err(|_| DiscoveryError::Internal)?;
+    if &current != expected {
+        return Err(DiscoveryError::Replaced);
+    }
+    fs::remove_file(path).map_err(|_| DiscoveryError::Internal)?;
+    sync_parent_directory(path)
+}
+
 fn move_replace(source: &Path, target: &Path) -> Result<(), DiscoveryError> {
     let source: Vec<_> = source.as_os_str().encode_wide().chain(Some(0)).collect();
     let target: Vec<_> = target.as_os_str().encode_wide().chain(Some(0)).collect();
@@ -502,6 +536,52 @@ mod tests {
         assert_eq!(store.load(), Ok(expected));
         store.remove().expect("remove");
         assert_eq!(store.load(), Err(DiscoveryError::Unavailable));
+    }
+
+    #[test]
+    fn post_publication_failure_removes_the_published_descriptor() {
+        let directory = TestDirectory::new();
+        let store = directory.store();
+        assert_eq!(
+            store.publish_with_after_move(&descriptor(), || Err(DiscoveryError::Internal)),
+            Err(DiscoveryError::Internal)
+        );
+        assert_eq!(store.load(), Err(DiscoveryError::Unavailable));
+        assert!(
+            fs::read_dir(&directory.0)
+                .expect("read test directory")
+                .all(|entry| !entry
+                    .expect("directory entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".librarian-agent-endpoint-")),
+            "failed publication must not retain staging files"
+        );
+    }
+
+    #[test]
+    fn post_publication_cleanup_preserves_a_replacement() {
+        let directory = TestDirectory::new();
+        let path = directory.descriptor_path();
+        let store = directory.store();
+        let replacement = EndpointDescriptor::new(
+            r"\\.\pipe\LOCAL\Librarian.Agent.v1.fedcba9876543210fedcba9876543210".to_owned(),
+            42,
+            74,
+            "Librarian_1.0.0.0_x64__publisher".to_owned(),
+            1,
+            1,
+            [0xB4; 32],
+        )
+        .expect("replacement descriptor");
+        let replacement_bytes = replacement.encode();
+        let result = store.publish_with_after_move(&descriptor(), || {
+            fs::remove_file(&path).map_err(|_| DiscoveryError::Internal)?;
+            fs::write(&path, &replacement_bytes).map_err(|_| DiscoveryError::Internal)?;
+            Err(DiscoveryError::Internal)
+        });
+        assert_eq!(result, Err(DiscoveryError::Internal));
+        assert_eq!(store.load(), Ok(replacement));
     }
 
     #[test]

@@ -70,15 +70,21 @@ fn request_header(request_id: u64, payload_length: usize) -> FrameHeader {
 #[test]
 fn every_frame_kind_has_explicit_header_sentinels() {
     let cases = [
-        (MessageKind::ClientHello, Version::new(0, 0), [0; 16], 0),
-        (MessageKind::ServerHello, CURRENT_VERSION, CONNECTION_ID, 0),
-        (MessageKind::Request, CURRENT_VERSION, CONNECTION_ID, 1),
-        (MessageKind::Response, CURRENT_VERSION, CONNECTION_ID, 1),
-        (MessageKind::Cancel, CURRENT_VERSION, CONNECTION_ID, 1),
-        (MessageKind::Event, CURRENT_VERSION, CONNECTION_ID, 0),
+        (MessageKind::ClientHello, Version::new(0, 0), 7, [0; 16], 0),
+        (
+            MessageKind::ServerHello,
+            CURRENT_VERSION,
+            7,
+            CONNECTION_ID,
+            0,
+        ),
+        (MessageKind::Request, CURRENT_VERSION, 7, CONNECTION_ID, 1),
+        (MessageKind::Response, CURRENT_VERSION, 7, CONNECTION_ID, 1),
+        (MessageKind::Cancel, CURRENT_VERSION, 0, CONNECTION_ID, 1),
+        (MessageKind::Event, CURRENT_VERSION, 7, CONNECTION_ID, 0),
     ];
-    for (kind, version, connection_id, request_id) in cases {
-        let header = FrameHeader::new(kind, version, 7, connection_id, request_id)
+    for (kind, version, payload_length, connection_id, request_id) in cases {
+        let header = FrameHeader::new(kind, version, payload_length, connection_id, request_id)
             .expect("per-kind values must be accepted");
         assert_eq!(
             FrameHeader::decode(&header.encode()),
@@ -93,6 +99,10 @@ fn every_frame_kind_has_explicit_header_sentinels() {
     );
     assert_eq!(
         FrameHeader::new(MessageKind::Event, CURRENT_VERSION, 0, CONNECTION_ID, 1,),
+        Err(FrameError::InvalidHeader)
+    );
+    assert_eq!(
+        FrameHeader::new(MessageKind::Cancel, CURRENT_VERSION, 1, CONNECTION_ID, 1,),
         Err(FrameError::InvalidHeader)
     );
 }
@@ -231,11 +241,20 @@ fn response_errors_are_stable_and_detail_free() {
         PublicErrorCode::Locked,
         RetryCategory::AfterUnlock,
         CorrelationId::new([0x11; 16]),
-    );
+    )
+    .expect("nonzero correlation must build");
     let encoded = failure.encode().expect("failure must encode");
     let decoded = ResponseEnvelope::decode(&encoded).expect("failure must decode");
     assert_eq!(decoded.error(), Some(PublicErrorCode::Locked));
     assert!(decoded.body().is_empty());
+    assert!(matches!(
+        ResponseEnvelope::failure(
+            PublicErrorCode::Locked,
+            RetryCategory::AfterUnlock,
+            CorrelationId::new([0; 16]),
+        ),
+        Err(ProtocolError::InvariantViolation)
+    ));
 }
 
 #[test]
@@ -289,6 +308,13 @@ fn implemented_operation_bodies_are_canonical_bounded_and_strict() {
         OperationRequest::decode(OperationCode::EnrollWindowsHello, &[0x80]).map(|_| ()),
         Err(ProtocolError::Unsupported)
     );
+
+    for limit in [0, 101] {
+        assert!(matches!(
+            OperationRequest::ListAccountSummaries { offset: 0, limit }.encode(),
+            Err(ProtocolError::InvariantViolation)
+        ));
+    }
 }
 
 #[test]

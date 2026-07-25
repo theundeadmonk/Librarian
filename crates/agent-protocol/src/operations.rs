@@ -231,13 +231,20 @@ impl OperationRequest {
     ///
     /// # Errors
     ///
-    /// Returns `TooLarge` if the body exceeds the protocol frame limit.
+    /// Returns `TooLarge` if the body exceeds the protocol frame limit and
+    /// `InvariantViolation` for an invalid page limit.
     pub fn encode(&self) -> Result<Zeroizing<Vec<u8>>, ProtocolError> {
         if self
             .master_password()
             .is_some_and(|password| password.len() > MAX_MASTER_PASSWORD_BYTES)
         {
             return Err(ProtocolError::TooLarge);
+        }
+        if self
+            .list_window()
+            .is_some_and(|(_, limit)| limit == 0 || limit > MAX_LIST_PAGE_SIZE)
+        {
+            return Err(ProtocolError::InvariantViolation);
         }
         let mut encoder = Encoder::new(SecretWriter::with_capacity(MAX_PAYLOAD_BYTES));
         match self {

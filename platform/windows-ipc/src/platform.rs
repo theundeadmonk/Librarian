@@ -949,6 +949,19 @@ impl PipeConnection {
         self.component_role
     }
 
+    /// Verifies that the retained, authenticated peer process is still alive.
+    ///
+    /// Callers must use this immediately before admitting a decoded request to
+    /// the runtime. The transport also performs the check after every complete
+    /// frame read and around every frame write.
+    ///
+    /// # Errors
+    ///
+    /// Returns `PeerExited` after the authenticated process has terminated.
+    pub fn ensure_peer_alive(&self) -> Result<(), TransportError> {
+        require_peer_alive(&self.peer)
+    }
+
     /// Reads exactly one bounded frame. Header validation happens before the
     /// zeroizing payload allocation.
     ///
@@ -975,7 +988,8 @@ impl PipeConnection {
             &mut payload,
             deadline,
         )?;
-        Frame::new(header, payload).map_err(Into::into)
+        let frame = Frame::new(header, payload)?;
+        retain_frame_from_live_peer(frame, &self.peer)
     }
 
     /// Writes one complete frame from zeroizing storage.
@@ -984,13 +998,15 @@ impl PipeConnection {
     ///
     /// Partial, timed-out, or peer-exit writes fail and close the connection.
     pub fn write_frame(&self, frame: &Frame, timeout: Duration) -> Result<(), TransportError> {
+        self.ensure_peer_alive()?;
         let bytes = frame.encode()?;
         write_all(
             self.pipe.raw(),
             self.peer.process.raw(),
             &bytes,
             deadline_after(timeout)?,
-        )
+        )?;
+        self.ensure_peer_alive()
     }
 }
 
@@ -1245,9 +1261,15 @@ fn wait_for_io(
 ) -> Result<u32, TransportError> {
     let handles = [overlapped.hEvent, peer];
     let count = if peer.is_null() { 1 } else { 2 };
+    let wait_timeout = match remaining_millis(deadline) {
+        Ok(timeout) => timeout,
+        Err(error) => {
+            cancel_and_drain(pipe, overlapped);
+            return Err(error);
+        }
+    };
     // SAFETY: `handles` contains `count` valid waitable handles.
-    let wait =
-        unsafe { WaitForMultipleObjects(count, handles.as_ptr(), 0, remaining_millis(deadline)?) };
+    let wait = unsafe { WaitForMultipleObjects(count, handles.as_ptr(), 0, wait_timeout) };
     if wait == WAIT_OBJECT_0 {
         let mut transferred = 0_u32;
         // SAFETY: the overlapped operation completed and all arguments remain
@@ -1281,6 +1303,19 @@ fn cancel_and_drain(pipe: HANDLE, overlapped: &mut OVERLAPPED) {
     let _completed = unsafe { GetOverlappedResult(pipe, overlapped, &raw mut ignored, 1) };
 }
 
+fn require_peer_alive(peer: &PeerHandle) -> Result<(), TransportError> {
+    if peer.is_alive() {
+        Ok(())
+    } else {
+        Err(TransportError::PeerExited)
+    }
+}
+
+fn retain_frame_from_live_peer(frame: Frame, peer: &PeerHandle) -> Result<Frame, TransportError> {
+    require_peer_alive(peer)?;
+    Ok(frame)
+}
+
 fn map_peer_error(error: PeerAuthorizationError) -> TransportError {
     match error {
         PeerAuthorizationError::InvalidPolicySet => TransportError::Internal,
@@ -1304,7 +1339,10 @@ fn map_peer_error(error: PeerAuthorizationError) -> TransportError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Mutex, mpsc};
+    use std::{
+        process::Command,
+        sync::{Mutex, mpsc},
+    };
 
     static AGENT_INSTANCE_TEST: Mutex<()> = Mutex::new(());
 
@@ -1348,6 +1386,40 @@ mod tests {
             ),
             Err(TransportError::AccessDenied)
         ));
+    }
+
+    #[test]
+    fn completed_frames_from_exited_peers_are_rejected() {
+        let mut child = Command::new("cmd.exe")
+            .args(["/D", "/C", "ping -n 30 127.0.0.1 >nul"])
+            .spawn()
+            .expect("long-lived child process");
+        let peer = observe_process(child.id()).expect("observe child");
+        assert!(peer.is_alive());
+        child.kill().expect("stop child");
+        child.wait().expect("reap child");
+
+        let header = FrameHeader::new(
+            librarian_agent_protocol::MessageKind::Cancel,
+            librarian_agent_protocol::CURRENT_VERSION,
+            0,
+            [0xA5; 16],
+            1,
+        )
+        .expect("frame header");
+        let frame = Frame::new(header, Zeroizing::new(Vec::new())).expect("frame");
+        assert!(matches!(
+            retain_frame_from_live_peer(frame, &peer),
+            Err(TransportError::PeerExited)
+        ));
+    }
+
+    #[test]
+    fn expired_deadlines_are_reported_before_a_wait() {
+        let expired = Instant::now()
+            .checked_sub(Duration::from_millis(1))
+            .expect("representable deadline");
+        assert_eq!(remaining_millis(expired), Err(TransportError::Timeout));
     }
 
     #[test]

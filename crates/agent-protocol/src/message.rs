@@ -629,18 +629,21 @@ impl ResponseEnvelope {
     }
 
     /// Constructs a public failure with no attacker-controlled details.
-    #[must_use]
+    ///
+    /// # Errors
+    ///
+    /// Rejects a zero correlation identifier.
     pub fn failure(
         error: PublicErrorCode,
         retry: RetryCategory,
         correlation_id: CorrelationId,
-    ) -> Self {
-        Self {
-            error: Some(error),
+    ) -> Result<Self, ProtocolError> {
+        Self::new(
+            Some(error),
             retry,
             correlation_id,
-            body: Zeroizing::new(Vec::new()),
-        }
+            Zeroizing::new(Vec::new()),
+        )
     }
 
     fn new(

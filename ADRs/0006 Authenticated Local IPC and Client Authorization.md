@@ -230,6 +230,9 @@ The descriptor:
 - uses safe create/replace, no-follow, regular-file, ownership, size, and
   parent-path checks equivalent to the vault filesystem boundary;
 - is written only after listeners are ready;
+- is removed by stable file identity if validation, durability, or ancestor
+  revalidation fails after atomic replacement, without deleting a concurrently
+  substituted file;
 - is removed before intentional shutdown; and
 - is considered stale unless the connected server independently passes the
   complete peer-verification sequence.
@@ -250,6 +253,8 @@ application bytes, the agent must:
    SYNCHRONIZE`.
 3. Retain the process handle for the lifetime of the connection so PID reuse
    cannot substitute a new process and peer exit can cancel work.
+   Recheck that handle after complete frame assembly and immediately before
+   runtime admission; a frame buffered before process exit is not admissible.
 4. Query the process token and require:
    - the expected Windows user SID;
    - the same logon SID;
@@ -361,6 +366,7 @@ Version 1 defines only:
 | `event` | Agent to client | Bounded state transition such as `locked` or `shutting_down` |
 
 Unknown kinds and nonzero flags close the connection.
+`cancel` is header-only and therefore requires a zero payload length.
 
 ### Strict deterministic CBOR
 
@@ -388,6 +394,9 @@ Version 1 forbids:
 Every decoded payload is re-encoded and compared byte-for-byte, or validated by
 an equivalent deterministic decoder, before dispatch. Secret-bearing buffers
 use zeroizing ownership from allocation through final response disposal.
+Public request and response constructors enforce the same bounds and nonzero
+identifier invariants as their decoders, so the implementation cannot emit a
+message it would reject on receipt.
 
 ## Handshake and version negotiation
 
@@ -482,6 +491,10 @@ After `ServerHello`:
 - `cancel` is idempotent and refers only to an in-flight request on the same
   connection; and
 - disconnect or peer-process exit cancels all work owned by that connection.
+
+Every pending overlapped read or write is cancelled and synchronously drained
+before its stack `OVERLAPPED` structure or caller buffer is released, including
+when the monotonic deadline has already expired before the wait begins.
 
 Admission, registration, cancel, disconnect, lock, and terminal response
 commitment share one ordering gate. An admitted request is registered before a
@@ -744,12 +757,12 @@ and #20 add package and end-to-end cases.
 
 | Threat | Required test |
 |---|---|
-| Endpoint discovery | Stale, truncated, oversized, replaced, redirected, and future-version descriptors |
+| Endpoint discovery | Stale, truncated, oversized, replaced, redirected, future-version, and post-publication failure descriptors |
 | Server squatting | Copied binary, wrong package, wrong signer, wrong path, stale PID, PID reuse, and pre-created endpoint |
 | Client impersonation | Unknown executable, copied executable, wrong package, wrong AUMID, wrong user, wrong logon SID, wrong session, elevated peer, and exited peer |
 | Multi-instance interception | Full pre-created pool, duplicate instance attempt, listener loss and endpoint rotation |
 | Impersonation abuse | Client uses anonymous security QoS; server has no impersonation path |
-| Framing | Partial header, bad magic, bad header version, invalid pre-negotiation version, unknown kind, nonzero flags, length 65,537, early EOF, trailing data, slow read, and frame flood |
+| Framing | Partial header, bad magic, bad header version, invalid pre-negotiation version, unknown kind, nonzero flags, payload-bearing cancel, length 65,537, early EOF, trailing data, slow read, exited-peer buffered frame, and frame flood |
 | CBOR | Nonpreferred integers, indefinite values, map, tag, float, invalid UTF-8, excessive depth, wrong array length, unknown field, and noncanonical re-encoding |
 | Authorization | Every operation attempted by every unauthorized role |
 | Replay | Zero/reused/decreasing/wrapped request, unknown/duplicate response, invalid cancel target, nonzero event ID, cross-connection ID, stale epoch, and post-restart request |

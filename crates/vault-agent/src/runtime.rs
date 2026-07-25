@@ -504,28 +504,28 @@ impl AgentRuntime {
                     PublicErrorCode::UnauthorizedOperation,
                     RetryCategory::Never,
                     correlation,
-                )));
+                )?));
             }
             Err(BeginRequestError::Busy) => {
                 return Ok(RequestAdmission::Rejected(ResponseEnvelope::failure(
                     PublicErrorCode::Busy,
                     RetryCategory::Backoff,
                     correlation,
-                )));
+                )?));
             }
             Err(BeginRequestError::StaleEpoch) => {
                 return Ok(RequestAdmission::Rejected(ResponseEnvelope::failure(
                     PublicErrorCode::Locked,
                     RetryCategory::AfterUnlock,
                     correlation,
-                )));
+                )?));
             }
             Err(BeginRequestError::MissingIdempotencyKey) => {
                 return Ok(RequestAdmission::Rejected(ResponseEnvelope::failure(
                     PublicErrorCode::InvalidRequest,
                     RetryCategory::Never,
                     correlation,
-                )));
+                )?));
             }
             Err(BeginRequestError::Connection(error)) => return Err(error.into()),
         };
@@ -538,7 +538,7 @@ impl AgentRuntime {
                 PublicErrorCode::Busy,
                 RetryCategory::Backoff,
                 correlation,
-            )));
+            )?));
         };
         let key = RequestKey {
             connection_id: *connection.connection_id(),
@@ -1356,7 +1356,8 @@ impl ExecutionOutcome {
 
     fn into_response(self, correlation: CorrelationId) -> Result<ResponseEnvelope, DispatchError> {
         if let Some(error) = self.error {
-            return Ok(ResponseEnvelope::failure(error, self.retry, correlation));
+            return ResponseEnvelope::failure(error, self.retry, correlation)
+                .map_err(DispatchError::from);
         }
         ResponseEnvelope::success(correlation, self.body).map_err(|_| DispatchError::Internal)
     }

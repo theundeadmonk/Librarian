@@ -9,6 +9,16 @@
     },
     {
       "platform": "windows",
+      "test": "librarian-windows-ipc::lib:librarian_windows_ipc::discovery::tests::post_publication_cleanup_preserves_a_replacement::test:active",
+      "rationale": "Exercises Windows file-identity checks that prevent failed-publication cleanup from deleting a descriptor replaced after the atomic move."
+    },
+    {
+      "platform": "windows",
+      "test": "librarian-windows-ipc::lib:librarian_windows_ipc::discovery::tests::post_publication_failure_removes_the_published_descriptor::test:active",
+      "rationale": "Exercises identity-guarded cleanup of an endpoint descriptor when validation or durability fails after the atomic move."
+    },
+    {
+      "platform": "windows",
       "test": "librarian-windows-ipc::lib:librarian_windows_ipc::discovery::tests::redirected_descriptors_fail_and_inflight_replacement_is_blocked::test:active",
       "rationale": "Exercises Windows reparse-point rejection and file-sharing guards that block descriptor deletion or replacement during a read."
     },
@@ -21,6 +31,16 @@
       "platform": "windows",
       "test": "librarian-windows-ipc::lib:librarian_windows_ipc::platform::tests::current_process_identity_fields_are_queryable::test:active",
       "rationale": "Queries Windows access-token, integrity, session, process-image, creation-time, and AppModel identity fields used for mutual named-pipe authentication."
+    },
+    {
+      "platform": "windows",
+      "test": "librarian-windows-ipc::lib:librarian_windows_ipc::platform::tests::completed_frames_from_exited_peers_are_rejected::test:active",
+      "rationale": "Exercises retained Windows process-handle liveness after complete frame assembly so buffered requests from exited peers are not admitted."
+    },
+    {
+      "platform": "windows",
+      "test": "librarian-windows-ipc::lib:librarian_windows_ipc::platform::tests::expired_deadlines_are_reported_before_a_wait::test:active",
+      "rationale": "Exercises the expired-deadline branch used to cancel and drain pending Windows overlapped I/O before releasing its storage."
     },
     {
       "platform": "windows",
