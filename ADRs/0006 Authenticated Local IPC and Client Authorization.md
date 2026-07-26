@@ -179,7 +179,10 @@ addition to their normalized canonical path, so hard links, alternate casing,
 and syntactic aliases cannot create two owners for one vault. Missing targets
 use a canonical parent plus a case-normalized final component on Windows; the
 reservation is upgraded to the published file identity while the ownership and
-commit gates are both held.
+commit gates are both held. Unlock captures the identity of the guarded file
+that was authenticated, then compares and binds that exact identity under the
+same two gates before publishing the unlocked state. A replaced target already
+leased through another path therefore fails closed.
 
 ### Pipe security descriptor
 
@@ -505,9 +508,13 @@ lock or disconnect may complete. A terminal response remains behind that gate
 until the authenticated transport synchronously writes all bytes or reports
 failure; it cannot be queued for a later write after a lock acknowledgement.
 Status state and unlock epoch are captured together while this gate is held.
+The server uses that paired snapshot when constructing `ServerHello`; callers
+must not compose handshake status from the separate diagnostic accessors.
 Likewise, replaying a cached create-vault result refreshes its status and epoch
 at terminal commitment instead of returning the snapshot cached by the
-original request.
+original request. Because that replay discloses only current non-secret status,
+an already committed create may report the current locked state; an original
+in-flight create remains subordinate to a concurrent lock.
 
 After a secret-bearing request waits for the vault mutex, it repeats the
 cancellation, monotonic-deadline, lock-state, and epoch checks before doing
@@ -661,6 +668,13 @@ replay window: admitting a new mutation evicts the oldest completed outcome
 when necessary, while in-flight keys remain reserved. Exhausting the window
 therefore cannot permanently disable mutations; clients must not rely on
 replay results after an entry has aged out.
+
+Every terminal `operation_failed` result from an admitted idempotent mutation is
+also cached. A storage error observed after SQLite commit can be
+indistinguishable from a pre-commit failure at the public boundary; replaying
+the same key must return the same terminal result rather than risk applying an
+add, update, or delete twice. Recovery or reconciliation uses a new operation
+only after the vault has been authenticated again.
 
 Cancellation, deadline, or epoch change observed at a mutation's commit gate
 uses a distinct rollback result. It does not masquerade as storage corruption
@@ -883,9 +897,10 @@ Issue #13 implements these layers as:
   desktop dispatch, encoded-size-aware bounded account paging,
   connection-bound cancellation, lock epochs, stable file-identity ownership,
   per-record authority checks during authenticated reads and mutations,
-  coherent status snapshots, core-failure state synchronization, sign-out
-  shutdown, and bounded keyed idempotency outcomes whose replayed state is
-  refreshed at terminal commitment.
+  coherent handshake and response status snapshots, authenticated unlock
+  ownership rebinding, core-failure state synchronization, sign-out shutdown,
+  and bounded keyed idempotency outcomes whose terminal failures are retained
+  and whose replayed state is refreshed at terminal commitment.
 
 The production entry point remains fail closed until issue #19 supplies the
 signed MSIX manifest, immutable role paths, package-local state path, and

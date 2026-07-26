@@ -250,6 +250,14 @@ impl OwnershipRecord {
                 (Some(left), Some(right)) if left == right
             )
     }
+
+    fn is_same_existing_target(&self, other: &Self) -> bool {
+        self.normalized_path == other.normalized_path
+            && matches!(
+                (&self.identity, &other.identity),
+                (Some(left), Some(right)) if left == right
+            )
+    }
 }
 
 struct OwnershipLease {
@@ -277,6 +285,30 @@ impl OwnershipLease {
             return Err(DispatchError::Internal);
         }
         *current = record;
+        Ok(())
+    }
+
+    fn bind_authenticated(
+        &self,
+        registry: &mut BTreeMap<u64, OwnershipRecord>,
+        path: &Path,
+        authenticated: &OwnershipRecord,
+    ) -> Result<(), DispatchError> {
+        let current = ownership_record(path).map_err(|_| DispatchError::Internal)?;
+        if !authenticated.is_same_existing_target(&current)
+            || registry
+                .iter()
+                .any(|(token, existing)| *token != self.token && existing.conflicts_with(&current))
+        {
+            return Err(DispatchError::Internal);
+        }
+        let leased = registry
+            .get_mut(&self.token)
+            .ok_or(DispatchError::Internal)?;
+        if leased.normalized_path != current.normalized_path {
+            return Err(DispatchError::Internal);
+        }
+        *leased = current;
         Ok(())
     }
 }
@@ -363,6 +395,20 @@ impl AgentRuntime {
     #[must_use]
     pub fn unlock_epoch(&self) -> u64 {
         self.coordinator.epoch()
+    }
+
+    /// Captures the non-secret state advertised during protocol negotiation.
+    ///
+    /// The state and unlock epoch are read under the same transition gate so a
+    /// handshake cannot combine values from opposite sides of a lock or unlock
+    /// transition.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Internal` only if the transition gate is poisoned.
+    pub fn status_snapshot(&self) -> Result<(AgentState, u64), DispatchError> {
+        let _commit = lock(&self.coordinator.commit_gate)?;
+        Ok((self.state(), self.unlock_epoch()))
     }
 
     /// Cancels one connection-bound request. Unknown/completed identifiers are
@@ -583,6 +629,7 @@ impl AgentRuntime {
                     error: cached.error,
                     retry: cached.retry,
                     body: Zeroizing::new(cached.body.to_vec()),
+                    replayed: true,
                 });
             }
             if state.in_flight.contains(&key) {
@@ -649,7 +696,9 @@ impl AgentRuntime {
                 outcome = ExecutionOutcome::cancelled();
             } else if Instant::now() >= context.deadline {
                 outcome = ExecutionOutcome::deadline();
-            } else if !self.success_is_still_authorized(context.permit) {
+            } else if !(self.success_is_still_authorized(context.permit)
+                || outcome.replayed && context.permit.operation() == OperationCode::CreateVault)
+            {
                 outcome = ExecutionOutcome::locked();
             }
         }
@@ -849,7 +898,14 @@ impl AgentRuntime {
                 ));
             }
         }
-        let result = lock(&self.vault)?.unlock(password, &registration.cancellation);
+        let mut authenticated_ownership = None;
+        let result = lock(&self.vault)?.unlock_with_before_publish(
+            password,
+            &registration.cancellation,
+            || {
+                authenticated_ownership = ownership_record(&self.vault_path).ok();
+            },
+        );
         if registration.cancellation.is_cancelled() {
             lock(&self.vault)?.lock();
             self.set_locked_unless_shutting_down();
@@ -862,35 +918,7 @@ impl AgentRuntime {
         }
         match result {
             Ok(()) => {
-                let _commit = lock(&self.coordinator.commit_gate)?;
-                if self.coordinator.lock_active.load(Ordering::Acquire)
-                    || registration.cancellation.is_cancelled()
-                    || Instant::now() >= deadline
-                    || self.state() != AgentState::Unlocking
-                {
-                    lock(&self.vault)?.lock();
-                    self.set_locked_unless_shutting_down();
-                    return Ok(ExecutionOutcome::cancelled());
-                }
-                self.coordinator.advance_epoch_without_cancellation()?;
-                if self
-                    .state
-                    .compare_exchange(
-                        AgentState::Unlocking as u8,
-                        AgentState::Unlocked as u8,
-                        Ordering::AcqRel,
-                        Ordering::Acquire,
-                    )
-                    .is_err()
-                {
-                    lock(&self.vault)?.lock();
-                    self.set_locked_unless_shutting_down();
-                    return Ok(ExecutionOutcome::cancelled());
-                }
-                Ok(ExecutionOutcome::success(encode_status(
-                    AgentState::Unlocked,
-                    self.unlock_epoch(),
-                )?))
+                self.publish_authenticated_unlock(authenticated_ownership, registration, deadline)
             }
             Err(UnlockError::Cancelled) => {
                 self.set_locked_unless_shutting_down();
@@ -901,6 +929,60 @@ impl AgentRuntime {
                 Ok(ExecutionOutcome::failed())
             }
         }
+    }
+
+    fn publish_authenticated_unlock(
+        &self,
+        authenticated_ownership: Option<OwnershipRecord>,
+        registration: &RequestRegistration,
+        deadline: Instant,
+    ) -> Result<ExecutionOutcome, DispatchError> {
+        let _commit = lock(&self.coordinator.commit_gate)?;
+        if self.coordinator.lock_active.load(Ordering::Acquire)
+            || registration.cancellation.is_cancelled()
+            || Instant::now() >= deadline
+            || self.state() != AgentState::Unlocking
+        {
+            lock(&self.vault)?.lock();
+            self.set_locked_unless_shutting_down();
+            return Ok(ExecutionOutcome::cancelled());
+        }
+        let Some(authenticated_ownership) = authenticated_ownership else {
+            lock(&self.vault)?.lock();
+            self.set_locked_unless_shutting_down();
+            return Ok(ExecutionOutcome::failed());
+        };
+        let mut owned = owned_vaults().lock().map_err(|_| DispatchError::Internal)?;
+        if self
+            .ownership
+            .bind_authenticated(&mut owned, &self.vault_path, &authenticated_ownership)
+            .is_err()
+        {
+            drop(owned);
+            lock(&self.vault)?.lock();
+            self.set_locked_unless_shutting_down();
+            return Ok(ExecutionOutcome::failed());
+        }
+        drop(owned);
+        self.coordinator.advance_epoch_without_cancellation()?;
+        if self
+            .state
+            .compare_exchange(
+                AgentState::Unlocking as u8,
+                AgentState::Unlocked as u8,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_err()
+        {
+            lock(&self.vault)?.lock();
+            self.set_locked_unless_shutting_down();
+            return Ok(ExecutionOutcome::cancelled());
+        }
+        Ok(ExecutionOutcome::success(encode_status(
+            AgentState::Unlocked,
+            self.unlock_epoch(),
+        )?))
     }
 
     fn lock_vault(&self) -> Result<ExecutionOutcome, DispatchError> {
@@ -947,7 +1029,6 @@ impl AgentRuntime {
             return Ok(map_account_error(error));
         }
         vault.lock();
-        self.set_locked_unless_shutting_down();
         drop(vault);
         let _commit = lock(&self.coordinator.commit_gate)?;
         self.set_locked_unless_shutting_down();
@@ -1362,6 +1443,7 @@ struct ExecutionOutcome {
     error: Option<PublicErrorCode>,
     retry: RetryCategory,
     body: Zeroizing<Vec<u8>>,
+    replayed: bool,
 }
 
 impl ExecutionOutcome {
@@ -1370,6 +1452,7 @@ impl ExecutionOutcome {
             error: None,
             retry: RetryCategory::Never,
             body,
+            replayed: false,
         }
     }
 
@@ -1378,6 +1461,7 @@ impl ExecutionOutcome {
             error: Some(error),
             retry,
             body: Zeroizing::new(Vec::new()),
+            replayed: false,
         }
     }
 
@@ -1472,6 +1556,7 @@ fn should_cache(outcome: &ExecutionOutcome) -> bool {
                 PublicErrorCode::InvalidRequest
                     | PublicErrorCode::NotFound
                     | PublicErrorCode::Conflict
+                    | PublicErrorCode::OperationFailed
             )
         )
 }
@@ -1621,7 +1706,10 @@ mod tests {
         }
     }
 
-    fn connection(state: AgentState, epoch: u64, marker: u8) -> Connection {
+    fn connection(runtime: &AgentRuntime, marker: u8) -> Connection {
+        let (state, epoch) = runtime
+            .status_snapshot()
+            .expect("handshake status snapshot");
         let hello = ClientHello::new(
             [marker; 32],
             CURRENT_VERSION,
@@ -1729,7 +1817,7 @@ mod tests {
             }
         }
 
-        let client = connection(runtime.state(), runtime.unlock_epoch(), 3);
+        let client = connection(&runtime, 3);
         let registration = runtime
             .coordinator
             .register(RequestKey {
@@ -1764,11 +1852,100 @@ mod tests {
     }
 
     #[test]
+    fn terminal_operation_failures_remain_idempotent() {
+        let directory = TestDirectory::new();
+        let runtime = AgentRuntime::start(directory.vault_path()).expect("runtime");
+        let key = [0x44; 16];
+        let fingerprint = [0x45; 32];
+        {
+            let mut state = lock(&runtime.idempotency).expect("idempotency state");
+            assert!(state.in_flight.insert(key));
+        }
+        let failed = ExecutionOutcome::failed();
+        assert!(should_cache(&failed));
+        IdempotencyReservation {
+            state: &runtime.idempotency,
+            key,
+            active: true,
+        }
+        .complete(Some(CachedOutcome {
+            request_fingerprint: fingerprint,
+            error: failed.error,
+            retry: failed.retry,
+            body: Zeroizing::new(failed.body.to_vec()),
+        }))
+        .expect("cache terminal failure");
+
+        let client = connection(&runtime, 67);
+        let registration = runtime
+            .coordinator
+            .register(RequestKey {
+                connection_id: *client.connection_id(),
+                request_id: 1,
+            })
+            .expect("registration");
+        let replay = runtime
+            .execute_idempotent(
+                key,
+                fingerprint,
+                OperationRequest::Status,
+                runtime.unlock_epoch(),
+                &registration,
+                Instant::now() + Duration::from_secs(1),
+            )
+            .expect("cached terminal failure");
+        assert_eq!(replay.error, Some(PublicErrorCode::OperationFailed));
+        assert!(replay.replayed);
+    }
+
+    #[test]
+    fn handshake_status_snapshot_waits_for_the_transition_gate() {
+        let directory = TestDirectory::new();
+        let runtime = Arc::new(AgentRuntime::start(directory.vault_path()).expect("runtime"));
+        let commit = lock(&runtime.coordinator.commit_gate).expect("commit gate");
+        runtime
+            .state
+            .store(AgentState::Unlocked as u8, Ordering::Release);
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (snapshot_tx, snapshot_rx) = std::sync::mpsc::channel();
+        let worker_runtime = Arc::clone(&runtime);
+        let worker = std::thread::spawn(move || {
+            started_tx.send(()).expect("snapshot worker started");
+            snapshot_tx
+                .send(worker_runtime.status_snapshot())
+                .expect("snapshot result");
+        });
+        started_rx.recv().expect("snapshot worker start");
+        assert!(
+            snapshot_rx.recv_timeout(Duration::from_millis(50)).is_err(),
+            "snapshot must wait behind the transition gate"
+        );
+
+        runtime
+            .state
+            .store(AgentState::Locked as u8, Ordering::Release);
+        let epoch = runtime
+            .coordinator
+            .advance_epoch_without_cancellation()
+            .expect("lock epoch");
+        drop(commit);
+
+        assert_eq!(
+            snapshot_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("coherent snapshot")
+                .expect("snapshot result"),
+            (AgentState::Locked, epoch)
+        );
+        worker.join().expect("snapshot worker");
+    }
+
+    #[test]
     fn terminal_commit_suppresses_cancelled_and_stale_successes() {
         let directory = TestDirectory::new();
         let runtime = AgentRuntime::start(directory.vault_path()).expect("runtime");
 
-        let status_connection = connection(runtime.state(), runtime.unlock_epoch(), 7);
+        let status_connection = connection(&runtime, 7);
         let (_request, _header, permit) =
             admitted_request(&runtime, &status_connection, 1, &OperationRequest::Status);
         let registration = runtime
@@ -1810,7 +1987,7 @@ mod tests {
         runtime
             .state
             .store(AgentState::Unlocked as u8, Ordering::Release);
-        let secret_connection = connection(runtime.state(), runtime.unlock_epoch(), 17);
+        let secret_connection = connection(&runtime, 17);
         let (_request, _header, permit) = admitted_request(
             &runtime,
             &secret_connection,
@@ -1865,7 +2042,7 @@ mod tests {
             .expect("first epoch");
         let stale_epoch = runtime.unlock_epoch();
 
-        let status_connection = connection(runtime.state(), stale_epoch, 71);
+        let status_connection = connection(&runtime, 71);
         let (_request, _header, status_permit) =
             admitted_request(&runtime, &status_connection, 1, &OperationRequest::Status);
         let status_registration = runtime
@@ -1921,12 +2098,7 @@ mod tests {
             .advance_epoch_without_cancellation()
             .expect("creation epoch");
         let stale_epoch = runtime.unlock_epoch();
-        runtime
-            .coordinator
-            .advance_epoch_without_cancellation()
-            .expect("unlock epoch");
-        let replay_epoch = runtime.unlock_epoch();
-        let create_connection = connection(runtime.state(), replay_epoch, 81);
+        let create_connection = connection(&runtime, 81);
         let create = OperationRequest::CreateVault {
             master_password: Zeroizing::new("replayed create password".to_owned()),
         };
@@ -1943,7 +2115,7 @@ mod tests {
         )
         .expect("create header");
         let create_permit = create_connection
-            .begin_request(&header, &envelope, replay_epoch)
+            .begin_request(&header, &envelope, stale_epoch)
             .expect("create admission");
         let create_registration = runtime
             .coordinator
@@ -1952,6 +2124,18 @@ mod tests {
                 request_id: 1,
             })
             .expect("create registration");
+        runtime
+            .state
+            .store(AgentState::Locked as u8, Ordering::Release);
+        runtime
+            .coordinator
+            .advance_epoch_without_cancellation()
+            .expect("lock epoch");
+        let replay_epoch = runtime.unlock_epoch();
+        let mut cached = ExecutionOutcome::success(
+            encode_status(AgentState::Unlocked, stale_epoch).expect("cached create status body"),
+        );
+        cached.replayed = true;
         let replay = runtime
             .finish_dispatch(
                 DispatchContext {
@@ -1966,16 +2150,13 @@ mod tests {
                     deadline: Instant::now() + Duration::from_secs(1),
                     correlation: CorrelationId::new([0x81; 16]),
                 },
-                ExecutionOutcome::success(
-                    encode_status(AgentState::Unlocked, stale_epoch)
-                        .expect("cached create status body"),
-                ),
+                cached,
                 copy_response,
             )
             .expect("replayed create response");
         assert_eq!(
             decode_status_response(&replay),
-            (AgentState::Unlocked, replay_epoch)
+            (AgentState::Locked, replay_epoch)
         );
     }
 

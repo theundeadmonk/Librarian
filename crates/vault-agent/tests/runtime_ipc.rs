@@ -46,7 +46,10 @@ impl Drop for TestDirectory {
     }
 }
 
-fn connection(role: ClientRole, state: AgentState, epoch: u64, marker: u8) -> Connection {
+fn connection(role: ClientRole, runtime: &AgentRuntime, marker: u8) -> Connection {
+    let (state, epoch) = runtime
+        .status_snapshot()
+        .expect("handshake status snapshot");
     let hello = ClientHello::new(
         [marker; 32],
         CURRENT_VERSION,
@@ -164,12 +167,7 @@ fn decode_account_id(body: &[u8]) -> [u8; 16] {
 fn desktop_protocol_crud_is_typed_paged_idempotent_and_lock_bound() {
     let directory = TestDirectory::new();
     let runtime = AgentRuntime::start(directory.vault_path()).expect("runtime starts");
-    let client = connection(
-        ClientRole::Desktop,
-        runtime.state(),
-        runtime.unlock_epoch(),
-        3,
-    );
+    let client = connection(ClientRole::Desktop, &runtime, 3);
 
     let created = dispatch(
         &runtime,
@@ -267,12 +265,7 @@ fn desktop_protocol_crud_is_typed_paged_idempotent_and_lock_bound() {
 fn secret_response_write_completes_before_lock_acknowledgement() {
     let directory = TestDirectory::new();
     let runtime = Arc::new(AgentRuntime::start(directory.vault_path()).expect("runtime starts"));
-    let setup_client = connection(
-        ClientRole::Desktop,
-        runtime.state(),
-        runtime.unlock_epoch(),
-        9,
-    );
+    let setup_client = connection(ClientRole::Desktop, &runtime, 9);
     assert_eq!(
         dispatch(
             &runtime,
@@ -293,12 +286,8 @@ fn secret_response_write_completes_before_lock_acknowledgement() {
     );
     let account_id = decode_account_id(added.body());
 
-    let get_client = Arc::new(connection(
-        ClientRole::Desktop,
-        runtime.state(),
-        runtime.unlock_epoch(),
-        19,
-    ));
+    let get_client = Arc::new(connection(ClientRole::Desktop, &runtime, 19));
+    let lock_client = connection(ClientRole::Desktop, &runtime, 29);
     let get_operation = OperationRequest::GetAccount { id: account_id };
     let (get_request, get_header) = request_parts(&runtime, &get_client, 1, &get_operation, None);
     let (write_started_tx, write_started_rx) = mpsc::channel();
@@ -318,12 +307,6 @@ fn secret_response_write_completes_before_lock_acknowledgement() {
         .expect("secret response entered transport writer");
 
     let lock_runtime = Arc::clone(&runtime);
-    let lock_client = connection(
-        ClientRole::Desktop,
-        runtime.state(),
-        runtime.unlock_epoch(),
-        29,
-    );
     let (lock_done_tx, lock_done_rx) = mpsc::channel();
     let lock_worker = thread::spawn(move || {
         let response = dispatch(
@@ -363,12 +346,7 @@ fn secret_response_write_completes_before_lock_acknowledgement() {
 fn disconnect_closes_admission_before_returning() {
     let directory = TestDirectory::new();
     let runtime = AgentRuntime::start(directory.vault_path()).expect("runtime starts");
-    let client = connection(
-        ClientRole::Desktop,
-        runtime.state(),
-        runtime.unlock_epoch(),
-        39,
-    );
+    let client = connection(ClientRole::Desktop, &runtime, 39);
     runtime.disconnect(&client).expect("disconnect");
 
     let operation = OperationRequest::Status;
@@ -389,12 +367,7 @@ fn core_integrity_failure_locks_runtime_advances_epoch_and_allows_unlock_attempt
     let directory = TestDirectory::new();
     let path = directory.vault_path();
     let runtime = AgentRuntime::start(&path).expect("runtime starts");
-    let client = connection(
-        ClientRole::Desktop,
-        runtime.state(),
-        runtime.unlock_epoch(),
-        11,
-    );
+    let client = connection(ClientRole::Desktop, &runtime, 11);
     assert_eq!(
         dispatch(
             &runtime,
@@ -442,12 +415,7 @@ fn core_integrity_failure_locks_runtime_advances_epoch_and_allows_unlock_attempt
 fn role_authorization_precedes_operation_body_decoding() {
     let directory = TestDirectory::new();
     let runtime = AgentRuntime::start(directory.vault_path()).expect("runtime starts");
-    let native_host = connection(
-        ClientRole::NativeHost,
-        runtime.state(),
-        runtime.unlock_epoch(),
-        17,
-    );
+    let native_host = connection(ClientRole::NativeHost, &runtime, 17);
     let request = RequestEnvelope::new(
         OperationCode::ListAccountSummaries,
         runtime.unlock_epoch(),
@@ -478,12 +446,7 @@ fn role_authorization_precedes_operation_body_decoding() {
 fn cancellation_wins_an_in_flight_password_unlock() {
     let directory = TestDirectory::new();
     let runtime = Arc::new(AgentRuntime::start(directory.vault_path()).expect("runtime starts"));
-    let setup = connection(
-        ClientRole::Desktop,
-        runtime.state(),
-        runtime.unlock_epoch(),
-        31,
-    );
+    let setup = connection(ClientRole::Desktop, &runtime, 31);
     assert_eq!(
         dispatch(
             &runtime,
@@ -500,12 +463,7 @@ fn cancellation_wins_an_in_flight_password_unlock() {
         None
     );
 
-    let unlock_client = Arc::new(connection(
-        ClientRole::Desktop,
-        runtime.state(),
-        runtime.unlock_epoch(),
-        47,
-    ));
+    let unlock_client = Arc::new(connection(ClientRole::Desktop, &runtime, 47));
     let connection_id = *unlock_client.connection_id();
     let operation = unlock("cancellation integration password");
     let body = operation.encode().expect("unlock body");
@@ -553,12 +511,7 @@ fn lock_wins_create_before_atomic_publication() {
     let directory = TestDirectory::new();
     let path = directory.vault_path();
     let runtime = Arc::new(AgentRuntime::start(&path).expect("runtime starts"));
-    let create_client = connection(
-        ClientRole::Desktop,
-        runtime.state(),
-        runtime.unlock_epoch(),
-        51,
-    );
+    let create_client = connection(ClientRole::Desktop, &runtime, 51);
     let create_runtime = Arc::clone(&runtime);
     let worker = thread::spawn(move || {
         dispatch(
@@ -579,12 +532,7 @@ fn lock_wins_create_before_atomic_publication() {
         "create must reach its private staging file before the lock race"
     );
 
-    let lock_client = connection(
-        ClientRole::Desktop,
-        runtime.state(),
-        runtime.unlock_epoch(),
-        56,
-    );
+    let lock_client = connection(ClientRole::Desktop, &runtime, 56);
     assert_eq!(
         dispatch(&runtime, &lock_client, 1, &OperationRequest::Lock, None,).error(),
         None
@@ -622,12 +570,7 @@ fn lock_and_signout_shutdown_win_unlock_races_and_restart_locked() {
     let path = directory.vault_path();
     let runtime = Arc::new(AgentRuntime::start(&path).expect("runtime starts"));
     let password = "lifecycle race integration password";
-    let setup = connection(
-        ClientRole::Desktop,
-        runtime.state(),
-        runtime.unlock_epoch(),
-        61,
-    );
+    let setup = connection(ClientRole::Desktop, &runtime, 61);
     assert_eq!(
         dispatch(&runtime, &setup, 1, &create(password), Some([6; 16]),).error(),
         None
@@ -638,24 +581,14 @@ fn lock_and_signout_shutdown_win_unlock_races_and_restart_locked() {
     );
 
     let run_unlock = |runtime: &Arc<AgentRuntime>, marker: u8| {
-        let unlock_client = connection(
-            ClientRole::Desktop,
-            runtime.state(),
-            runtime.unlock_epoch(),
-            marker,
-        );
+        let unlock_client = connection(ClientRole::Desktop, runtime, marker);
         let worker_runtime = Arc::clone(runtime);
         thread::spawn(move || dispatch(&worker_runtime, &unlock_client, 1, &unlock(password), None))
     };
 
     let unlock_worker = run_unlock(&runtime, 71);
     wait_for_state(&runtime, AgentState::Unlocking);
-    let lock_client = connection(
-        ClientRole::Desktop,
-        runtime.state(),
-        runtime.unlock_epoch(),
-        81,
-    );
+    let lock_client = connection(ClientRole::Desktop, &runtime, 81);
     assert_eq!(
         dispatch(&runtime, &lock_client, 1, &OperationRequest::Lock, None,).error(),
         None
@@ -681,12 +614,7 @@ fn lock_and_signout_shutdown_win_unlock_races_and_restart_locked() {
 
     let restarted = AgentRuntime::start(&path).expect("runtime restarts");
     assert_eq!(restarted.state(), AgentState::Locked);
-    let restarted_client = connection(
-        ClientRole::Desktop,
-        restarted.state(),
-        restarted.unlock_epoch(),
-        101,
-    );
+    let restarted_client = connection(ClientRole::Desktop, &restarted, 101);
     assert_eq!(
         dispatch(&restarted, &restarted_client, 1, &unlock(password), None,).error(),
         None
@@ -742,4 +670,79 @@ fn vault_path_has_exactly_one_runtime_owner() {
         "Windows-equivalent casing must not acquire a second ownership lease"
     );
     drop(existing);
+}
+
+#[test]
+fn unlock_revalidates_the_authenticated_vault_ownership_lease() {
+    let directory = TestDirectory::new();
+    let path = directory.vault_path();
+    let original = AgentRuntime::start(&path).expect("original runtime");
+    let original_client = connection(ClientRole::Desktop, &original, 111);
+    assert_eq!(
+        dispatch(
+            &original,
+            &original_client,
+            1,
+            &create("original ownership password"),
+            Some([0x71; 16]),
+        )
+        .error(),
+        None
+    );
+    assert_eq!(
+        dispatch(
+            &original,
+            &original_client,
+            2,
+            &OperationRequest::Lock,
+            None,
+        )
+        .error(),
+        None
+    );
+
+    let replacement_path = directory.0.join("replacement.sqlite3");
+    let replacement = AgentRuntime::start(&replacement_path).expect("replacement runtime");
+    let replacement_client = connection(ClientRole::Desktop, &replacement, 121);
+    assert_eq!(
+        dispatch(
+            &replacement,
+            &replacement_client,
+            1,
+            &create("replacement ownership password"),
+            Some([0x72; 16]),
+        )
+        .error(),
+        None
+    );
+    assert_eq!(
+        dispatch(
+            &replacement,
+            &replacement_client,
+            2,
+            &OperationRequest::Lock,
+            None,
+        )
+        .error(),
+        None
+    );
+    drop(replacement);
+
+    fs::remove_file(&path).expect("remove original pathname");
+    fs::rename(&replacement_path, &path).expect("install replacement vault");
+    let alias = directory.0.join("replacement-hard-link.sqlite3");
+    fs::hard_link(&path, &alias).expect("replacement hard-link alias");
+    let competing = AgentRuntime::start(&alias).expect("competing replacement owner");
+
+    let unlock_client = connection(ClientRole::Desktop, &original, 131);
+    let response = dispatch(
+        &original,
+        &unlock_client,
+        1,
+        &unlock("replacement ownership password"),
+        None,
+    );
+    assert_eq!(response.error(), Some(PublicErrorCode::OperationFailed));
+    assert_eq!(original.state(), AgentState::Locked);
+    drop(competing);
 }
