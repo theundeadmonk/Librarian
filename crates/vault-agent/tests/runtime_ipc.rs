@@ -2,7 +2,7 @@ use std::{
     fs,
     path::{Path, PathBuf},
     sync::{
-        Arc, Mutex,
+        Arc, RwLock,
         atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc,
     },
@@ -20,7 +20,7 @@ use minicbor::Decoder;
 use zeroize::Zeroizing;
 
 static TEST_DIRECTORY_COUNTER: AtomicU64 = AtomicU64::new(1);
-static KDF_TEST_GATE: Mutex<()> = Mutex::new(());
+static KDF_TEST_GATE: RwLock<()> = RwLock::new(());
 const BUILD_ID: [u8; 32] = [0x42; 32];
 
 struct TestDirectory(PathBuf);
@@ -82,15 +82,17 @@ fn dispatch(
     operation: &OperationRequest,
     idempotency_key: Option<[u8; 16]>,
 ) -> ResponseEnvelope {
-    let _kdf_gate = matches!(
+    let is_kdf = matches!(
         operation,
         OperationRequest::CreateVault { .. } | OperationRequest::UnlockMasterPassword { .. }
-    )
-    .then(|| {
+    );
+    let _kdf_exclusive = is_kdf.then(|| {
         KDF_TEST_GATE
-            .lock()
+            .write()
             .expect("integration KDF tests serialize")
     });
+    let _kdf_shared = (!is_kdf && !matches!(operation, OperationRequest::Lock))
+        .then(|| KDF_TEST_GATE.read().expect("ordinary integration dispatch"));
     let (request, header) =
         request_parts(runtime, connection, request_id, operation, idempotency_key);
     runtime
