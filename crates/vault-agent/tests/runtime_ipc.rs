@@ -1,6 +1,6 @@
 use std::{
     fs,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{
         Arc,
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -88,6 +88,18 @@ fn dispatch(
         .expect("request dispatch")
 }
 
+fn dispatch_success(
+    runtime: &AgentRuntime,
+    connection: &Connection,
+    request_id: u64,
+    operation: &OperationRequest,
+    idempotency_key: Option<[u8; 16]>,
+) -> ResponseEnvelope {
+    let response = dispatch(runtime, connection, request_id, operation, idempotency_key);
+    assert_eq!(response.error(), None);
+    response
+}
+
 fn request_parts(
     runtime: &AgentRuntime,
     connection: &Connection,
@@ -130,6 +142,20 @@ fn create(password: &str) -> OperationRequest {
 fn unlock(password: &str) -> OperationRequest {
     OperationRequest::UnlockMasterPassword {
         master_password: Zeroizing::new(password.to_owned()),
+    }
+}
+
+fn sidecar(path: &Path, suffix: &str) -> PathBuf {
+    let mut value = path.as_os_str().to_os_string();
+    value.push(suffix);
+    PathBuf::from(value)
+}
+
+fn remove_if_present(path: &Path) {
+    match fs::remove_file(path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => panic!("test fixture file must be removable: {error}"),
     }
 }
 
@@ -745,4 +771,87 @@ fn unlock_revalidates_the_authenticated_vault_ownership_lease() {
     assert_eq!(response.error(), Some(PublicErrorCode::OperationFailed));
     assert_eq!(original.state(), AgentState::Locked);
     drop(competing);
+}
+
+#[test]
+fn changed_vault_identity_invalidates_cached_mutation_outcomes() {
+    let directory = TestDirectory::new();
+    let path = directory.vault_path();
+    let original = AgentRuntime::start(&path).expect("original runtime");
+    let original_client = connection(ClientRole::Desktop, &original, 141);
+    dispatch_success(
+        &original,
+        &original_client,
+        1,
+        &create("cached original password"),
+        Some([0x81; 16]),
+    );
+    let mutation_key = [0x82; 16];
+    dispatch_success(
+        &original,
+        &original_client,
+        2,
+        &OperationRequest::AddAccount { fields: fields() },
+        Some(mutation_key),
+    );
+    dispatch_success(
+        &original,
+        &original_client,
+        3,
+        &OperationRequest::Lock,
+        None,
+    );
+
+    let replacement_path = directory.0.join("cache-replacement.sqlite3");
+    let replacement = AgentRuntime::start(&replacement_path).expect("replacement runtime");
+    let replacement_client = connection(ClientRole::Desktop, &replacement, 151);
+    dispatch_success(
+        &replacement,
+        &replacement_client,
+        1,
+        &create("cached replacement password"),
+        Some([0x83; 16]),
+    );
+    dispatch_success(
+        &replacement,
+        &replacement_client,
+        2,
+        &OperationRequest::Lock,
+        None,
+    );
+    drop(replacement);
+    for suffix in ["-wal", "-shm"] {
+        remove_if_present(&sidecar(&path, suffix));
+    }
+    fs::remove_file(&path).expect("remove original vault");
+    fs::rename(&replacement_path, &path).expect("install replacement vault");
+
+    let unlock_client = connection(ClientRole::Desktop, &original, 161);
+    dispatch_success(
+        &original,
+        &unlock_client,
+        1,
+        &unlock("cached replacement password"),
+        None,
+    );
+    let added = dispatch_success(
+        &original,
+        &original_client,
+        4,
+        &OperationRequest::AddAccount { fields: fields() },
+        Some(mutation_key),
+    );
+    let replacement_id = decode_account_id(added.body());
+    assert_eq!(
+        dispatch(
+            &original,
+            &original_client,
+            5,
+            &OperationRequest::GetAccount { id: replacement_id },
+            None,
+        )
+        .error(),
+        None,
+        "the old key must execute against the newly authenticated vault"
+    );
 }

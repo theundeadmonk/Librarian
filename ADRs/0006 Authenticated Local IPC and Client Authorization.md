@@ -493,7 +493,9 @@ After `ServerHello`:
 - the agent captures the current epoch again before side effects and before
   plaintext or signature disclosure;
 - client-supplied timeouts are relative durations, clamped by the agent, and
-  converted to a server monotonic deadline;
+  converted to a server monotonic deadline before waiting for the admission
+  gate, so admission backpressure consumes rather than resets the request
+  budget;
 - `cancel` is idempotent and refers only to an in-flight request on the same
   connection; and
 - disconnect or peer-process exit cancels all work owned by that connection.
@@ -680,6 +682,13 @@ indistinguishable from a pre-commit failure at the public boundary; replaying
 the same key must return the same terminal result rather than risk applying an
 add, update, or delete twice. Recovery or reconciliation uses a new operation
 only after the vault has been authenticated again.
+
+The replay window is scoped to the authenticated vault file identity. When a
+locked runtime successfully authenticates a different file at its owned path,
+it clears completed outcomes before binding and publishing that identity. If an
+old idempotent mutation is still in flight, the identity transition fails
+closed instead of allowing that reservation to repopulate the new vault's
+cache.
 
 Cancellation, deadline, or epoch change observed at a mutation's commit gate
 uses a distinct rollback result. It does not masquerade as storage corruption

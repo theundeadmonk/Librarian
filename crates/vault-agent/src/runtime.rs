@@ -293,12 +293,15 @@ impl OwnershipLease {
         registry: &mut BTreeMap<u64, OwnershipRecord>,
         path: &Path,
         authenticated: &OwnershipRecord,
+        invalidate_previous_vault: impl FnOnce() -> Result<(), DispatchError>,
     ) -> Result<(), DispatchError> {
         let current = ownership_record(path).map_err(|_| DispatchError::Internal)?;
-        if !authenticated.is_same_existing_target(&current)
-            || registry
-                .iter()
-                .any(|(token, existing)| *token != self.token && existing.conflicts_with(&current))
+        if !authenticated.is_same_existing_target(&current) {
+            return Err(DispatchError::Internal);
+        }
+        if registry
+            .iter()
+            .any(|(token, existing)| *token != self.token && existing.conflicts_with(&current))
         {
             return Err(DispatchError::Internal);
         }
@@ -307,6 +310,9 @@ impl OwnershipLease {
             .ok_or(DispatchError::Internal)?;
         if leased.normalized_path != current.normalized_path {
             return Err(DispatchError::Internal);
+        }
+        if !leased.is_same_existing_target(&current) {
+            invalidate_previous_vault()?;
         }
         *leased = current;
         Ok(())
@@ -542,6 +548,7 @@ impl AgentRuntime {
         envelope: &RequestEnvelope,
         correlation: CorrelationId,
     ) -> Result<RequestAdmission<'a>, DispatchError> {
+        let admission_started = Instant::now();
         let admission = lock(&self.coordinator.commit_gate)?;
         let permit = match connection.begin_request(header, envelope, self.unlock_epoch()) {
             Ok(permit) => permit,
@@ -591,7 +598,7 @@ impl AgentRuntime {
             request_id: permit.request_id(),
         };
         let registration = self.coordinator.register(key)?;
-        let deadline = Instant::now()
+        let deadline = admission_started
             .checked_add(Duration::from_millis(u64::from(
                 permit.effective_timeout_ms(),
             )))
@@ -955,7 +962,12 @@ impl AgentRuntime {
         let mut owned = owned_vaults().lock().map_err(|_| DispatchError::Internal)?;
         if self
             .ownership
-            .bind_authenticated(&mut owned, &self.vault_path, &authenticated_ownership)
+            .bind_authenticated(
+                &mut owned,
+                &self.vault_path,
+                &authenticated_ownership,
+                || self.invalidate_idempotency_cache(),
+            )
             .is_err()
         {
             drop(owned);
@@ -1397,6 +1409,16 @@ impl AgentRuntime {
             }
         }
         Ok(best.map_or_else(ExecutionOutcome::failed, ExecutionOutcome::success))
+    }
+
+    fn invalidate_idempotency_cache(&self) -> Result<(), DispatchError> {
+        let mut state = lock(&self.idempotency)?;
+        if !state.in_flight.is_empty() {
+            return Err(DispatchError::Internal);
+        }
+        state.cached.clear();
+        state.insertion_order.clear();
+        Ok(())
     }
 }
 
@@ -1964,6 +1986,47 @@ mod tests {
             (AgentState::Locked, epoch)
         );
         worker.join().expect("snapshot worker");
+    }
+
+    #[test]
+    fn request_deadline_includes_admission_gate_wait() {
+        let directory = TestDirectory::new();
+        let runtime = Arc::new(AgentRuntime::start(directory.vault_path()).expect("runtime"));
+        let client = connection(&runtime, 73);
+        let operation = OperationRequest::Status;
+        let body = operation.encode().expect("status body");
+        let request = RequestEnvelope::new(
+            OperationCode::Status,
+            runtime.unlock_epoch(),
+            50,
+            None,
+            body,
+        )
+        .expect("short status request");
+        let header = FrameHeader::new(
+            MessageKind::Request,
+            CURRENT_VERSION,
+            request.encode().expect("status request bytes").len(),
+            *client.connection_id(),
+            1,
+        )
+        .expect("status header");
+        let commit = lock(&runtime.coordinator.commit_gate).expect("hold admission gate");
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let worker_runtime = Arc::clone(&runtime);
+        let worker = std::thread::spawn(move || {
+            started_tx.send(()).expect("request worker started");
+            worker_runtime.dispatch(&client, &header, &request, copy_response)
+        });
+        started_rx.recv().expect("request worker start");
+        std::thread::sleep(Duration::from_millis(100));
+        drop(commit);
+
+        let response = worker
+            .join()
+            .expect("request worker")
+            .expect("deadline response");
+        assert_eq!(response.error(), Some(PublicErrorCode::DeadlineExceeded));
     }
 
     #[test]
