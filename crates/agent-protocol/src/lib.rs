@@ -35,6 +35,8 @@ pub use types::{
 pub const HEADER_BYTES: usize = 40;
 /// Maximum payload accepted before allocation.
 pub const MAX_PAYLOAD_BYTES: usize = 65_536;
+/// Smallest negotiated payload that can carry a detail-free failure response.
+pub const MIN_NEGOTIATED_PAYLOAD_BYTES: usize = 21;
 /// Maximum discovery descriptor size.
 pub const MAX_ENDPOINT_DESCRIPTOR_BYTES: usize = 4_096;
 /// Version 1 permits no more than four concurrent requests per connection.

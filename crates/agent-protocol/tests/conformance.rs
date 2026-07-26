@@ -2,9 +2,10 @@ use librarian_agent_protocol::{
     AccountFields, AccountView, AgentEvent, AgentState, BeginRequestError, CURRENT_VERSION,
     ClientHello, ClientRole, Connection, ConnectionError, ConnectionLimits, CorrelationId,
     EndpointDescriptor, EventQueue, Frame, FrameError, FrameHeader, MAX_EVENT_QUEUE,
-    MAX_PAYLOAD_BYTES, MessageKind, OperationCode, OperationRequest, ProtocolError,
-    PublicErrorCode, RequestCompletion, RequestEnvelope, ResponseEnvelope, RetryCategory,
-    UNLOCK_TIMEOUT_MS, Version, encode_account, encode_account_summaries,
+    MAX_PAYLOAD_BYTES, MIN_NEGOTIATED_PAYLOAD_BYTES, MessageKind, ORDINARY_TIMEOUT_MS,
+    OperationCode, OperationRequest, ProtocolError, PublicErrorCode, RequestCompletion,
+    RequestEnvelope, ResponseEnvelope, RetryCategory, UNLOCK_TIMEOUT_MS, Version, encode_account,
+    encode_account_summaries,
 };
 use zeroize::Zeroizing;
 
@@ -485,6 +486,73 @@ fn request_ids_cancellation_backpressure_and_epochs_are_deterministic() {
 }
 
 #[test]
+fn first_request_id_must_be_one() {
+    let connection = connection(ClientRole::Desktop);
+    let status = request(OperationCode::Status, 0, None);
+    let header = request_header(2, status.encode().expect("status request").len());
+    assert_eq!(
+        connection.begin_request(&header, &status, 9),
+        Err(BeginRequestError::Connection(ConnectionError::InvalidFrame))
+    );
+    assert!(connection.is_closed());
+}
+
+#[test]
+fn negotiated_payload_limit_bounds_every_response_envelope() {
+    assert_eq!(
+        ConnectionLimits::new(
+            u32::try_from(MIN_NEGOTIATED_PAYLOAD_BYTES - 1).expect("small limit"),
+            1,
+        ),
+        Err(ConnectionError::InvalidLimit)
+    );
+    let limits = ConnectionLimits::new(
+        u32::try_from(MIN_NEGOTIATED_PAYLOAD_BYTES).expect("minimum payload"),
+        1,
+    )
+    .expect("minimum usable limits");
+    let connection = Connection::negotiate(
+        ClientRole::Desktop,
+        BUILD_ID,
+        &hello(ClientRole::Desktop),
+        &[1, 4, 7],
+        SERVER_NONCE,
+        CONNECTION_ID,
+        AgentState::Locked,
+        9,
+        limits,
+    )
+    .expect("minimum payload negotiation")
+    .0;
+    let correlation = CorrelationId::new([0xA9; 16]);
+    let failure = ResponseEnvelope::failure(
+        PublicErrorCode::OperationFailed,
+        RetryCategory::Never,
+        correlation,
+    )
+    .expect("detail-free failure");
+    assert_eq!(
+        failure.encoded_len(),
+        failure.encode().expect("failure encoding").len()
+    );
+    assert_eq!(failure.encoded_len(), MIN_NEGOTIATED_PAYLOAD_BYTES);
+    assert!(connection.response_fits(&failure));
+
+    for body_length in [0, 23, 24, 255, 256] {
+        let response =
+            ResponseEnvelope::success(correlation, Zeroizing::new(vec![0xA5; body_length]))
+                .expect("bounded response");
+        assert_eq!(
+            response.encoded_len(),
+            response.encode().expect("response encoding").len()
+        );
+        if body_length != 0 {
+            assert!(!connection.response_fits(&response));
+        }
+    }
+}
+
+#[test]
 fn password_kdf_and_lock_share_the_transition_deadline_cap() {
     let connection = connection(ClientRole::Desktop);
     for (request_id, operation, idempotency_key) in [
@@ -527,7 +595,9 @@ fn fifth_concurrent_request_is_busy_without_exceeding_the_bound() {
     assert_eq!(connection.in_flight_count(), 4);
     assert_eq!(
         connection.begin_request(&request_header(5, length), &request, 9),
-        Err(BeginRequestError::Busy)
+        Err(BeginRequestError::Busy {
+            effective_timeout_ms: ORDINARY_TIMEOUT_MS,
+        })
     );
     assert_eq!(connection.in_flight_count(), 4);
     for permit in permits {

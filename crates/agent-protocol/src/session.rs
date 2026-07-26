@@ -5,8 +5,9 @@ use std::{
 
 use crate::{
     AgentState, CURRENT_VERSION, ClientHello, ClientRole, FrameHeader,
-    MAX_IN_FLIGHT_PER_CONNECTION, MAX_PAYLOAD_BYTES, MessageKind, OperationCode,
-    PASSKEY_TIMEOUT_MS, RequestEnvelope, ServerHello, UNLOCK_TIMEOUT_MS, Version,
+    MAX_IN_FLIGHT_PER_CONNECTION, MAX_PAYLOAD_BYTES, MIN_NEGOTIATED_PAYLOAD_BYTES, MessageKind,
+    OperationCode, PASSKEY_TIMEOUT_MS, RequestEnvelope, ResponseEnvelope, ServerHello,
+    UNLOCK_TIMEOUT_MS, Version,
 };
 
 /// Bounded number of issued IDs retained to distinguish a completed request
@@ -27,10 +28,9 @@ impl ConnectionLimits {
     ///
     /// Rejects zero or values above the version-1 hard limits.
     pub fn new(maximum_payload_bytes: u32, maximum_in_flight: u8) -> Result<Self, ConnectionError> {
-        if maximum_payload_bytes == 0
-            || usize::try_from(maximum_payload_bytes)
-                .map_or(true, |maximum| maximum > MAX_PAYLOAD_BYTES)
-            || maximum_in_flight == 0
+        if usize::try_from(maximum_payload_bytes).map_or(true, |maximum| {
+            !(MIN_NEGOTIATED_PAYLOAD_BYTES..=MAX_PAYLOAD_BYTES).contains(&maximum)
+        }) || maximum_in_flight == 0
             || usize::from(maximum_in_flight) > MAX_IN_FLIGHT_PER_CONNECTION
         {
             return Err(ConnectionError::InvalidLimit);
@@ -82,7 +82,7 @@ pub enum ConnectionError {
 pub enum BeginRequestError {
     Connection(ConnectionError),
     Unauthorized,
-    Busy,
+    Busy { effective_timeout_ms: u32 },
     StaleEpoch,
     MissingIdempotencyKey,
 }
@@ -257,6 +257,13 @@ impl Connection {
             .map_or(MAX_IN_FLIGHT_PER_CONNECTION, |state| state.in_flight.len())
     }
 
+    /// Returns whether a canonical response respects this connection's
+    /// negotiated payload limit.
+    #[must_use]
+    pub fn response_fits(&self, response: &ResponseEnvelope) -> bool {
+        response.encoded_len() <= self.limits.maximum_payload_bytes as usize
+    }
+
     /// Admits one already framed request after role-first operation peeking and
     /// full canonical request decoding.
     ///
@@ -285,15 +292,17 @@ impl Connection {
         {
             return Err(BeginRequestError::StaleEpoch);
         }
+        let effective_timeout_ms = effective_timeout(request.operation(), request.timeout_ms());
         if state.in_flight.len() >= usize::from(self.limits.maximum_in_flight) {
-            return Err(BeginRequestError::Busy);
+            return Err(BeginRequestError::Busy {
+                effective_timeout_ms,
+            });
         }
-
         let permit = RequestPermit {
             request_id: header.request_id(),
             operation: request.operation(),
             unlock_epoch: request.unlock_epoch(),
-            effective_timeout_ms: effective_timeout(request.operation(), request.timeout_ms()),
+            effective_timeout_ms,
         };
         state
             .in_flight
@@ -397,7 +406,9 @@ impl Connection {
         state: &mut ConnectionState,
         request_id: u64,
     ) -> Result<(), ConnectionError> {
-        if request_id == 0 || request_id <= state.last_request_id {
+        if (state.last_request_id == 0 && request_id != 1)
+            || (state.last_request_id != 0 && request_id <= state.last_request_id)
+        {
             state.closed = true;
             return Err(ConnectionError::InvalidFrame);
         }

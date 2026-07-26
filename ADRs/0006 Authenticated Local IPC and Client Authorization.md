@@ -478,7 +478,9 @@ authority.
 The server generates the nonzero connection ID in the `ServerHello` header.
 That header carries the selected protocol major and minor and a zero request
 ID. Every subsequent request, response, cancellation, and event carries the
-selected exact version and nonzero connection ID.
+selected exact version and nonzero connection ID. The negotiated payload limit
+applies symmetrically to every request and response envelope. It cannot be
+lower than the 21 bytes required for a canonical detail-free failure.
 
 Version rules:
 
@@ -652,7 +654,13 @@ Version 1 defaults:
 | Event queue per connection | 8 |
 
 All limits apply before unbounded allocation or work. The server may advertise
-lower limits. A client cannot raise them.
+lower limits, subject to the minimum failure-envelope size. A client cannot
+raise them. Before the synchronous transport callback receives any terminal
+response, the agent checks the exact canonical response-envelope length against
+that connection's negotiated limit. An oversized successful body is discarded
+and replaced by detail-free `operation_failed`; an idempotent mutation outcome
+remains cached so a retry over a connection with an adequate limit cannot
+repeat the side effect.
 
 Lock uses the transition deadline because it must cancel and synchronously
 drain both an in-flight password KDF and any local create-vault KDF or generated
@@ -670,7 +678,8 @@ Backpressure is explicit:
 - excess connections are rejected;
 - excess frames receive `busy` only after client authentication and only while
   their admission-wide deadline remains live; capacity discovered after that
-  deadline returns `deadline_exceeded`, not a retryable backoff;
+  deadline returns `deadline_exceeded`, not a retryable backoff, for both
+  per-connection and global capacity;
 - KDF, mutation, and lock transitions are serialized;
 - expensive operations consume bounded global permits;
 - event overflow closes the slow connection rather than retaining unbounded
@@ -699,7 +708,10 @@ After the core authenticates an unlock, the runtime retains the vault mutex
 through extraction of the authenticated cryptographic vault identifier. A lock
 or shutdown that starts in that interval cancels the unlock, waits for the
 guard, clears the session, and produces a terminal lifecycle result rather than
-turning the expected race into a connection-fatal internal error.
+turning the expected race into a connection-fatal internal error. If the
+unlock deadline instead expires while publication waits for the transition
+gate, the runtime clears the session and preserves `deadline_exceeded` rather
+than misreporting cancellation.
 
 Ambiguous completion is failure. A client may retry an idempotent status read
 after reconnecting. A mutating request requires an operation-specific

@@ -5,7 +5,7 @@ use zeroize::Zeroizing;
 
 use crate::{
     AgentState, ClientRole, CorrelationId, MAX_ENDPOINT_DESCRIPTOR_BYTES, MAX_PAYLOAD_BYTES,
-    OperationCode, PublicErrorCode, RetryCategory, Version,
+    MIN_NEGOTIATED_PAYLOAD_BYTES, OperationCode, PublicErrorCode, RetryCategory, Version,
     cbor::{
         SecretWriter, decode_array_length, decode_bounded_bytes, decode_bounded_text,
         decode_fixed_bytes, decode_optional_fixed_bytes, decode_u8, decode_u16, decode_u32,
@@ -217,8 +217,9 @@ impl ServerHello {
             || granted_features.len() > MAX_FEATURES
             || granted_features.windows(2).any(|pair| pair[0] >= pair[1])
             || maximum_payload_bytes == 0
-            || usize::try_from(maximum_payload_bytes)
-                .map_or(true, |maximum| maximum > MAX_PAYLOAD_BYTES)
+            || usize::try_from(maximum_payload_bytes).map_or(true, |maximum| {
+                !(MIN_NEGOTIATED_PAYLOAD_BYTES..=MAX_PAYLOAD_BYTES).contains(&maximum)
+            })
             || maximum_in_flight == 0
             || usize::from(maximum_in_flight) > crate::MAX_IN_FLIGHT_PER_CONNECTION
         {
@@ -594,6 +595,21 @@ impl RequestEnvelope {
     }
 }
 
+fn encoded_byte_string_len(length: usize) -> usize {
+    let header = if length < 24 {
+        1
+    } else if u8::try_from(length).is_ok() {
+        2
+    } else if u16::try_from(length).is_ok() {
+        3
+    } else if u32::try_from(length).is_ok() {
+        5
+    } else {
+        9
+    };
+    header + length
+}
+
 impl fmt::Debug for RequestEnvelope {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -685,6 +701,13 @@ impl ResponseEnvelope {
     #[must_use]
     pub fn body(&self) -> &[u8] {
         &self.body
+    }
+
+    /// Returns the exact canonical payload length without copying the body.
+    #[must_use]
+    pub fn encoded_len(&self) -> usize {
+        const FIXED_BYTES: usize = 20;
+        FIXED_BYTES + encoded_byte_string_len(self.body.len())
     }
 
     /// Encodes directly into a pre-sized zeroizing buffer.

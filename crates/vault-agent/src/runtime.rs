@@ -520,7 +520,10 @@ impl AgentRuntime {
         let correlation = correlation_id()?;
         let context = match self.admit_request(connection, header, envelope, correlation)? {
             RequestAdmission::Admitted(context) => context,
-            RequestAdmission::Rejected(response) => return write_response(&response),
+            RequestAdmission::Rejected(response) => {
+                let response = Self::bounded_response(connection, response, correlation)?;
+                return write_response(&response);
+            }
         };
         let outcome = if context.permit.operation().requires_idempotency_key() {
             let idempotency_key = envelope.idempotency_key().ok_or(DispatchError::Internal)?;
@@ -569,10 +572,18 @@ impl AgentRuntime {
                     correlation,
                 )?));
             }
-            Err(BeginRequestError::Busy) => {
+            Err(BeginRequestError::Busy {
+                effective_timeout_ms,
+            }) => {
+                let deadline = request_deadline(admission_started, effective_timeout_ms)?;
+                let outcome = if Instant::now() >= deadline {
+                    ExecutionOutcome::deadline()
+                } else {
+                    ExecutionOutcome::busy()
+                };
                 return Ok(RequestAdmission::Rejected(ResponseEnvelope::failure(
-                    PublicErrorCode::Busy,
-                    RetryCategory::Backoff,
+                    outcome.error.ok_or(DispatchError::Internal)?,
+                    outcome.retry,
                     correlation,
                 )?));
             }
@@ -592,11 +603,7 @@ impl AgentRuntime {
             }
             Err(BeginRequestError::Connection(error)) => return Err(error.into()),
         };
-        let deadline = admission_started
-            .checked_add(Duration::from_millis(u64::from(
-                permit.effective_timeout_ms(),
-            )))
-            .ok_or(DispatchError::Internal)?;
+        let deadline = request_deadline(admission_started, permit.effective_timeout_ms())?;
 
         let Some(global) =
             CounterPermit::acquire(&self.coordinator.global_in_flight, MAX_IN_FLIGHT_GLOBAL)
@@ -734,9 +741,30 @@ impl AgentRuntime {
             outcome = ExecutionOutcome::success(encode_status(self.state(), self.unlock_epoch())?);
         }
         let response = outcome.into_response(context.correlation)?;
+        let response = Self::bounded_response(context.connection, response, context.correlation)?;
         let write_result = write_response(&response);
         drop(context);
         write_result
+    }
+
+    fn bounded_response(
+        connection: &Connection,
+        response: ResponseEnvelope,
+        correlation: CorrelationId,
+    ) -> Result<ResponseEnvelope, DispatchError> {
+        if connection.response_fits(&response) {
+            return Ok(response);
+        }
+        drop(response);
+        let failure = ResponseEnvelope::failure(
+            PublicErrorCode::OperationFailed,
+            RetryCategory::Never,
+            correlation,
+        )?;
+        if !connection.response_fits(&failure) {
+            return Err(DispatchError::Connection(ConnectionError::InvalidLimit));
+        }
+        Ok(failure)
     }
 
     fn outcome_is_still_authorized(
@@ -1003,12 +1031,16 @@ impl AgentRuntime {
         let _commit = lock(&self.coordinator.commit_gate)?;
         if self.coordinator.lock_active.load(Ordering::Acquire)
             || registration.cancellation.is_cancelled()
-            || Instant::now() >= deadline
             || self.state() != AgentState::Unlocking
         {
             lock(&self.vault)?.lock();
             self.set_locked_unless_shutting_down();
             return Ok(ExecutionOutcome::cancelled());
+        }
+        if Instant::now() >= deadline {
+            lock(&self.vault)?.lock();
+            self.set_locked_unless_shutting_down();
+            return Ok(ExecutionOutcome::deadline());
         }
         let Some(authenticated_ownership) = authenticated_ownership else {
             lock(&self.vault)?.lock();
@@ -1709,6 +1741,12 @@ fn correlation_id() -> Result<CorrelationId, DispatchError> {
     Ok(CorrelationId::new(bytes))
 }
 
+fn request_deadline(started: Instant, effective_timeout_ms: u32) -> Result<Instant, DispatchError> {
+    started
+        .checked_add(Duration::from_millis(u64::from(effective_timeout_ms)))
+        .ok_or(DispatchError::Internal)
+}
+
 fn should_cache(outcome: &ExecutionOutcome) -> bool {
     outcome.error.is_none()
         || matches!(
@@ -1877,6 +1915,14 @@ mod tests {
     }
 
     fn connection(runtime: &AgentRuntime, marker: u8) -> Connection {
+        connection_with_limits(runtime, marker, ConnectionLimits::default())
+    }
+
+    fn connection_with_limits(
+        runtime: &AgentRuntime,
+        marker: u8,
+        limits: ConnectionLimits,
+    ) -> Connection {
         let (state, epoch) = runtime
             .status_snapshot()
             .expect("handshake status snapshot");
@@ -1898,7 +1944,7 @@ mod tests {
             [marker.wrapping_add(2); 16],
             state,
             epoch,
-            ConnectionLimits::default(),
+            limits,
         )
         .expect("connection")
         .0
@@ -2111,6 +2157,48 @@ mod tests {
         drop(FlagPermit::take_over_active(
             &runtime.coordinator.lock_active,
         ));
+        assert_eq!(runtime.state(), AgentState::Locked);
+    }
+
+    #[test]
+    fn unlock_publication_preserves_deadline_expiry() {
+        let directory = TestDirectory::new();
+        let runtime = Arc::new(AgentRuntime::start(directory.vault_path()).expect("runtime"));
+        runtime
+            .state
+            .store(AgentState::Unlocking as u8, Ordering::Release);
+        let registration = runtime
+            .coordinator
+            .register(RequestKey {
+                connection_id: [0x83; 16],
+                request_id: 1,
+            })
+            .expect("unlock registration");
+        let commit = lock(&runtime.coordinator.commit_gate).expect("hold publication gate");
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let worker_runtime = Arc::clone(&runtime);
+        let worker = std::thread::spawn(move || {
+            started_tx.send(()).expect("publication worker started");
+            worker_runtime.publish_authenticated_unlock(
+                None,
+                [0x83; 16],
+                &registration,
+                Instant::now() + Duration::from_millis(50),
+            )
+        });
+        started_rx.recv().expect("publication worker start");
+        std::thread::sleep(Duration::from_millis(100));
+        drop(commit);
+        let outcome = worker
+            .join()
+            .expect("publication worker")
+            .expect("deadline outcome");
+        assert_eq!(
+            outcome.error,
+            Some(PublicErrorCode::DeadlineExceeded),
+            "deadline expiry at publication must not be reported as cancellation"
+        );
+        assert_eq!(outcome.retry, RetryCategory::Never);
         assert_eq!(runtime.state(), AgentState::Locked);
     }
 
@@ -2446,6 +2534,80 @@ mod tests {
     }
 
     #[test]
+    fn expired_admission_reports_deadline_when_connection_capacity_is_full() {
+        let directory = TestDirectory::new();
+        let runtime = Arc::new(AgentRuntime::start(directory.vault_path()).expect("runtime"));
+        let client = Arc::new(connection(&runtime, 79));
+        let operation = OperationRequest::Status;
+        let body = operation.encode().expect("status body");
+        let ordinary_request = RequestEnvelope::new(
+            OperationCode::Status,
+            runtime.unlock_epoch(),
+            5_000,
+            None,
+            Zeroizing::new(body.to_vec()),
+        )
+        .expect("ordinary status request");
+        let ordinary_length = ordinary_request
+            .encode()
+            .expect("ordinary status request bytes")
+            .len();
+        let active: Vec<_> = (1..=4)
+            .map(|request_id| {
+                let header = FrameHeader::new(
+                    MessageKind::Request,
+                    CURRENT_VERSION,
+                    ordinary_length,
+                    *client.connection_id(),
+                    request_id,
+                )
+                .expect("active status header");
+                client
+                    .begin_request(&header, &ordinary_request, runtime.unlock_epoch())
+                    .expect("fill per-connection capacity")
+            })
+            .collect();
+
+        let request = RequestEnvelope::new(
+            OperationCode::Status,
+            runtime.unlock_epoch(),
+            50,
+            None,
+            body,
+        )
+        .expect("short status request");
+        let header = FrameHeader::new(
+            MessageKind::Request,
+            CURRENT_VERSION,
+            request.encode().expect("status request bytes").len(),
+            *client.connection_id(),
+            5,
+        )
+        .expect("status header");
+        let commit = lock(&runtime.coordinator.commit_gate).expect("hold admission gate");
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let worker_runtime = Arc::clone(&runtime);
+        let worker_client = Arc::clone(&client);
+        let worker = std::thread::spawn(move || {
+            started_tx.send(()).expect("request worker started");
+            worker_runtime.dispatch(&worker_client, &header, &request, copy_response)
+        });
+        started_rx.recv().expect("request worker start");
+        std::thread::sleep(Duration::from_millis(100));
+        drop(commit);
+
+        let response = worker
+            .join()
+            .expect("request worker")
+            .expect("deadline response");
+        assert_eq!(response.error(), Some(PublicErrorCode::DeadlineExceeded));
+        assert_eq!(response.retry(), RetryCategory::Never);
+        for permit in active {
+            client.finish(permit).expect("release active request");
+        }
+    }
+
+    #[test]
     fn authenticated_not_found_rechecks_terminal_authorization() {
         let directory = TestDirectory::new();
         let runtime = AgentRuntime::start(directory.vault_path()).expect("runtime");
@@ -2602,6 +2764,58 @@ mod tests {
             .expect("terminal response");
         assert_eq!(stale.error(), Some(PublicErrorCode::Locked));
         assert!(stale.body().is_empty());
+    }
+
+    #[test]
+    fn terminal_responses_honor_the_negotiated_connection_payload_limit() {
+        let directory = TestDirectory::new();
+        let runtime = AgentRuntime::start(directory.vault_path()).expect("runtime");
+        runtime
+            .state
+            .store(AgentState::Unlocked as u8, Ordering::Release);
+        let limit = 96_u32;
+        let client = connection_with_limits(
+            &runtime,
+            82,
+            ConnectionLimits::new(limit, 4).expect("small connection limit"),
+        );
+        let (_request, _header, permit) = admitted_request(
+            &runtime,
+            &client,
+            1,
+            &OperationRequest::GetAccount { id: [0x82; 16] },
+        );
+        let registration = runtime
+            .coordinator
+            .register(RequestKey {
+                connection_id: *client.connection_id(),
+                request_id: 1,
+            })
+            .expect("registration");
+        let response = runtime
+            .finish_dispatch(
+                DispatchContext {
+                    connection: &client,
+                    permit,
+                    _global: CounterPermit::acquire(
+                        &runtime.coordinator.global_in_flight,
+                        MAX_IN_FLIGHT_GLOBAL,
+                    )
+                    .expect("global permit"),
+                    registration,
+                    deadline: Instant::now() + Duration::from_secs(1),
+                    correlation: CorrelationId::new([0x82; 16]),
+                },
+                ExecutionOutcome::success(Zeroizing::new(vec![0xA5; 256])),
+                copy_response,
+            )
+            .expect("bounded terminal response");
+        assert_eq!(response.error(), Some(PublicErrorCode::OperationFailed));
+        assert!(response.body().is_empty());
+        assert!(
+            response.encode().expect("response encoding").len()
+                <= usize::try_from(limit).expect("payload limit")
+        );
     }
 
     #[test]
