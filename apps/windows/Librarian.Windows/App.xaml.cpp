@@ -23,7 +23,10 @@ namespace winrt::Librarian::Windows::implementation
 
     void App::OnLaunched([[maybe_unused]] LaunchActivatedEventArgs const& event)
     {
-        window = make<MainWindow>();
+        if (!window)
+        {
+            window = make<MainWindow>();
+        }
         window.Activate();
     }
 }

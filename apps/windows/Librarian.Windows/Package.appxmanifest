@@ -33,7 +33,7 @@
       EntryPoint="$targetentrypoint$">
       <uap:VisualElements
         DisplayName="Librarian"
-        Description="Librarian Windows MVP foundation"
+        Description="Librarian local vault"
         BackgroundColor="transparent"
         Square150x150Logo="Assets\Square150x150Logo.png"
         Square44x44Logo="Assets\Square44x44Logo.png">

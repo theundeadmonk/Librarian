@@ -267,6 +267,22 @@ Invoke-CheckedProcess `
     -Arguments @("--self-test") `
     -WorkingDirectory $repoRoot
 
+$windowsShellTests = Join-Path $repoRoot (
+    "artifacts\bin\$Platform\$Configuration\Librarian.WindowsShellTests.exe"
+)
+if (-not (Test-Path $windowsShellTests)) {
+    throw "The Windows shell tests were not built at '$windowsShellTests'."
+}
+
+Invoke-CheckedProcess `
+    -Label "Windows shell model and XAML smoke tests" `
+    -FilePath $windowsShellTests `
+    -Arguments @(
+        "--xaml"
+        "apps\windows\Librarian.Windows\MainWindow.xaml"
+    ) `
+    -WorkingDirectory $repoRoot
+
 $gitMetadata = Join-Path $repoRoot ".git"
 $usesWslWorktreeMetadata = (Test-Path $gitMetadata -PathType Leaf) -and
     ((Get-Content -Raw $gitMetadata) -match "^gitdir:\s+/")

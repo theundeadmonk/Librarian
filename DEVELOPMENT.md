@@ -52,6 +52,28 @@ powershell.exe -NoProfile -File .\scripts\build.ps1 -Configuration Release -Plat
 Build outputs and diagnostic logs are written beneath `artifacts/` or the component-specific ignored output directories. Native artifacts are unsigned; production MSIX generation and signing are deferred to issue #19.
 On a normal Windows checkout, the build also checks whitespace in the committed branch diff, the index, and the working tree. GitHub Actions supplies the pull request or push base commit explicitly.
 
+## Interactive Windows shell smoke test
+
+After a successful Release build, run the packaged WinUI shell smoke test from
+an interactive Windows desktop:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\test-windows-shell-ui.ps1 -Configuration Release -Platform x64
+```
+
+The smoke test uses the generated loose package layout, starts Librarian
+through its package application ID, and verifies the fail-closed state, retry
+action, accessibility tree, and initial keyboard focus. It refuses to replace a
+development package registered from another location. If it creates the loose
+registration, it removes that registration when the test finishes; an existing
+registration for the same build layout is preserved.
+
+Developer Mode and the matching Windows App Runtime are required. The official
+runtime installer is available from the
+[Windows App SDK downloads](https://learn.microsoft.com/windows/apps/windows-app-sdk/downloads)
+page. Loose registration is for development testing only and does not replace
+the signed MSIX validation planned for issue #19.
+
 Windows is the authoritative MVP build and remains responsible for the native
 application, passkey provider, packaging boundary, and Windows-specific
 filesystem behavior. CI also formats, lints, and tests every Rust workspace

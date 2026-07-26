@@ -4,3 +4,345 @@
 #if __has_include("MainWindow.g.cpp")
 #include "MainWindow.g.cpp"
 #endif
+
+#include <string>
+#include <utility>
+
+using namespace winrt;
+using namespace Microsoft::UI::Xaml;
+using namespace Microsoft::UI::Xaml::Controls;
+
+namespace winrt::Librarian::Windows::implementation
+{
+    namespace
+    {
+        Visibility VisibleWhen(bool const value)
+        {
+            return value ? Visibility::Visible : Visibility::Collapsed;
+        }
+
+        hstring TitleFor(librarian::windows::ShellState const state)
+        {
+            using librarian::windows::ShellState;
+
+            switch (state)
+            {
+            case ShellState::FirstRun:
+                return L"First-run setup";
+            case ShellState::Locked:
+                return L"Vault locked";
+            case ShellState::Unlocking:
+                return L"Working securely";
+            case ShellState::Unlocked:
+                return L"Accounts";
+            case ShellState::Error:
+                return L"Librarian needs attention";
+            case ShellState::AgentUnavailable:
+                return L"Vault agent unavailable";
+            }
+
+            return L"Librarian";
+        }
+    }
+
+    MainWindow::MainWindow() :
+        view_model_(librarian::windows::MakeDesktopClient())
+    {
+        InitializeComponent();
+        view_model_.Initialize();
+        Render();
+    }
+
+    void MainWindow::OnLoaded(
+        [[maybe_unused]] IInspectable const& sender,
+        [[maybe_unused]] RoutedEventArgs const& event)
+    {
+        is_loaded_ = true;
+        FocusCurrentState();
+    }
+
+    void MainWindow::OnClosed(
+        [[maybe_unused]] IInspectable const& sender,
+        [[maybe_unused]] WindowEventArgs const& event)
+    {
+        is_closed_.store(true, std::memory_order_release);
+    }
+
+    fire_and_forget MainWindow::OnCreateVaultClicked(
+        [[maybe_unused]] IInspectable const& sender,
+        [[maybe_unused]] RoutedEventArgs const& event)
+    {
+        auto lifetime = get_strong();
+        auto const dispatcher = DispatcherQueue();
+        librarian::windows::SecretText password{ SetupPasswordBox().Password() };
+        {
+            librarian::windows::SecretText confirmation{ ConfirmPasswordBox().Password() };
+            ClearSetupPasswords();
+
+            if (password.empty())
+            {
+                StateDescriptionTextBlock().Text(
+                    L"Enter a master password to create the vault.");
+                SetupPasswordBox().Focus(FocusState::Programmatic);
+                co_return;
+            }
+
+            if (password.value() != confirmation.value())
+            {
+                StateDescriptionTextBlock().Text(L"The master passwords do not match.");
+                SetupPasswordBox().Focus(FocusState::Programmatic);
+                co_return;
+            }
+        }
+
+        if (!view_model_.BeginCreate())
+        {
+            co_return;
+        }
+
+        Render();
+        co_await resume_background();
+        lifetime->view_model_.CompleteCreate(password);
+        if (lifetime->is_closed_.load(std::memory_order_acquire))
+        {
+            co_return;
+        }
+        if (!dispatcher.TryEnqueue([lifetime]
+        {
+            lifetime->RenderSecurityTransitionIfOpen();
+        }))
+        {
+            co_return;
+        }
+    }
+
+    fire_and_forget MainWindow::OnUnlockClicked(
+        [[maybe_unused]] IInspectable const& sender,
+        [[maybe_unused]] RoutedEventArgs const& event)
+    {
+        auto lifetime = get_strong();
+        auto const dispatcher = DispatcherQueue();
+        librarian::windows::SecretText password{ MasterPasswordBox().Password() };
+        MasterPasswordBox().Password(L"");
+
+        if (password.empty())
+        {
+            StateDescriptionTextBlock().Text(L"Enter your master password to unlock the vault.");
+            MasterPasswordBox().Focus(FocusState::Programmatic);
+            co_return;
+        }
+
+        if (!view_model_.BeginUnlock())
+        {
+            co_return;
+        }
+
+        Render();
+        co_await resume_background();
+        lifetime->view_model_.CompleteUnlock(password);
+        if (lifetime->is_closed_.load(std::memory_order_acquire))
+        {
+            co_return;
+        }
+        if (!dispatcher.TryEnqueue([lifetime]
+        {
+            lifetime->RenderSecurityTransitionIfOpen();
+        }))
+        {
+            co_return;
+        }
+    }
+
+    void MainWindow::OnLockClicked(
+        [[maybe_unused]] IInspectable const& sender,
+        [[maybe_unused]] RoutedEventArgs const& event)
+    {
+        view_model_.Lock();
+        Render();
+    }
+
+    void MainWindow::OnRetryClicked(
+        [[maybe_unused]] IInspectable const& sender,
+        [[maybe_unused]] RoutedEventArgs const& event)
+    {
+        view_model_.Retry();
+        Render();
+    }
+
+    void MainWindow::OnNewAccountClicked(
+        [[maybe_unused]] IInspectable const& sender,
+        [[maybe_unused]] RoutedEventArgs const& event)
+    {
+        view_model_.ShowAccountEditor();
+        Render();
+        ServiceNameTextBox().Focus(FocusState::Programmatic);
+    }
+
+    void MainWindow::OnCancelAccountClicked(
+        [[maybe_unused]] IInspectable const& sender,
+        [[maybe_unused]] RoutedEventArgs const& event)
+    {
+        view_model_.CancelAccountEditor();
+        ClearAccountEditor();
+        Render();
+    }
+
+    void MainWindow::OnSaveAccountClicked(
+        [[maybe_unused]] IInspectable const& sender,
+        [[maybe_unused]] RoutedEventArgs const& event)
+    {
+        librarian::windows::SecretText password{ AccountPasswordBox().Password() };
+        AccountPasswordBox().Password(L"");
+
+        librarian::windows::AccountDraft account{
+            std::wstring{ ServiceNameTextBox().Text() },
+            std::wstring{ OriginTextBox().Text() },
+            std::wstring{ UsernameTextBox().Text() },
+            std::move(password),
+        };
+
+        view_model_.SaveAccount(account);
+        if (!view_model_.IsAccountEditorVisible())
+        {
+            ClearAccountEditor();
+        }
+        Render();
+    }
+
+    void MainWindow::Render()
+    {
+        using librarian::windows::ShellState;
+
+        auto const state = view_model_.State();
+        StateTitleTextBlock().Text(TitleFor(state));
+        StateDescriptionTextBlock().Text(view_model_.Message());
+        StateDescriptionTextBlock().Visibility(
+            VisibleWhen(!view_model_.Message().empty()));
+
+        FirstRunPanel().Visibility(VisibleWhen(state == ShellState::FirstRun));
+        LockedPanel().Visibility(VisibleWhen(state == ShellState::Locked));
+        UnlockingPanel().Visibility(VisibleWhen(state == ShellState::Unlocking));
+        UnlockedPanel().Visibility(VisibleWhen(state == ShellState::Unlocked));
+        ErrorPanel().Visibility(VisibleWhen(state == ShellState::Error));
+        AgentUnavailablePanel().Visibility(
+            VisibleWhen(state == ShellState::AgentUnavailable));
+
+        UnlockingProgressRing().IsActive(state == ShellState::Unlocking);
+        AccountEditorPanel().Visibility(
+            VisibleWhen(view_model_.IsAccountEditorVisible()));
+
+        if (state == ShellState::Error)
+        {
+            ErrorInfoBar().Message(view_model_.Message());
+        }
+
+        if (state == ShellState::Unlocked)
+        {
+            RenderAccounts();
+        }
+        else
+        {
+            AccountsListView().Items().Clear();
+            ClearAccountEditor();
+        }
+
+        if (is_loaded_)
+        {
+            FocusCurrentState();
+        }
+    }
+
+    void MainWindow::RenderAccounts()
+    {
+        auto const& accounts = view_model_.Accounts();
+        AccountsListView().Items().Clear();
+        EmptyAccountsTextBlock().Visibility(VisibleWhen(accounts.empty()));
+        AccountsListView().Visibility(VisibleWhen(!accounts.empty()));
+
+        for (auto const& account : accounts)
+        {
+            auto details = StackPanel();
+            details.Spacing(2);
+
+            auto service_name = TextBlock();
+            service_name.Text(account.service_name);
+            service_name.Style(
+                Application::Current().Resources().Lookup(
+                    box_value(L"BodyStrongTextBlockStyle")).as<Style>());
+            details.Children().Append(service_name);
+
+            auto origin = TextBlock();
+            origin.Text(account.origin);
+            origin.TextWrapping(TextWrapping::Wrap);
+            details.Children().Append(origin);
+
+            auto username = TextBlock();
+            username.Text(account.username);
+            username.TextWrapping(TextWrapping::Wrap);
+            details.Children().Append(username);
+
+            auto item = ListViewItem();
+            item.Content(details);
+            item.IsTabStop(false);
+            AccountsListView().Items().Append(item);
+        }
+    }
+
+    void MainWindow::FocusCurrentState()
+    {
+        using librarian::windows::ShellState;
+
+        switch (view_model_.State())
+        {
+        case ShellState::FirstRun:
+            SetupPasswordBox().Focus(FocusState::Programmatic);
+            break;
+        case ShellState::Locked:
+            MasterPasswordBox().Focus(FocusState::Programmatic);
+            break;
+        case ShellState::Unlocking:
+            UnlockingProgressRing().Focus(FocusState::Programmatic);
+            break;
+        case ShellState::Unlocked:
+            if (view_model_.IsAccountEditorVisible())
+            {
+                ServiceNameTextBox().Focus(FocusState::Programmatic);
+            }
+            else
+            {
+                AddAccountButton().Focus(FocusState::Programmatic);
+            }
+            break;
+        case ShellState::Error:
+            ErrorRetryButton().Focus(FocusState::Programmatic);
+            break;
+        case ShellState::AgentUnavailable:
+            AgentUnavailableRetryButton().Focus(FocusState::Programmatic);
+            break;
+        }
+    }
+
+    void MainWindow::RenderSecurityTransitionIfOpen()
+    {
+        if (is_closed_.load(std::memory_order_acquire))
+        {
+            return;
+        }
+
+        Render();
+    }
+
+    void MainWindow::ClearSetupPasswords()
+    {
+        SetupPasswordBox().Password(L"");
+        ConfirmPasswordBox().Password(L"");
+    }
+
+    void MainWindow::ClearAccountEditor()
+    {
+        ServiceNameTextBox().Text(L"");
+        OriginTextBox().Text(L"");
+        UsernameTextBox().Text(L"");
+        AccountPasswordBox().Password(L"");
+    }
+}
