@@ -159,7 +159,7 @@ namespace
     {
         if (model.BeginInitialize())
         {
-            model.CompleteInitialize();
+            model.CompleteInitialize(model.ExecuteStatusRequest());
         }
     }
 
@@ -214,7 +214,11 @@ namespace
         test.Check(model.State() == ShellState::Unlocking, "unlocking is a distinct state");
 
         SecretText password{ L"disposable unlock" };
-        model.CompleteUnlock(password);
+        auto unlock_outcome = model.ExecuteUnlockRequest(password);
+        test.Check(
+            model.State() == ShellState::Unlocking,
+            "worker-side unlock I/O does not mutate the UI model");
+        model.CompleteUnlock(std::move(unlock_outcome));
 
         test.Check(client->password_matched, "unlock forwards the typed secret without storing it");
         test.Check(client->unlock_calls == 1, "unlock is submitted exactly once");
@@ -231,7 +235,11 @@ namespace
         test.Check(
             model.Accounts().empty(),
             "lock intent hides account summaries before the client call");
-        model.CompleteLock();
+        auto lock_outcome = model.ExecuteLockRequest();
+        test.Check(
+            model.IsLockRequestPending(),
+            "worker-side lock I/O leaves completion on the UI model");
+        model.CompleteLock(std::move(lock_outcome));
         test.Check(
             !model.IsLockRequestPending(),
             "completed lock no longer reports an in-flight request");
@@ -250,7 +258,7 @@ namespace
             test.Check(model.BeginUnlock(), "failed unlock starts from locked state");
 
             SecretText password{ L"do-not-render-this-value" };
-            model.CompleteUnlock(password);
+            model.CompleteUnlock(model.ExecuteUnlockRequest(password));
 
             test.Check(
                 model.State() == ShellState::Locked,
@@ -269,7 +277,7 @@ namespace
             test.Check(model.BeginUnlock(), "unexpected unlock begins from locked state");
 
             SecretText password{ L"disposable unexpected failure" };
-            model.CompleteUnlock(password);
+            model.CompleteUnlock(model.ExecuteUnlockRequest(password));
 
             test.Check(
                 model.State() == ShellState::Error,
@@ -288,7 +296,7 @@ namespace
         test.Check(model.State() == ShellState::Unlocking, "vault creation uses the busy security state");
 
         SecretText setup_password{ L"disposable setup" };
-        model.CompleteCreate(setup_password);
+        model.CompleteCreate(model.ExecuteCreateRequest(setup_password));
         test.Check(client->password_matched, "vault creation forwards the typed secret");
         test.Check(model.State() == ShellState::Unlocked, "created vault opens account management");
 
@@ -304,7 +312,7 @@ namespace
         };
         test.Check(model.BeginSaveAccount(), "account editor begins saving");
         test.Check(model.State() == ShellState::Saving, "account save uses a busy state");
-        model.CompleteSaveAccount(draft);
+        model.CompleteSaveAccount(model.ExecuteSaveAccountRequest(draft));
 
         test.Check(client->password_matched, "account editor forwards its password as secret text");
         test.Check(client->save_calls == 1, "account editor submits exactly once");
@@ -331,7 +339,7 @@ namespace
             test.Check(model.BeginUnlock(), "cancelled unlock begins from locked state");
 
             SecretText password{ L"disposable cancelled unlock" };
-            model.CompleteUnlock(password);
+            model.CompleteUnlock(model.ExecuteUnlockRequest(password));
 
             test.Check(
                 model.State() == ShellState::Locked,
@@ -347,7 +355,7 @@ namespace
             InitializeModel(model);
 
             test.Check(model.BeginLock(), "cancelled lock begins from the unlocked state");
-            model.CompleteLock();
+            model.CompleteLock(model.ExecuteLockRequest());
 
             test.Check(
                 model.State() == ShellState::Error,
@@ -364,7 +372,7 @@ namespace
             test.Check(
                 model.State() == ShellState::Unlocking,
                 "lock retry remains in the busy fail-closed state");
-            model.CompleteRetry();
+            model.CompleteRetry(model.ExecuteLockRequest());
 
             test.Check(
                 !model.IsLockRequestPending(),
@@ -396,7 +404,7 @@ namespace
                 SecretText{ L"disposable cancelled save" },
             };
             test.Check(model.BeginSaveAccount(), "cancelled save begins from the editor");
-            model.CompleteSaveAccount(draft);
+            model.CompleteSaveAccount(model.ExecuteSaveAccountRequest(draft));
 
             test.Check(
                 model.State() == ShellState::Unlocked,
@@ -438,7 +446,7 @@ namespace
 
         model.Close();
         SecretText password{ L"must not be observed after close" };
-        model.CompleteUnlock(password);
+        model.CompleteUnlock(model.ExecuteUnlockRequest(password));
 
         test.Check(
             client->close_calls == 1,
@@ -519,6 +527,13 @@ namespace
             "lifetime->CloseDesktopClient();",
             "FocusManager::",
             "GetFocusedElement(lifetime->RootLayout().XamlRoot())",
+            "dispatcher.TryEnqueue([lifetime, outcome]",
+            "CompleteInitialize(std::move(*outcome))",
+            "CompleteCreate(std::move(*outcome))",
+            "CompleteUnlock(std::move(*outcome))",
+            "CompleteLock(std::move(*outcome))",
+            "CompleteRetry(std::move(*outcome))",
+            "CompleteSaveAccount(std::move(*outcome))",
             "fire_and_forget MainWindow::OnLoaded",
             "fire_and_forget MainWindow::OnLockClicked",
             "fire_and_forget MainWindow::OnRetryClicked",

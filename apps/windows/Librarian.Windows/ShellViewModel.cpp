@@ -51,9 +51,9 @@ namespace librarian::windows
         return BeginStatusRequest(PendingAction::Initialize);
     }
 
-    void ShellViewModel::CompleteInitialize()
+    void ShellViewModel::CompleteInitialize(ShellRequestOutcome outcome)
     {
-        CompleteStatusRequest(PendingAction::Initialize);
+        CompleteStatusRequest(PendingAction::Initialize, std::move(outcome));
     }
 
     bool ShellViewModel::BeginRetry()
@@ -71,15 +71,15 @@ namespace librarian::windows
         return BeginStatusRequest(PendingAction::RetryStatus);
     }
 
-    void ShellViewModel::CompleteRetry()
+    void ShellViewModel::CompleteRetry(ShellRequestOutcome outcome)
     {
         if (pending_action_ == PendingAction::Lock)
         {
-            CompleteLock();
+            CompleteLock(std::move(outcome));
             return;
         }
 
-        CompleteStatusRequest(PendingAction::RetryStatus);
+        CompleteStatusRequest(PendingAction::RetryStatus, std::move(outcome));
     }
 
     bool ShellViewModel::BeginCreate()
@@ -96,7 +96,7 @@ namespace librarian::windows
         return true;
     }
 
-    void ShellViewModel::CompleteCreate(SecretText const& master_password)
+    void ShellViewModel::CompleteCreate(ShellRequestOutcome outcome)
     {
         if (pending_action_ != PendingAction::Create)
         {
@@ -104,21 +104,7 @@ namespace librarian::windows
         }
 
         pending_action_ = PendingAction::None;
-        if (master_password.empty())
-        {
-            state_ = ShellState::Error;
-            message_ = UnexpectedMessage;
-            return;
-        }
-
-        try
-        {
-            Apply(client_->CreateVault(master_password));
-        }
-        catch (...)
-        {
-            ApplyError(ClientError::Unexpected);
-        }
+        Apply(std::move(outcome));
     }
 
     bool ShellViewModel::BeginUnlock()
@@ -135,7 +121,7 @@ namespace librarian::windows
         return true;
     }
 
-    void ShellViewModel::CompleteUnlock(SecretText const& master_password)
+    void ShellViewModel::CompleteUnlock(ShellRequestOutcome outcome)
     {
         if (pending_action_ != PendingAction::Unlock)
         {
@@ -143,21 +129,7 @@ namespace librarian::windows
         }
 
         pending_action_ = PendingAction::None;
-        if (master_password.empty())
-        {
-            state_ = ShellState::Error;
-            message_ = InvalidCredentialsMessage;
-            return;
-        }
-
-        try
-        {
-            Apply(client_->Unlock(master_password));
-        }
-        catch (...)
-        {
-            ApplyError(ClientError::Unexpected);
-        }
+        Apply(std::move(outcome));
     }
 
     bool ShellViewModel::BeginLock()
@@ -173,7 +145,7 @@ namespace librarian::windows
         return BeginLockRequest();
     }
 
-    void ShellViewModel::CompleteLock()
+    void ShellViewModel::CompleteLock(ShellRequestOutcome outcome)
     {
         if (pending_action_ != PendingAction::Lock)
         {
@@ -181,25 +153,18 @@ namespace librarian::windows
         }
 
         pending_action_ = PendingAction::None;
-        try
+        auto const& result = outcome.request;
+        if (
+            (result.error == ClientError::None &&
+                result.status == VaultStatus::Locked) ||
+            result.error == ClientError::Locked)
         {
-            auto const result = client_->Lock();
-            if (
-                (result.error == ClientError::None &&
-                    result.status == VaultStatus::Locked) ||
-                result.error == ClientError::Locked)
-            {
-                lock_intent_pending_ = false;
-                SetVaultStatus(VaultStatus::Locked);
-                return;
-            }
+            lock_intent_pending_ = false;
+            SetVaultStatus(VaultStatus::Locked);
+            return;
+        }
 
-            ApplyLockFailure(result.error);
-        }
-        catch (...)
-        {
-            ApplyLockFailure(ClientError::Unexpected);
-        }
+        ApplyLockFailure(result.error);
     }
 
     void ShellViewModel::ShowAccountEditor()
@@ -229,7 +194,7 @@ namespace librarian::windows
         return true;
     }
 
-    void ShellViewModel::CompleteSaveAccount(AccountDraft const& account)
+    void ShellViewModel::CompleteSaveAccount(ShellRequestOutcome outcome)
     {
         if (pending_action_ != PendingAction::SaveAccount)
         {
@@ -237,18 +202,86 @@ namespace librarian::windows
         }
 
         pending_action_ = PendingAction::None;
+        if (outcome.request.error == ClientError::None)
+        {
+            account_editor_visible_ = false;
+        }
+        Apply(std::move(outcome));
+    }
+
+    ShellRequestOutcome ShellViewModel::ExecuteStatusRequest() const
+    {
         try
         {
-            auto const result = client_->SaveAccount(account);
-            if (result.error == ClientError::None)
-            {
-                account_editor_visible_ = false;
-            }
-            Apply(result);
+            return AddAccountRefresh(client_->GetStatus());
         }
         catch (...)
         {
-            ApplyError(ClientError::Unexpected);
+            return { { ClientError::Unexpected, VaultStatus::Locked }, std::nullopt };
+        }
+    }
+
+    ShellRequestOutcome ShellViewModel::ExecuteCreateRequest(
+        SecretText const& master_password) const
+    {
+        if (master_password.empty())
+        {
+            return { { ClientError::Unexpected, VaultStatus::Locked }, std::nullopt };
+        }
+
+        try
+        {
+            return AddAccountRefresh(client_->CreateVault(master_password));
+        }
+        catch (...)
+        {
+            return { { ClientError::Unexpected, VaultStatus::Locked }, std::nullopt };
+        }
+    }
+
+    ShellRequestOutcome ShellViewModel::ExecuteUnlockRequest(
+        SecretText const& master_password) const
+    {
+        if (master_password.empty())
+        {
+            return {
+                { ClientError::InvalidCredentials, VaultStatus::Locked },
+                std::nullopt,
+            };
+        }
+
+        try
+        {
+            return AddAccountRefresh(client_->Unlock(master_password));
+        }
+        catch (...)
+        {
+            return { { ClientError::Unexpected, VaultStatus::Locked }, std::nullopt };
+        }
+    }
+
+    ShellRequestOutcome ShellViewModel::ExecuteLockRequest() const
+    {
+        try
+        {
+            return { client_->Lock(), std::nullopt };
+        }
+        catch (...)
+        {
+            return { { ClientError::Unexpected, VaultStatus::Locked }, std::nullopt };
+        }
+    }
+
+    ShellRequestOutcome ShellViewModel::ExecuteSaveAccountRequest(
+        AccountDraft const& account) const
+    {
+        try
+        {
+            return AddAccountRefresh(client_->SaveAccount(account));
+        }
+        catch (...)
+        {
+            return { { ClientError::Unexpected, VaultStatus::Locked }, std::nullopt };
         }
     }
 
@@ -298,7 +331,9 @@ namespace librarian::windows
         return true;
     }
 
-    void ShellViewModel::CompleteStatusRequest(PendingAction const action)
+    void ShellViewModel::CompleteStatusRequest(
+        PendingAction const action,
+        ShellRequestOutcome outcome)
     {
         if (pending_action_ != action)
         {
@@ -306,15 +341,7 @@ namespace librarian::windows
         }
 
         pending_action_ = PendingAction::None;
-
-        try
-        {
-            Apply(client_->GetStatus());
-        }
-        catch (...)
-        {
-            ApplyError(ClientError::Unexpected);
-        }
+        Apply(std::move(outcome));
     }
 
     bool ShellViewModel::BeginLockRequest()
@@ -333,6 +360,27 @@ namespace librarian::windows
         return true;
     }
 
+    ShellRequestOutcome ShellViewModel::AddAccountRefresh(ClientResult result) const
+    {
+        ShellRequestOutcome outcome{ result, std::nullopt };
+        if (
+            result.error != ClientError::None ||
+            result.status != VaultStatus::Unlocked)
+        {
+            return outcome;
+        }
+
+        try
+        {
+            outcome.accounts = client_->ListAccounts();
+        }
+        catch (...)
+        {
+            outcome.accounts = AccountListResult{ ClientError::Unexpected, {} };
+        }
+        return outcome;
+    }
+
     void ShellViewModel::ApplyLockFailure(ClientError const error)
     {
         account_editor_visible_ = false;
@@ -349,15 +397,51 @@ namespace librarian::windows
         message_ = LockStatusUnknownMessage;
     }
 
-    void ShellViewModel::Apply(ClientResult const& result)
+    void ShellViewModel::Apply(ShellRequestOutcome outcome)
+    {
+        if (outcome.request.error != ClientError::None)
+        {
+            ApplyError(outcome.request.error);
+            return;
+        }
+
+        SetVaultStatus(outcome.request.status);
+        if (state_ != ShellState::Unlocked)
+        {
+            return;
+        }
+
+        if (!outcome.accounts.has_value())
+        {
+            ApplyError(ClientError::Unexpected);
+            return;
+        }
+
+        ApplyAccounts(std::move(*outcome.accounts));
+    }
+
+    void ShellViewModel::ApplyAccounts(AccountListResult result)
     {
         if (result.error != ClientError::None)
         {
+            if (result.error == ClientError::Cancelled)
+            {
+                account_editor_visible_ = false;
+                accounts_.clear();
+                state_ = ShellState::Error;
+                message_ = AccountLoadCancelledMessage;
+                return;
+            }
+
             ApplyError(result.error);
             return;
         }
 
-        SetVaultStatus(result.status);
+        accounts_ = std::move(result.accounts);
+        if (accounts_.empty())
+        {
+            message_ = EmptyAccountsMessage;
+        }
     }
 
     void ShellViewModel::ApplyError(ClientError const error)
@@ -434,40 +518,7 @@ namespace librarian::windows
             state_ = ShellState::Unlocked;
             message_.clear();
             resume_state_ = state_;
-            LoadAccounts();
             break;
-        }
-    }
-
-    void ShellViewModel::LoadAccounts()
-    {
-        try
-        {
-            auto result = client_->ListAccounts();
-            if (result.error != ClientError::None)
-            {
-                if (result.error == ClientError::Cancelled)
-                {
-                    account_editor_visible_ = false;
-                    accounts_.clear();
-                    state_ = ShellState::Error;
-                    message_ = AccountLoadCancelledMessage;
-                    return;
-                }
-
-                ApplyError(result.error);
-                return;
-            }
-
-            accounts_ = std::move(result.accounts);
-            if (accounts_.empty())
-            {
-                message_ = EmptyAccountsMessage;
-            }
-        }
-        catch (...)
-        {
-            ApplyError(ClientError::Unexpected);
         }
     }
 }

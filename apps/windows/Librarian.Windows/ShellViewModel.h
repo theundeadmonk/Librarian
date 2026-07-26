@@ -3,6 +3,7 @@
 #include "DesktopClient.h"
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -19,30 +20,46 @@ namespace librarian::windows
         AgentUnavailable,
     };
 
+    struct ShellRequestOutcome
+    {
+        ClientResult request;
+        std::optional<AccountListResult> accounts;
+    };
+
     class ShellViewModel final
     {
     public:
         explicit ShellViewModel(std::shared_ptr<IDesktopClient> client);
 
         [[nodiscard]] bool BeginInitialize();
-        void CompleteInitialize();
+        void CompleteInitialize(ShellRequestOutcome outcome);
 
         [[nodiscard]] bool BeginRetry();
-        void CompleteRetry();
+        void CompleteRetry(ShellRequestOutcome outcome);
 
         [[nodiscard]] bool BeginCreate();
-        void CompleteCreate(SecretText const& master_password);
+        void CompleteCreate(ShellRequestOutcome outcome);
 
         [[nodiscard]] bool BeginUnlock();
-        void CompleteUnlock(SecretText const& master_password);
+        void CompleteUnlock(ShellRequestOutcome outcome);
 
         [[nodiscard]] bool BeginLock();
-        void CompleteLock();
+        void CompleteLock(ShellRequestOutcome outcome);
 
         void ShowAccountEditor();
         void CancelAccountEditor();
         [[nodiscard]] bool BeginSaveAccount();
-        void CompleteSaveAccount(AccountDraft const& account);
+        void CompleteSaveAccount(ShellRequestOutcome outcome);
+
+        [[nodiscard]] ShellRequestOutcome ExecuteStatusRequest() const;
+        [[nodiscard]] ShellRequestOutcome ExecuteCreateRequest(
+            SecretText const& master_password) const;
+        [[nodiscard]] ShellRequestOutcome ExecuteUnlockRequest(
+            SecretText const& master_password) const;
+        [[nodiscard]] ShellRequestOutcome ExecuteLockRequest() const;
+        [[nodiscard]] ShellRequestOutcome ExecuteSaveAccountRequest(
+            AccountDraft const& account) const;
+
         void Close() noexcept;
 
         [[nodiscard]] ShellState State() const noexcept;
@@ -64,13 +81,14 @@ namespace librarian::windows
         };
 
         [[nodiscard]] bool BeginStatusRequest(PendingAction action);
-        void CompleteStatusRequest(PendingAction action);
+        void CompleteStatusRequest(PendingAction action, ShellRequestOutcome outcome);
         [[nodiscard]] bool BeginLockRequest();
+        [[nodiscard]] ShellRequestOutcome AddAccountRefresh(ClientResult result) const;
         void ApplyLockFailure(ClientError error);
-        void Apply(ClientResult const& result);
+        void Apply(ShellRequestOutcome outcome);
+        void ApplyAccounts(AccountListResult result);
         void ApplyError(ClientError error);
         void SetVaultStatus(VaultStatus status);
-        void LoadAccounts();
 
         std::shared_ptr<IDesktopClient> client_;
         ShellState state_{ ShellState::AgentUnavailable };

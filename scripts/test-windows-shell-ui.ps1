@@ -49,6 +49,11 @@ $applicationId = [string]$application.Id
 $registeredByScript = $false
 $package = $null
 $process = $null
+$registrationMutex = [System.Threading.Mutex]::new(
+    $false,
+    "Local\Librarian.WindowsShellUi.PackageRegistration"
+)
+$registrationMutexHeld = $false
 
 function Test-SamePath {
     param(
@@ -67,6 +72,18 @@ function Test-SamePath {
 }
 
 try {
+    try {
+        $registrationMutexHeld = $registrationMutex.WaitOne(
+            [TimeSpan]::FromSeconds(30)
+        )
+    }
+    catch [System.Threading.AbandonedMutexException] {
+        $registrationMutexHeld = $true
+    }
+    if (-not $registrationMutexHeld) {
+        throw "Timed out waiting for exclusive Windows shell package registration ownership."
+    }
+
     $existingPackages = @(Get-AppxPackage -Name $packageName)
     if ($existingPackages.Count -gt 1) {
         throw "More than one package is registered for the development identity '$packageName'."
@@ -107,6 +124,59 @@ try {
 
     Add-Type -AssemblyName UIAutomationClient
     Add-Type -AssemblyName UIAutomationTypes
+    Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+
+[Flags]
+public enum PackageActivateOptions
+{
+    None = 0
+}
+
+[ComImport]
+[Guid("2e941141-7f97-4756-ba1d-9decde894a3d")]
+[InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+public interface IApplicationActivationManager
+{
+    [PreserveSig]
+    int ActivateApplication(
+        [MarshalAs(UnmanagedType.LPWStr)] string applicationUserModelId,
+        [MarshalAs(UnmanagedType.LPWStr)] string arguments,
+        PackageActivateOptions options,
+        out uint processId);
+}
+
+[ComImport]
+[Guid("45BA127D-10A8-46EA-8AB7-56EA9078943C")]
+public class ApplicationActivationManager
+{
+}
+
+public static class PackageActivator
+{
+    public static uint Activate(string applicationUserModelId)
+    {
+        var manager =
+            (IApplicationActivationManager)new ApplicationActivationManager();
+        try
+        {
+            uint processId;
+            var result = manager.ActivateApplication(
+                applicationUserModelId,
+                null,
+                PackageActivateOptions.None,
+                out processId);
+            Marshal.ThrowExceptionForHR(result);
+            return processId;
+        }
+        finally
+        {
+            Marshal.FinalReleaseComObject(manager);
+        }
+    }
+}
+"@
 
     $knownProcessIds = @(
         Get-CimInstance Win32_Process -Filter "Name='Librarian.Windows.exe'" |
@@ -116,29 +186,19 @@ try {
             } |
             Select-Object -ExpandProperty ProcessId
     )
+    if ($knownProcessIds.Count -ne 0) {
+        throw "Close the existing Librarian development app before running the UI smoke test."
+    }
 
     $applicationUserModelId = "$($package.PackageFamilyName)!$applicationId"
-    Start-Process -FilePath "explorer.exe" -ArgumentList (
-        "shell:AppsFolder\$applicationUserModelId"
-    )
-
-    $deadline = [DateTime]::UtcNow.AddSeconds(20)
-    do {
-        Start-Sleep -Milliseconds 250
-        $candidate = Get-CimInstance Win32_Process -Filter "Name='Librarian.Windows.exe'" |
-            Where-Object {
-                $null -ne $_.ExecutablePath -and
-                (Test-SamePath -First $_.ExecutablePath -Second $executablePath) -and
-                $_.ProcessId -notin $knownProcessIds
-            } |
-            Select-Object -First 1
-        if ($null -ne $candidate) {
-            $process = Get-Process -Id $candidate.ProcessId -ErrorAction Stop
-        }
-    } while ($null -eq $process -and [DateTime]::UtcNow -lt $deadline)
-
-    if ($null -eq $process) {
-        throw "Package activation did not start the expected Librarian process within 20 seconds."
+    $activatedProcessId = [PackageActivator]::Activate($applicationUserModelId)
+    $process = Get-Process -Id $activatedProcessId -ErrorAction Stop
+    $process.Refresh()
+    if (-not (Test-SamePath -First $process.Path -Second $executablePath)) {
+        throw (
+            "Package activation started process $activatedProcessId from '$($process.Path)' " +
+            "instead of '$executablePath'."
+        )
     }
 
     $window = $null
@@ -164,22 +224,48 @@ try {
         throw "Librarian did not expose a top-level accessibility window within 20 seconds."
     }
 
-    $elements = $window.FindAll(
-        [System.Windows.Automation.TreeScope]::Descendants,
-        [System.Windows.Automation.Condition]::TrueCondition
-    )
-    $accessibleNames = @($window.Current.Name)
-    foreach ($element in $elements) {
-        if (-not [string]::IsNullOrWhiteSpace($element.Current.Name)) {
-            $accessibleNames += $element.Current.Name
+    $accessibleNames = @()
+    $deadline = [DateTime]::UtcNow.AddSeconds(10)
+    do {
+        $elements = $window.FindAll(
+            [System.Windows.Automation.TreeScope]::Descendants,
+            [System.Windows.Automation.Condition]::TrueCondition
+        )
+        $accessibleNames = @($window.Current.Name)
+        foreach ($element in $elements) {
+            if (-not [string]::IsNullOrWhiteSpace($element.Current.Name)) {
+                $accessibleNames += $element.Current.Name
+            }
         }
-    }
+
+        if (
+            $accessibleNames -contains "Vault agent unavailable" -and
+            $accessibleNames -contains "Retry vault agent connection"
+        ) {
+            break
+        }
+
+        Start-Sleep -Milliseconds 100
+        $process.Refresh()
+        if ($process.HasExited) {
+            throw "Librarian exited before reaching its final fail-closed UI state."
+        }
+    } while ([DateTime]::UtcNow -lt $deadline)
 
     $focusedName = ""
+    $focusedDetail = "No global focused automation element was reported."
     $deadline = [DateTime]::UtcNow.AddSeconds(5)
     do {
         Start-Sleep -Milliseconds 100
         $focusedElement = [System.Windows.Automation.AutomationElement]::FocusedElement
+        if ($null -ne $focusedElement) {
+            $focusedDetail = (
+                "Focused process: $($focusedElement.Current.ProcessId); " +
+                "name: '$($focusedElement.Current.Name)'; " +
+                "automation id: '$($focusedElement.Current.AutomationId)'; " +
+                "control type: '$($focusedElement.Current.ControlType.ProgrammaticName)'."
+            )
+        }
         if (
             $null -ne $focusedElement -and
             $focusedElement.Current.ProcessId -eq $process.Id
@@ -201,7 +287,7 @@ try {
     foreach ($check in $checks.GetEnumerator()) {
         if (-not $check.Value) {
             $focusDetail = if ($check.Key -eq "Initial keyboard focus") {
-                " Focused element: '$focusedName'."
+                " $focusedDetail"
             }
             else {
                 ""
@@ -215,63 +301,71 @@ try {
 }
 finally {
     try {
-        if ($null -ne $process) {
-            $process.Refresh()
-            if (-not $process.HasExited) {
-                $actualPath = $process.Path
-                if (Test-SamePath -First $actualPath -Second $executablePath) {
-                    Stop-Process -Id $process.Id -Force
-                    Wait-Process -Id $process.Id -Timeout 10 -ErrorAction SilentlyContinue
+        try {
+            if ($null -ne $process) {
+                $process.Refresh()
+                if (-not $process.HasExited) {
+                    $actualPath = $process.Path
+                    if (Test-SamePath -First $actualPath -Second $executablePath) {
+                        Stop-Process -Id $process.Id -Force
+                        Wait-Process -Id $process.Id -Timeout 10 -ErrorAction SilentlyContinue
+                    }
+                    else {
+                        Write-Warning (
+                            "Did not stop process $($process.Id) because its executable path changed to " +
+                            "'$actualPath'."
+                        )
+                    }
                 }
-                else {
-                    Write-Warning (
-                        "Did not stop process $($process.Id) because its executable path changed to " +
-                        "'$actualPath'."
+            }
+        }
+        finally {
+            if ($registeredByScript) {
+                try {
+                    $packageToRemove = $package
+                    if ($null -eq $packageToRemove) {
+                        $packageToRemove = Get-AppxPackage -Name $packageName |
+                            Where-Object {
+                                $_.IsDevelopmentMode -and
+                                (Test-SamePath -First $_.InstallLocation -Second $layoutDirectory)
+                            } |
+                            Select-Object -First 1
+                    }
+
+                    if (
+                        $null -ne $packageToRemove -and
+                        $packageToRemove.IsDevelopmentMode -and
+                        (Test-SamePath -First $packageToRemove.InstallLocation -Second $layoutDirectory)
+                    ) {
+                        Remove-AppxPackage -Package $packageToRemove.PackageFullName
+                    }
+
+                    $remainingRegistration = Get-AppxPackage -Name $packageName |
+                        Where-Object {
+                            $_.IsDevelopmentMode -and
+                            (Test-SamePath -First $_.InstallLocation -Second $layoutDirectory)
+                        } |
+                        Select-Object -First 1
+                    if ($null -ne $remainingRegistration) {
+                        throw (
+                            "The temporary development package remains registered as " +
+                            "'$($remainingRegistration.PackageFullName)'."
+                        )
+                    }
+                }
+                catch {
+                    throw (
+                        "The UI smoke test could not remove the development package registration it " +
+                        "created: $($_.Exception.Message)"
                     )
                 }
             }
         }
     }
     finally {
-        if ($registeredByScript) {
-            try {
-                $packageToRemove = $package
-                if ($null -eq $packageToRemove) {
-                    $packageToRemove = Get-AppxPackage -Name $packageName |
-                        Where-Object {
-                            $_.IsDevelopmentMode -and
-                            (Test-SamePath -First $_.InstallLocation -Second $layoutDirectory)
-                        } |
-                        Select-Object -First 1
-                }
-
-                if (
-                    $null -ne $packageToRemove -and
-                    $packageToRemove.IsDevelopmentMode -and
-                    (Test-SamePath -First $packageToRemove.InstallLocation -Second $layoutDirectory)
-                ) {
-                    Remove-AppxPackage -Package $packageToRemove.PackageFullName
-                }
-
-                $remainingRegistration = Get-AppxPackage -Name $packageName |
-                    Where-Object {
-                        $_.IsDevelopmentMode -and
-                        (Test-SamePath -First $_.InstallLocation -Second $layoutDirectory)
-                    } |
-                    Select-Object -First 1
-                if ($null -ne $remainingRegistration) {
-                    throw (
-                        "The temporary development package remains registered as " +
-                        "'$($remainingRegistration.PackageFullName)'."
-                    )
-                }
-            }
-            catch {
-                throw (
-                    "The UI smoke test could not remove the development package registration it " +
-                    "created: $($_.Exception.Message)"
-                )
-            }
+        if ($registrationMutexHeld) {
+            $registrationMutex.ReleaseMutex()
         }
+        $registrationMutex.Dispose()
     }
 }

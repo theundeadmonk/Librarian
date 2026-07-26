@@ -9,6 +9,7 @@
 #include "MainWindow.g.cpp"
 #endif
 
+#include <memory>
 #include <string>
 #include <utility>
 
@@ -74,13 +75,19 @@ namespace winrt::Librarian::Windows::implementation
         {
             co_return;
         }
-        lifetime->view_model_.CompleteInitialize();
+        auto outcome = std::make_shared<librarian::windows::ShellRequestOutcome>(
+            lifetime->view_model_.ExecuteStatusRequest());
         if (lifetime->is_closed_.load(std::memory_order_acquire))
         {
             co_return;
         }
-        if (!dispatcher.TryEnqueue([lifetime]
+        if (!dispatcher.TryEnqueue([lifetime, outcome]
         {
+            if (lifetime->is_closed_.load(std::memory_order_acquire))
+            {
+                return;
+            }
+            lifetime->view_model_.CompleteInitialize(std::move(*outcome));
             lifetime->RenderSecurityTransitionIfOpen();
         }))
         {
@@ -152,13 +159,19 @@ namespace winrt::Librarian::Windows::implementation
         {
             co_return;
         }
-        lifetime->view_model_.CompleteCreate(password);
+        auto outcome = std::make_shared<librarian::windows::ShellRequestOutcome>(
+            lifetime->view_model_.ExecuteCreateRequest(password));
         if (lifetime->is_closed_.load(std::memory_order_acquire))
         {
             co_return;
         }
-        if (!dispatcher.TryEnqueue([lifetime]
+        if (!dispatcher.TryEnqueue([lifetime, outcome]
         {
+            if (lifetime->is_closed_.load(std::memory_order_acquire))
+            {
+                return;
+            }
+            lifetime->view_model_.CompleteCreate(std::move(*outcome));
             lifetime->RenderSecurityTransitionIfOpen();
         }))
         {
@@ -193,13 +206,19 @@ namespace winrt::Librarian::Windows::implementation
         {
             co_return;
         }
-        lifetime->view_model_.CompleteUnlock(password);
+        auto outcome = std::make_shared<librarian::windows::ShellRequestOutcome>(
+            lifetime->view_model_.ExecuteUnlockRequest(password));
         if (lifetime->is_closed_.load(std::memory_order_acquire))
         {
             co_return;
         }
-        if (!dispatcher.TryEnqueue([lifetime]
+        if (!dispatcher.TryEnqueue([lifetime, outcome]
         {
+            if (lifetime->is_closed_.load(std::memory_order_acquire))
+            {
+                return;
+            }
+            lifetime->view_model_.CompleteUnlock(std::move(*outcome));
             lifetime->RenderSecurityTransitionIfOpen();
         }))
         {
@@ -222,15 +241,21 @@ namespace winrt::Librarian::Windows::implementation
         lock_request_in_flight_.store(true, std::memory_order_release);
         Render();
         co_await resume_background();
-        lifetime->view_model_.CompleteLock();
+        auto outcome = std::make_shared<librarian::windows::ShellRequestOutcome>(
+            lifetime->view_model_.ExecuteLockRequest());
         lifetime->lock_request_in_flight_.store(false, std::memory_order_release);
         if (lifetime->is_closed_.load(std::memory_order_acquire))
         {
             lifetime->CloseDesktopClient();
             co_return;
         }
-        if (!dispatcher.TryEnqueue([lifetime]
+        if (!dispatcher.TryEnqueue([lifetime, outcome]
         {
+            if (lifetime->is_closed_.load(std::memory_order_acquire))
+            {
+                return;
+            }
+            lifetime->view_model_.CompleteLock(std::move(*outcome));
             lifetime->RenderSecurityTransitionIfOpen();
         }))
         {
@@ -260,15 +285,23 @@ namespace winrt::Librarian::Windows::implementation
         {
             co_return;
         }
-        lifetime->view_model_.CompleteRetry();
+        auto outcome = std::make_shared<librarian::windows::ShellRequestOutcome>(
+            retries_lock ?
+                lifetime->view_model_.ExecuteLockRequest() :
+                lifetime->view_model_.ExecuteStatusRequest());
         lifetime->lock_request_in_flight_.store(false, std::memory_order_release);
         if (lifetime->is_closed_.load(std::memory_order_acquire))
         {
             lifetime->CloseDesktopClient();
             co_return;
         }
-        if (!dispatcher.TryEnqueue([lifetime]
+        if (!dispatcher.TryEnqueue([lifetime, outcome]
         {
+            if (lifetime->is_closed_.load(std::memory_order_acquire))
+            {
+                return;
+            }
+            lifetime->view_model_.CompleteRetry(std::move(*outcome));
             lifetime->RenderSecurityTransitionIfOpen();
         }))
         {
@@ -321,13 +354,19 @@ namespace winrt::Librarian::Windows::implementation
         {
             co_return;
         }
-        lifetime->view_model_.CompleteSaveAccount(account);
+        auto outcome = std::make_shared<librarian::windows::ShellRequestOutcome>(
+            lifetime->view_model_.ExecuteSaveAccountRequest(account));
         if (lifetime->is_closed_.load(std::memory_order_acquire))
         {
             co_return;
         }
-        if (!dispatcher.TryEnqueue([lifetime]
+        if (!dispatcher.TryEnqueue([lifetime, outcome]
         {
+            if (lifetime->is_closed_.load(std::memory_order_acquire))
+            {
+                return;
+            }
+            lifetime->view_model_.CompleteSaveAccount(std::move(*outcome));
             lifetime->RenderAccountSaveIfOpen();
         }))
         {
