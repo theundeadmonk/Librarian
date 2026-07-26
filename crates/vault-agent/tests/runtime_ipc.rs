@@ -774,7 +774,7 @@ fn unlock_revalidates_the_authenticated_vault_ownership_lease() {
 }
 
 #[test]
-fn changed_vault_identity_invalidates_cached_mutation_outcomes() {
+fn in_place_vault_replacement_invalidates_cached_mutation_outcomes() {
     let directory = TestDirectory::new();
     let path = directory.vault_path();
     let original = AgentRuntime::start(&path).expect("original runtime");
@@ -823,8 +823,9 @@ fn changed_vault_identity_invalidates_cached_mutation_outcomes() {
     for suffix in ["-wal", "-shm"] {
         remove_if_present(&sidecar(&path, suffix));
     }
-    fs::remove_file(&path).expect("remove original vault");
-    fs::rename(&replacement_path, &path).expect("install replacement vault");
+    let replacement_bytes = fs::read(&replacement_path).expect("replacement vault bytes");
+    fs::write(&path, replacement_bytes)
+        .expect("overwrite vault without replacing its file identity");
 
     let unlock_client = connection(ClientRole::Desktop, &original, 161);
     dispatch_success(

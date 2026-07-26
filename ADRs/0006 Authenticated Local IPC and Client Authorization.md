@@ -509,6 +509,9 @@ commitment share one ordering gate. An admitted request is registered before a
 lock or disconnect may complete. A terminal response remains behind that gate
 until the authenticated transport synchronously writes all bytes or reports
 failure; it cannot be queued for a later write after a lock acknowledgement.
+Authenticated `not_found` results remain authorization-bound at this terminal
+gate because existence is vault-derived metadata; cancellation, deadline,
+lock, or epoch change replaces them before publication.
 Status state and unlock epoch are captured together while this gate is held.
 The server uses that paired snapshot when constructing `ServerHello`; callers
 must not compose handshake status from the separate diagnostic accessors.
@@ -683,12 +686,13 @@ the same key must return the same terminal result rather than risk applying an
 add, update, or delete twice. Recovery or reconciliation uses a new operation
 only after the vault has been authenticated again.
 
-The replay window is scoped to the authenticated vault file identity. When a
-locked runtime successfully authenticates a different file at its owned path,
-it clears completed outcomes before binding and publishing that identity. If an
-old idempotent mutation is still in flight, the identity transition fails
-closed instead of allowing that reservation to repopulate the new vault's
-cache.
+The replay window is scoped to the cryptographic vault identifier in the
+authenticated header, in addition to the owned file identity. When a locked
+runtime successfully authenticates a different vault at its owned path, even
+after an in-place overwrite that preserves filesystem identity, it clears
+completed outcomes before binding and publishing that identity. If an old
+idempotent mutation is still in flight, the identity transition fails closed
+instead of allowing that reservation to repopulate the new vault's cache.
 
 Cancellation, deadline, or epoch change observed at a mutation's commit gate
 uses a distinct rollback result. It does not masquerade as storage corruption

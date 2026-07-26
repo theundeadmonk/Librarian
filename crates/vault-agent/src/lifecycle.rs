@@ -155,6 +155,10 @@ impl VaultAgent {
         self.session.is_some()
     }
 
+    pub(crate) fn authenticated_vault_id(&self) -> Option<[u8; 16]> {
+        self.session.as_ref().map(|session| *session.vault_id())
+    }
+
     #[cfg(test)]
     pub(crate) fn bound_path(&self) -> Option<&Path> {
         self.path.as_deref()

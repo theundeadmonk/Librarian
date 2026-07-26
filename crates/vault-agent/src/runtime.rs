@@ -64,6 +64,7 @@ struct CachedOutcome {
 }
 
 struct IdempotencyState {
+    authenticated_vault_id: Option<[u8; 16]>,
     cached: BTreeMap<[u8; 16], CachedOutcome>,
     insertion_order: VecDeque<[u8; 16]>,
     in_flight: BTreeSet<[u8; 16]>,
@@ -72,6 +73,7 @@ struct IdempotencyState {
 impl IdempotencyState {
     fn new() -> Self {
         Self {
+            authenticated_vault_id: None,
             cached: BTreeMap::new(),
             insertion_order: VecDeque::new(),
             in_flight: BTreeSet::new(),
@@ -293,7 +295,7 @@ impl OwnershipLease {
         registry: &mut BTreeMap<u64, OwnershipRecord>,
         path: &Path,
         authenticated: &OwnershipRecord,
-        invalidate_previous_vault: impl FnOnce() -> Result<(), DispatchError>,
+        bind_authenticated_vault: impl FnOnce() -> Result<(), DispatchError>,
     ) -> Result<(), DispatchError> {
         let current = ownership_record(path).map_err(|_| DispatchError::Internal)?;
         if !authenticated.is_same_existing_target(&current) {
@@ -311,9 +313,7 @@ impl OwnershipLease {
         if leased.normalized_path != current.normalized_path {
             return Err(DispatchError::Internal);
         }
-        if !leased.is_same_existing_target(&current) {
-            invalidate_previous_vault()?;
-        }
+        bind_authenticated_vault()?;
         *leased = current;
         Ok(())
     }
@@ -696,14 +696,14 @@ impl AgentRuntime {
         let completion = context.connection.finish(context.permit)?;
         if completion == RequestCompletion::Cancelled {
             outcome = ExecutionOutcome::cancelled();
-        } else if outcome.error.is_none() {
+        } else if outcome.error.is_none() || outcome.error == Some(PublicErrorCode::NotFound) {
             if context.registration.cancellation.is_cancelled()
                 && context.permit.operation() != OperationCode::Lock
             {
                 outcome = ExecutionOutcome::cancelled();
             } else if Instant::now() >= context.deadline {
                 outcome = ExecutionOutcome::deadline();
-            } else if !(self.success_is_still_authorized(context.permit)
+            } else if !(self.outcome_is_still_authorized(context.permit, &outcome)
                 || outcome.replayed && context.permit.operation() == OperationCode::CreateVault)
             {
                 outcome = ExecutionOutcome::locked();
@@ -723,9 +723,13 @@ impl AgentRuntime {
         write_result
     }
 
-    fn success_is_still_authorized(&self, permit: RequestPermit) -> bool {
+    fn outcome_is_still_authorized(
+        &self,
+        permit: RequestPermit,
+        outcome: &ExecutionOutcome,
+    ) -> bool {
         match permit.operation() {
-            OperationCode::Status | OperationCode::Lock => true,
+            OperationCode::Status | OperationCode::Lock => outcome.error.is_none(),
             OperationCode::CreateVault | OperationCode::UnlockMasterPassword => {
                 !self.coordinator.lock_active.load(Ordering::Acquire)
                     && self.state() == AgentState::Unlocked
@@ -839,6 +843,10 @@ impl AgentRuntime {
                     created.lock();
                     return Err(DispatchError::Internal);
                 }
+                let authenticated_vault_id = created
+                    .authenticated_vault_id()
+                    .ok_or(DispatchError::Internal)?;
+                self.initialize_idempotency_vault(authenticated_vault_id)?;
                 drop(recovery_key);
                 *lock(&self.vault)? = created;
                 self.coordinator.advance_epoch_without_cancellation()?;
@@ -925,7 +933,15 @@ impl AgentRuntime {
         }
         match result {
             Ok(()) => {
-                self.publish_authenticated_unlock(authenticated_ownership, registration, deadline)
+                let authenticated_vault_id = lock(&self.vault)?
+                    .authenticated_vault_id()
+                    .ok_or(DispatchError::Internal)?;
+                self.publish_authenticated_unlock(
+                    authenticated_ownership,
+                    authenticated_vault_id,
+                    registration,
+                    deadline,
+                )
             }
             Err(UnlockError::Cancelled) => {
                 self.set_locked_unless_shutting_down();
@@ -941,6 +957,7 @@ impl AgentRuntime {
     fn publish_authenticated_unlock(
         &self,
         authenticated_ownership: Option<OwnershipRecord>,
+        authenticated_vault_id: [u8; 16],
         registration: &RequestRegistration,
         deadline: Instant,
     ) -> Result<ExecutionOutcome, DispatchError> {
@@ -966,7 +983,7 @@ impl AgentRuntime {
                 &mut owned,
                 &self.vault_path,
                 &authenticated_ownership,
-                || self.invalidate_idempotency_cache(),
+                || self.bind_authenticated_idempotency_vault(authenticated_vault_id),
             )
             .is_err()
         {
@@ -1048,6 +1065,25 @@ impl AgentRuntime {
         Ok(ExecutionOutcome::failed())
     }
 
+    fn authenticated_read_error_after_core(
+        &self,
+        mut vault: MutexGuard<'_, VaultAgent>,
+        error: AccountError,
+        request_epoch: u64,
+        registration: &RequestRegistration,
+        deadline: Instant,
+    ) -> Result<ExecutionOutcome, DispatchError> {
+        if error == AccountError::Failed {
+            return self.account_error_after_core(vault, error);
+        }
+        if let Some(outcome) =
+            self.post_secret_operation(&mut vault, request_epoch, registration, deadline)
+        {
+            return Ok(outcome);
+        }
+        Ok(map_account_error(error))
+    }
+
     fn list_accounts(
         &self,
         offset: u32,
@@ -1074,7 +1110,15 @@ impl AgentRuntime {
             Err(AccountError::Aborted) => {
                 return self.abort_after_core(&mut vault, request_epoch, registration, deadline);
             }
-            Err(error) => return self.account_error_after_core(vault, error),
+            Err(error) => {
+                return self.authenticated_read_error_after_core(
+                    vault,
+                    error,
+                    request_epoch,
+                    registration,
+                    deadline,
+                );
+            }
         };
         if let Some(outcome) =
             self.post_secret_operation(&mut vault, request_epoch, registration, deadline)
@@ -1107,7 +1151,15 @@ impl AgentRuntime {
             Err(AccountError::Aborted) => {
                 return self.abort_after_core(&mut vault, request_epoch, registration, deadline);
             }
-            Err(error) => return self.account_error_after_core(vault, error),
+            Err(error) => {
+                return self.authenticated_read_error_after_core(
+                    vault,
+                    error,
+                    request_epoch,
+                    registration,
+                    deadline,
+                );
+            }
         };
         if let Some(outcome) =
             self.post_secret_operation(&mut vault, request_epoch, registration, deadline)
@@ -1411,13 +1463,39 @@ impl AgentRuntime {
         Ok(best.map_or_else(ExecutionOutcome::failed, ExecutionOutcome::success))
     }
 
-    fn invalidate_idempotency_cache(&self) -> Result<(), DispatchError> {
+    fn initialize_idempotency_vault(
+        &self,
+        authenticated_vault_id: [u8; 16],
+    ) -> Result<(), DispatchError> {
         let mut state = lock(&self.idempotency)?;
+        match state.authenticated_vault_id {
+            Some(current) if current != authenticated_vault_id => {
+                return Err(DispatchError::Internal);
+            }
+            Some(_) => {}
+            None => {
+                state.cached.clear();
+                state.insertion_order.clear();
+                state.authenticated_vault_id = Some(authenticated_vault_id);
+            }
+        }
+        Ok(())
+    }
+
+    fn bind_authenticated_idempotency_vault(
+        &self,
+        authenticated_vault_id: [u8; 16],
+    ) -> Result<(), DispatchError> {
+        let mut state = lock(&self.idempotency)?;
+        if state.authenticated_vault_id == Some(authenticated_vault_id) {
+            return Ok(());
+        }
         if !state.in_flight.is_empty() {
             return Err(DispatchError::Internal);
         }
         state.cached.clear();
         state.insertion_order.clear();
+        state.authenticated_vault_id = Some(authenticated_vault_id);
         Ok(())
     }
 }
@@ -1900,6 +1978,71 @@ mod tests {
     }
 
     #[test]
+    fn idempotency_scope_tracks_the_authenticated_cryptographic_vault() {
+        let directory = TestDirectory::new();
+        let runtime = AgentRuntime::start(directory.vault_path()).expect("runtime");
+        let cached_key = [0x41; 16];
+        {
+            let mut state = lock(&runtime.idempotency).expect("idempotency state");
+            state.cached.insert(
+                cached_key,
+                CachedOutcome {
+                    request_fingerprint: [0x42; 32],
+                    error: None,
+                    retry: RetryCategory::Never,
+                    body: Zeroizing::new(Vec::new()),
+                },
+            );
+            state.insertion_order.push_back(cached_key);
+        }
+
+        let first_vault = [0x43; 16];
+        runtime
+            .initialize_idempotency_vault(first_vault)
+            .expect("initial vault binding");
+        {
+            let mut state = lock(&runtime.idempotency).expect("idempotency state");
+            assert!(state.cached.is_empty());
+            state.cached.insert(
+                cached_key,
+                CachedOutcome {
+                    request_fingerprint: [0x44; 32],
+                    error: None,
+                    retry: RetryCategory::Never,
+                    body: Zeroizing::new(Vec::new()),
+                },
+            );
+            state.insertion_order.push_back(cached_key);
+            assert!(state.in_flight.insert([0x45; 16]));
+        }
+
+        runtime
+            .bind_authenticated_idempotency_vault(first_vault)
+            .expect("same vault binding");
+        assert!(
+            lock(&runtime.idempotency)
+                .expect("idempotency state")
+                .cached
+                .contains_key(&cached_key)
+        );
+        assert_eq!(
+            runtime.bind_authenticated_idempotency_vault([0x46; 16]),
+            Err(DispatchError::Internal)
+        );
+        lock(&runtime.idempotency)
+            .expect("idempotency state")
+            .in_flight
+            .clear();
+        runtime
+            .bind_authenticated_idempotency_vault([0x46; 16])
+            .expect("changed vault binding");
+        let state = lock(&runtime.idempotency).expect("idempotency state");
+        assert_eq!(state.authenticated_vault_id, Some([0x46; 16]));
+        assert!(state.cached.is_empty());
+        assert!(state.insertion_order.is_empty());
+    }
+
+    #[test]
     fn terminal_operation_failures_remain_idempotent() {
         let directory = TestDirectory::new();
         let runtime = AgentRuntime::start(directory.vault_path()).expect("runtime");
@@ -2027,6 +2170,76 @@ mod tests {
             .expect("request worker")
             .expect("deadline response");
         assert_eq!(response.error(), Some(PublicErrorCode::DeadlineExceeded));
+    }
+
+    #[test]
+    fn authenticated_not_found_rechecks_terminal_authorization() {
+        let directory = TestDirectory::new();
+        let runtime = AgentRuntime::start(directory.vault_path()).expect("runtime");
+        runtime
+            .state
+            .store(AgentState::Unlocked as u8, Ordering::Release);
+        let epoch = runtime.unlock_epoch();
+        let registration = runtime
+            .coordinator
+            .register(RequestKey {
+                connection_id: [0x74; 16],
+                request_id: 1,
+            })
+            .expect("registration");
+
+        let expired = runtime
+            .authenticated_read_error_after_core(
+                lock(&runtime.vault).expect("vault"),
+                AccountError::NotFound,
+                epoch,
+                &registration,
+                Instant::now(),
+            )
+            .expect("deadline outcome");
+        assert_eq!(expired.error, Some(PublicErrorCode::DeadlineExceeded));
+        drop(registration);
+
+        let not_found_connection = connection(&runtime, 75);
+        let (_request, _header, permit) = admitted_request(
+            &runtime,
+            &not_found_connection,
+            1,
+            &OperationRequest::GetAccount { id: [0x75; 16] },
+        );
+        let registration = runtime
+            .coordinator
+            .register(RequestKey {
+                connection_id: *not_found_connection.connection_id(),
+                request_id: 1,
+            })
+            .expect("terminal registration");
+        runtime
+            .state
+            .store(AgentState::Locked as u8, Ordering::Release);
+        runtime
+            .coordinator
+            .advance_epoch_without_cancellation()
+            .expect("lock epoch");
+        let stale = runtime
+            .finish_dispatch(
+                DispatchContext {
+                    connection: &not_found_connection,
+                    permit,
+                    _global: CounterPermit::acquire(
+                        &runtime.coordinator.global_in_flight,
+                        MAX_IN_FLIGHT_GLOBAL,
+                    )
+                    .expect("global permit"),
+                    registration,
+                    deadline: Instant::now() + Duration::from_secs(1),
+                    correlation: CorrelationId::new([0x75; 16]),
+                },
+                ExecutionOutcome::failure(PublicErrorCode::NotFound, RetryCategory::Never),
+                copy_response,
+            )
+            .expect("terminal response");
+        assert_eq!(stale.error(), Some(PublicErrorCode::Locked));
     }
 
     #[test]
