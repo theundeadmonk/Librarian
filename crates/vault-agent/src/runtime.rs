@@ -592,14 +592,24 @@ impl AgentRuntime {
             }
             Err(BeginRequestError::Connection(error)) => return Err(error.into()),
         };
+        let deadline = admission_started
+            .checked_add(Duration::from_millis(u64::from(
+                permit.effective_timeout_ms(),
+            )))
+            .ok_or(DispatchError::Internal)?;
 
         let Some(global) =
             CounterPermit::acquire(&self.coordinator.global_in_flight, MAX_IN_FLIGHT_GLOBAL)
         else {
             connection.finish(permit)?;
+            let outcome = if Instant::now() >= deadline {
+                ExecutionOutcome::deadline()
+            } else {
+                ExecutionOutcome::busy()
+            };
             return Ok(RequestAdmission::Rejected(ResponseEnvelope::failure(
-                PublicErrorCode::Busy,
-                RetryCategory::Backoff,
+                outcome.error.ok_or(DispatchError::Internal)?,
+                outcome.retry,
                 correlation,
             )?));
         };
@@ -608,11 +618,6 @@ impl AgentRuntime {
             request_id: permit.request_id(),
         };
         let registration = self.coordinator.register(key)?;
-        let deadline = admission_started
-            .checked_add(Duration::from_millis(u64::from(
-                permit.effective_timeout_ms(),
-            )))
-            .ok_or(DispatchError::Internal)?;
         drop(admission);
         Ok(RequestAdmission::Admitted(DispatchContext {
             connection,
@@ -895,6 +900,16 @@ impl AgentRuntime {
         registration: &RequestRegistration,
         deadline: Instant,
     ) -> Result<ExecutionOutcome, DispatchError> {
+        self.unlock_vault_with_after_core(password, registration, deadline, || {})
+    }
+
+    fn unlock_vault_with_after_core(
+        &self,
+        password: &str,
+        registration: &RequestRegistration,
+        deadline: Instant,
+        after_core_unlock: impl FnOnce(),
+    ) -> Result<ExecutionOutcome, DispatchError> {
         if self.state() == AgentState::Unlocking {
             return Ok(ExecutionOutcome::busy());
         }
@@ -932,13 +947,20 @@ impl AgentRuntime {
             }
         }
         let mut authenticated_ownership = None;
-        let result = lock(&self.vault)?.unlock_with_before_publish(
-            password,
-            &registration.cancellation,
-            || {
-                authenticated_ownership = ownership_record(&self.vault_path).ok();
-            },
-        );
+        let (result, authenticated_vault_id) = {
+            let mut vault = lock(&self.vault)?;
+            let result =
+                vault.unlock_with_before_publish(password, &registration.cancellation, || {
+                    authenticated_ownership = ownership_record(&self.vault_path).ok();
+                });
+            let authenticated_vault_id = if result.is_ok() {
+                after_core_unlock();
+                vault.authenticated_vault_id()
+            } else {
+                None
+            };
+            (result, authenticated_vault_id)
+        };
         if registration.cancellation.is_cancelled() {
             lock(&self.vault)?.lock();
             self.set_locked_unless_shutting_down();
@@ -951,9 +973,8 @@ impl AgentRuntime {
         }
         match result {
             Ok(()) => {
-                let authenticated_vault_id = lock(&self.vault)?
-                    .authenticated_vault_id()
-                    .ok_or(DispatchError::Internal)?;
+                let authenticated_vault_id =
+                    authenticated_vault_id.ok_or(DispatchError::Internal)?;
                 self.publish_authenticated_unlock(
                     authenticated_ownership,
                     authenticated_vault_id,
@@ -2025,6 +2046,75 @@ mod tests {
     }
 
     #[test]
+    fn lock_wins_after_core_unlock_before_authenticated_id_publication() {
+        let directory = TestDirectory::new();
+        let path = directory.vault_path();
+        let runtime = Arc::new(AgentRuntime::start(&path).expect("runtime"));
+        let password = "authenticated id publication race password";
+        let (mut vault, recovery_key) =
+            VaultAgent::create(&path, MasterPassword::new(password).expect("password"))
+                .expect("vault");
+        drop(recovery_key);
+        vault.lock();
+        *lock(&runtime.vault).expect("runtime vault") = vault;
+        runtime
+            .state
+            .store(AgentState::Locked as u8, Ordering::Release);
+
+        let client = connection(&runtime, 77);
+        let registration = runtime
+            .coordinator
+            .register(RequestKey {
+                connection_id: *client.connection_id(),
+                request_id: 1,
+            })
+            .expect("unlock registration");
+        let (core_tx, core_rx) = std::sync::mpsc::channel();
+        let worker_runtime = Arc::clone(&runtime);
+        let worker = std::thread::spawn(move || {
+            worker_runtime.unlock_vault_with_after_core(
+                password,
+                &registration,
+                Instant::now() + Duration::from_secs(10),
+                || {
+                    core_tx.send(()).expect("core unlock signal");
+                    let wait_deadline = Instant::now() + Duration::from_secs(1);
+                    while !worker_runtime
+                        .coordinator
+                        .lock_active
+                        .load(Ordering::Acquire)
+                    {
+                        assert!(
+                            Instant::now() < wait_deadline,
+                            "lock transition must begin while the vault guard is retained"
+                        );
+                        std::thread::yield_now();
+                    }
+                },
+            )
+        });
+        core_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("core unlock completes");
+
+        let lock_outcome = runtime.lock_vault().expect("lock outcome");
+        assert!(lock_outcome.holds_lock_transition);
+        let unlock_outcome = worker
+            .join()
+            .expect("unlock worker")
+            .expect("terminal unlock outcome");
+        assert_eq!(
+            unlock_outcome.error,
+            Some(PublicErrorCode::Cancelled),
+            "a winning lock must produce a terminal lifecycle result, not an internal failure"
+        );
+        drop(FlagPermit::take_over_active(
+            &runtime.coordinator.lock_active,
+        ));
+        assert_eq!(runtime.state(), AgentState::Locked);
+    }
+
+    #[test]
     fn mutation_commit_guard_is_released_before_failure_handling() {
         let coordinator = Coordinator::new();
         let mut commit_guard = Some(lock(&coordinator.commit_gate).expect("mutation commit gate"));
@@ -2304,6 +2394,55 @@ mod tests {
             .expect("request worker")
             .expect("deadline response");
         assert_eq!(response.error(), Some(PublicErrorCode::DeadlineExceeded));
+    }
+
+    #[test]
+    fn expired_admission_reports_deadline_when_global_capacity_is_full() {
+        let directory = TestDirectory::new();
+        let runtime = Arc::new(AgentRuntime::start(directory.vault_path()).expect("runtime"));
+        let global_permits: Vec<_> = (0..MAX_IN_FLIGHT_GLOBAL)
+            .map(|_| {
+                CounterPermit::acquire(&runtime.coordinator.global_in_flight, MAX_IN_FLIGHT_GLOBAL)
+                    .expect("reserve global capacity")
+            })
+            .collect();
+        let client = connection(&runtime, 78);
+        let operation = OperationRequest::Status;
+        let body = operation.encode().expect("status body");
+        let request = RequestEnvelope::new(
+            OperationCode::Status,
+            runtime.unlock_epoch(),
+            50,
+            None,
+            body,
+        )
+        .expect("short status request");
+        let header = FrameHeader::new(
+            MessageKind::Request,
+            CURRENT_VERSION,
+            request.encode().expect("status request bytes").len(),
+            *client.connection_id(),
+            1,
+        )
+        .expect("status header");
+        let commit = lock(&runtime.coordinator.commit_gate).expect("hold admission gate");
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let worker_runtime = Arc::clone(&runtime);
+        let worker = std::thread::spawn(move || {
+            started_tx.send(()).expect("request worker started");
+            worker_runtime.dispatch(&client, &header, &request, copy_response)
+        });
+        started_rx.recv().expect("request worker start");
+        std::thread::sleep(Duration::from_millis(100));
+        drop(commit);
+
+        let response = worker
+            .join()
+            .expect("request worker")
+            .expect("deadline response");
+        assert_eq!(response.error(), Some(PublicErrorCode::DeadlineExceeded));
+        assert_eq!(response.retry(), RetryCategory::Never);
+        drop(global_permits);
     }
 
     #[test]

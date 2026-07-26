@@ -61,10 +61,16 @@ This decision was reviewed against primary sources current on 2026-07-25:
   states that the package full name incorporates name, version, architecture,
   resource identifier, and publisher. Exact package-full-name comparison is
   therefore also the mixed-version guard for Slice 1.
-- Microsoft’s current
-  [named-pipe privilege-escalation guidance](https://learn.microsoft.com/en-us/aspnet/core/grpc/interprocess)
-  recommends that a client use no impersonation or anonymous impersonation
-  unless impersonation is required. Librarian does not require impersonation.
+- Microsoft defines
+  [SecurityIdentification](https://learn.microsoft.com/en-us/windows/win32/secauthz/impersonation-levels)
+  as allowing a server to obtain a client's identity and privileges without
+  letting it act as that client when accessing resources.
+  [`OpenThreadToken`](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-openthreadtoken)
+  explicitly supports query-only access to a SecurityIdentification token with
+  `OpenAsSelf`, and the AppModel APIs expose
+  [package identity from that token](https://learn.microsoft.com/en-us/windows/win32/api/appmodel/nf-appmodel-getpackagefullnamefromtoken).
+  Librarian uses that pipe-bound token to close the PID-reopen race while
+  retaining least-privilege impersonation semantics.
 - Microsoft Security Intelligence’s January 2026 update for
   [named-pipe impersonation tooling](https://www.microsoft.com/en-us/wdsi/threats/malware-encyclopedia-description?Name=VirTool%3AWin64%2FImpersonate%21rfn&ThreatID=2147938841)
   documents active abuse of predictable, weakly protected named-pipe servers.
@@ -254,28 +260,39 @@ server identity remains ambiguous.
 Immediately after `ConnectNamedPipe` completes and before reading any
 application bytes, the agent must:
 
-1. Call `GetNamedPipeClientProcessId` on the connected pipe handle.
-2. Open that process with only `PROCESS_QUERY_LIMITED_INFORMATION |
+1. Call `ImpersonateNamedPipeClient`, open the resulting
+   SecurityIdentification thread token with query-only access, and immediately
+   `RevertToSelf`. Failure to acquire or revert the token is fatal.
+2. Query the pipe-bound token for user SID, logon SID, session, integrity,
+   elevation, AppContainer state, package full name, package family, and
+   application identity. This token—not a subsequently reopened PID—is the
+   authority for the security context that established the connection.
+3. Call `GetNamedPipeClientProcessId` on the connected pipe handle.
+4. Open that process with only `PROCESS_QUERY_LIMITED_INFORMATION |
    SYNCHRONIZE`.
-3. Retain the process handle for the lifetime of the connection so PID reuse
+5. Retain the process handle for the lifetime of the connection so PID reuse
    cannot substitute a new process and peer exit can cancel work.
    Recheck that handle after complete frame assembly and immediately before
    runtime admission; a frame buffered before process exit is not admissible.
-4. Query the process token and require:
+6. Query the retained process token and require an exact match with every
+   pipe-bound token field. A connector that exits before `OpenProcess` cannot
+   become an approved client merely because its numeric PID is later reused.
+   Then require:
    - the expected Windows user SID;
    - the same logon SID;
    - the same Windows session;
    - the approved non-elevated integrity policy; and
    - no unexpected AppContainer or elevation state.
-5. Query AppModel identity and require:
+7. Require the token-bound AppModel identity to contain:
    - the Librarian package family;
    - the exact package full name of the running agent; and
    - the expected application identity when that role has one.
-6. Query the executable image and require the exact role entry beneath the
+8. Query the executable image from the retained process and require the exact
+   role entry beneath the
    registered, signed package install root.
-7. Derive exactly one client role from the installed component manifest.
+9. Derive exactly one client role from the installed component manifest.
    Zero or multiple matches are authorization failure.
-8. Close the connection without a protocol response on any identity failure.
+10. Close the connection without a protocol response on any identity failure.
 
 The exact package full name intentionally rejects a partially updated product
 set. A package family match alone is insufficient because it would allow an old
@@ -288,8 +305,9 @@ Immediately after `CreateFileW` connects and before sending even `ClientHello`,
 every client must perform the symmetric sequence:
 
 1. Open the pipe using
-   `SECURITY_SQOS_PRESENT | SECURITY_ANONYMOUS |
-   SECURITY_EFFECTIVE_ONLY`. The agent never needs to impersonate a client.
+   `SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION |
+   SECURITY_EFFECTIVE_ONLY`. This permits the agent to query the connection's
+   token identity but not to access resources as the client.
 2. Call `GetNamedPipeServerProcessId`.
 3. Open and retain the process handle with
    `PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE`.
@@ -643,7 +661,9 @@ legitimately admitted with the KDF cap.
 Backpressure is explicit:
 
 - excess connections are rejected;
-- excess frames receive `busy` only after client authentication;
+- excess frames receive `busy` only after client authentication and only while
+  their admission-wide deadline remains live; capacity discovered after that
+  deadline returns `deadline_exceeded`, not a retryable backoff;
 - KDF, mutation, and lock transitions are serialized;
 - expensive operations consume bounded global permits;
 - event overflow closes the slow connection rather than retaining unbounded
@@ -667,6 +687,12 @@ Backpressure is explicit:
 | Updating or repair | Agent locks, removes discovery, drains no secret response, and exits. Mixed package full names reject. |
 | Incompatible protocol | Return one non-secret `incompatible` result only to an authenticated peer, then close. |
 | Windows sign-out | Lock and exit. No endpoint survives the logon session. |
+
+After the core authenticates an unlock, the runtime retains the vault mutex
+through extraction of the authenticated cryptographic vault identifier. A lock
+or shutdown that starts in that interval cancels the unlock, waits for the
+guard, clears the session, and produces a terminal lifecycle result rather than
+turning the expected race into a connection-fatal internal error.
 
 Ambiguous completion is failure. A client may retry an idempotent status read
 after reconnecting. A mutating request requires an operation-specific
@@ -786,8 +812,11 @@ The probe proves:
 8. the client rejects a copied executable that squats on the expected pipe
    name.
 
-The probe uses disposable marker bytes only. It opens clients with anonymous
-security QoS and never impersonates them.
+The probe uses disposable marker bytes only. Its copied-binary fixture remains
+an independent anonymous-QoS boundary test. The production Rust transport
+separately exercises SecurityIdentification token capture and rejects a
+substituted process observation whose token identity does not match the
+pipe-bound token.
 
 Observed on the supported Windows 11 development machine:
 
@@ -818,7 +847,7 @@ and #20 add package and end-to-end cases.
 | Server squatting | Copied binary, wrong package, wrong signer, wrong path, stale PID, PID reuse, and pre-created endpoint |
 | Client impersonation | Unknown executable, copied executable, wrong package, wrong AUMID, wrong user, wrong logon SID, wrong session, elevated peer, and exited peer |
 | Multi-instance interception | Full pre-created pool, duplicate instance attempt, listener loss and endpoint rotation |
-| Impersonation abuse | Client uses anonymous security QoS; server has no impersonation path |
+| Impersonation abuse | Client uses identification-only security QoS; server can query but cannot use the token for resource access; pipe-bound token must exactly match the reopened retained process |
 | Framing | Partial header, bad magic, bad header version, invalid pre-negotiation version, unknown kind, nonzero flags, payload-bearing cancel, length 65,537, early EOF, trailing data, slow read, exited-peer buffered frame, and frame flood |
 | CBOR | Nonpreferred integers, indefinite values, map, tag, float, invalid UTF-8, excessive depth, wrong array length, unknown field, and noncanonical re-encoding |
 | Authorization | Every operation attempted by every unauthorized role |
@@ -919,8 +948,9 @@ Issue #13 implements these layers as:
   conformance tests;
 - `platform/windows-ipc`, containing the complete listener pool, protected
   DACL and single-agent mutex, overlapped deadline/peer-exit I/O, mutual
-  token/AppModel observation, retained process handles, anonymous client
-  security QoS, and guarded atomic discovery descriptor lifecycle; and
+  token/AppModel observation, retained process handles, identification-only
+  client security QoS, pipe-bound client-token/process matching, and guarded
+  atomic discovery descriptor lifecycle; and
 - `crates/vault-agent::runtime`, containing the sole vault owner, global/KDF/
   mutation/lock admission, a commit gate that orders publication and terminal
   transport writes against lock, cancel, disconnect, and sign-out, typed

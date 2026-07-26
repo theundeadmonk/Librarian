@@ -25,32 +25,34 @@ use windows_sys::{
             },
             EqualSid, GetAce, GetAclInformation, GetSecurityDescriptorDacl, GetSidSubAuthority,
             GetSidSubAuthorityCount, GetTokenInformation, IsValidSid, PSECURITY_DESCRIPTOR, PSID,
-            SECURITY_ATTRIBUTES, TOKEN_ELEVATION, TOKEN_GROUPS, TOKEN_MANDATORY_LABEL, TOKEN_QUERY,
-            TOKEN_USER, TokenElevation, TokenGroups, TokenIntegrityLevel, TokenIsAppContainer,
-            TokenSessionId, TokenUser,
+            RevertToSelf, SECURITY_ATTRIBUTES, TOKEN_ELEVATION, TOKEN_GROUPS,
+            TOKEN_MANDATORY_LABEL, TOKEN_QUERY, TOKEN_USER, TokenElevation, TokenGroups,
+            TokenIntegrityLevel, TokenIsAppContainer, TokenSessionId, TokenUser,
         },
         Storage::{
             FileSystem::{
                 CreateFileW, FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_FLAG_OVERLAPPED, OPEN_EXISTING,
-                PIPE_ACCESS_DUPLEX, ReadFile, SECURITY_ANONYMOUS, SECURITY_EFFECTIVE_ONLY,
+                PIPE_ACCESS_DUPLEX, ReadFile, SECURITY_EFFECTIVE_ONLY, SECURITY_IDENTIFICATION,
                 SECURITY_SQOS_PRESENT, SYNCHRONIZE, WriteFile,
             },
             Packaging::Appx::{
-                GetApplicationUserModelId, GetPackageFamilyName, GetPackageFullName,
+                GetApplicationUserModelIdFromToken, GetPackageFamilyNameFromToken,
+                GetPackageFullNameFromToken,
             },
         },
         System::{
             IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED},
             Pipes::{
                 ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe,
-                GetNamedPipeClientProcessId, GetNamedPipeServerProcessId, PIPE_READMODE_BYTE,
-                PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_WAIT, WaitNamedPipeW,
+                GetNamedPipeClientProcessId, GetNamedPipeServerProcessId,
+                ImpersonateNamedPipeClient, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS,
+                PIPE_TYPE_BYTE, PIPE_WAIT, WaitNamedPipeW,
             },
             SystemServices::{ACCESS_ALLOWED_ACE_TYPE, SE_GROUP_LOGON_ID},
             Threading::{
-                CreateEventW, CreateMutexW, GetCurrentProcessId, GetProcessTimes, OpenProcess,
-                OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
-                WaitForMultipleObjects, WaitForSingleObject,
+                CreateEventW, CreateMutexW, GetCurrentProcessId, GetCurrentThread, GetProcessTimes,
+                OpenProcess, OpenProcessToken, OpenThreadToken, PROCESS_QUERY_LIMITED_INFORMATION,
+                QueryFullProcessImageNameW, WaitForMultipleObjects, WaitForSingleObject,
             },
         },
     },
@@ -147,6 +149,71 @@ impl Drop for LocalAllocation {
     }
 }
 
+struct ImpersonationGuard {
+    active: bool,
+}
+
+impl ImpersonationGuard {
+    fn begin(pipe: HANDLE) -> Result<Self, TransportError> {
+        // SAFETY: `pipe` is the connected server end of a named pipe. The
+        // client constrains this token to SecurityIdentification, which permits
+        // identity queries but not resource access in the client's context.
+        if unsafe { ImpersonateNamedPipeClient(pipe) } == 0 {
+            return Err(TransportError::AccessDenied);
+        }
+        Ok(Self { active: true })
+    }
+
+    fn revert(mut self) -> Result<(), TransportError> {
+        // SAFETY: this thread is currently impersonating the connected client.
+        if unsafe { RevertToSelf() } == 0 {
+            return Err(TransportError::Internal);
+        }
+        self.active = false;
+        Ok(())
+    }
+}
+
+impl Drop for ImpersonationGuard {
+    fn drop(&mut self) {
+        if self.active {
+            // SAFETY: best-effort fail-closed cleanup after an earlier error.
+            unsafe {
+                let _ = RevertToSelf();
+            }
+        }
+    }
+}
+
+#[derive(Clone, Eq, PartialEq)]
+struct TokenObservation {
+    session_id: u32,
+    user_sid: String,
+    logon_sid: String,
+    integrity_rid: u32,
+    elevated: bool,
+    app_container: bool,
+    package_full_name: Option<String>,
+    package_family_name: Option<String>,
+    application_user_model_id: Option<String>,
+}
+
+impl TokenObservation {
+    fn from_peer(observation: &PeerObservation) -> Self {
+        Self {
+            session_id: observation.session_id,
+            user_sid: observation.user_sid.clone(),
+            logon_sid: observation.logon_sid.clone(),
+            integrity_rid: observation.integrity_rid,
+            elevated: observation.elevated,
+            app_container: observation.app_container,
+            package_full_name: observation.package_full_name.clone(),
+            package_family_name: observation.package_family_name.clone(),
+            application_user_model_id: observation.application_user_model_id.clone(),
+        }
+    }
+}
+
 /// A kernel process handle retained for the full transport connection.
 pub struct PeerHandle {
     process: OwnedHandle,
@@ -198,40 +265,25 @@ fn observe_process(process_id: u32) -> Result<PeerHandle, TransportError> {
     };
     let process = OwnedHandle::new(raw_process).map_err(|_| TransportError::AccessDenied)?;
     let token = open_process_token(process.raw())?;
-    let user = token_information(token.raw(), TokenUser)?;
-    let groups = token_information(token.raw(), TokenGroups)?;
-    let integrity = token_information(token.raw(), TokenIntegrityLevel)?;
-    let elevation = token_information(token.raw(), TokenElevation)?;
-    let app_container = token_information(token.raw(), TokenIsAppContainer)?;
-    let session = token_information(token.raw(), TokenSessionId)?;
-
-    let user_sid = token_user_sid(&user)?;
-    let logon_sid = token_logon_sid(&groups)?;
-    let integrity_rid = token_integrity_rid(&integrity)?;
-    let elevated = scalar_from_token::<TOKEN_ELEVATION>(&elevation)?.TokenIsElevated != 0;
-    let app_container = scalar_from_token::<u32>(&app_container)? != 0;
-    let session_id = scalar_from_token::<u32>(&session)?;
+    let token = observe_token(token.raw())?;
     let process_creation_time = process_creation_time(process.raw())?;
     let image_path = process_image(process.raw())?;
-    let package_full_name = appmodel_string(process.raw(), GetPackageFullName)?;
-    let package_family_name = appmodel_string(process.raw(), GetPackageFamilyName)?;
-    let application_user_model_id = appmodel_string(process.raw(), GetApplicationUserModelId)?;
 
     Ok(PeerHandle {
         process,
         observation: PeerObservation {
             process_id,
             process_creation_time,
-            session_id,
-            user_sid,
-            logon_sid,
-            integrity_rid,
-            elevated,
-            app_container,
+            session_id: token.session_id,
+            user_sid: token.user_sid,
+            logon_sid: token.logon_sid,
+            integrity_rid: token.integrity_rid,
+            elevated: token.elevated,
+            app_container: token.app_container,
             image_path,
-            package_full_name,
-            package_family_name,
-            application_user_model_id,
+            package_full_name: token.package_full_name,
+            package_family_name: token.package_family_name,
+            application_user_model_id: token.application_user_model_id,
         },
     })
 }
@@ -244,6 +296,27 @@ fn open_process_token(process: HANDLE) -> Result<OwnedHandle, TransportError> {
         return Err(TransportError::AccessDenied);
     }
     OwnedHandle::new(raw_token).map_err(|_| TransportError::AccessDenied)
+}
+
+fn observe_token(token: HANDLE) -> Result<TokenObservation, TransportError> {
+    let user = token_information(token, TokenUser)?;
+    let groups = token_information(token, TokenGroups)?;
+    let integrity = token_information(token, TokenIntegrityLevel)?;
+    let elevation = token_information(token, TokenElevation)?;
+    let app_container = token_information(token, TokenIsAppContainer)?;
+    let session = token_information(token, TokenSessionId)?;
+
+    Ok(TokenObservation {
+        session_id: scalar_from_token::<u32>(&session)?,
+        user_sid: token_user_sid(&user)?,
+        logon_sid: token_logon_sid(&groups)?,
+        integrity_rid: token_integrity_rid(&integrity)?,
+        elevated: scalar_from_token::<TOKEN_ELEVATION>(&elevation)?.TokenIsElevated != 0,
+        app_container: scalar_from_token::<u32>(&app_container)? != 0,
+        package_full_name: appmodel_string(token, GetPackageFullNameFromToken)?,
+        package_family_name: appmodel_string(token, GetPackageFamilyNameFromToken)?,
+        application_user_model_id: appmodel_string(token, GetApplicationUserModelIdFromToken)?,
+    })
 }
 
 struct AlignedBuffer {
@@ -452,14 +525,13 @@ fn process_image(process: HANDLE) -> Result<PathBuf, TransportError> {
 type AppModelQuery = unsafe extern "system" fn(HANDLE, *mut u32, PWSTR) -> u32;
 
 fn appmodel_string(
-    process: HANDLE,
+    identity: HANDLE,
     query: AppModelQuery,
 ) -> Result<Option<String>, TransportError> {
     let mut characters = 0_u32;
-    // SAFETY: `process` is the retained handle used for all other identity
-    // observations; a null output with zero count is the documented size
-    // query.
-    let status = unsafe { query(process, &raw mut characters, ptr::null_mut()) };
+    // SAFETY: `identity` is the retained token used for the other token-bound
+    // observations; a null output with zero count is the documented size query.
+    let status = unsafe { query(identity, &raw mut characters, ptr::null_mut()) };
     if status == APPMODEL_ERROR_NO_PACKAGE || status == APPMODEL_ERROR_NO_APPLICATION {
         return Ok(None);
     }
@@ -472,7 +544,7 @@ fn appmodel_string(
     }
     let mut buffer = vec![0_u16; capacity];
     // SAFETY: `buffer` contains `characters` writable UTF-16 elements.
-    let status = unsafe { query(process, &raw mut characters, buffer.as_mut_ptr()) };
+    let status = unsafe { query(identity, &raw mut characters, buffer.as_mut_ptr()) };
     if status != ERROR_SUCCESS {
         return Err(TransportError::AccessDenied);
     }
@@ -832,7 +904,29 @@ enum PeerSide {
     Server,
 }
 
+fn observe_pipe_client_token(pipe: HANDLE) -> Result<TokenObservation, TransportError> {
+    let impersonation = ImpersonationGuard::begin(pipe)?;
+    let mut raw_token = ptr::null_mut();
+    // SAFETY: this thread is impersonating the connected client at
+    // SecurityIdentification. `OpenAsSelf` permits a query-only handle to that
+    // identification token and the output points to writable storage.
+    if unsafe { OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, 1, &raw mut raw_token) } == 0 {
+        return Err(TransportError::AccessDenied);
+    }
+    let token = OwnedHandle::new(raw_token).map_err(|_| TransportError::AccessDenied)?;
+    impersonation.revert()?;
+    observe_token(token.raw())
+}
+
+fn token_matches_peer(token: &TokenObservation, peer: &PeerObservation) -> bool {
+    token == &TokenObservation::from_peer(peer)
+}
+
 fn observe_pipe_peer(pipe: HANDLE, side: PeerSide) -> Result<PeerHandle, TransportError> {
+    let bound_client_token = match side {
+        PeerSide::Client => Some(observe_pipe_client_token(pipe)?),
+        PeerSide::Server => None,
+    };
     let mut process_id = 0_u32;
     // SAFETY: `pipe` is a connected named-pipe handle and the process ID
     // output points to writable storage.
@@ -845,7 +939,14 @@ fn observe_pipe_peer(pipe: HANDLE, side: PeerSide) -> Result<PeerHandle, Transpo
     if success == 0 || process_id == 0 {
         return Err(TransportError::AccessDenied);
     }
-    observe_process(process_id)
+    let peer = observe_process(process_id)?;
+    if bound_client_token
+        .as_ref()
+        .is_some_and(|token| !token_matches_peer(token, peer.observation()))
+    {
+        return Err(TransportError::AccessDenied);
+    }
+    Ok(peer)
 }
 
 /// Returns the client observation retained by a server-side connection.
@@ -869,8 +970,8 @@ pub struct PipeConnection {
 }
 
 impl PipeConnection {
-    /// Connects with anonymous security `QoS` and authenticates the server before
-    /// any application frame can be sent.
+    /// Connects with identification-only security `QoS` and authenticates the
+    /// server before any application frame can be sent.
     ///
     /// # Errors
     ///
@@ -903,7 +1004,7 @@ impl PipeConnection {
                     OPEN_EXISTING,
                     FILE_FLAG_OVERLAPPED
                         | SECURITY_SQOS_PRESENT
-                        | SECURITY_ANONYMOUS
+                        | SECURITY_IDENTIFICATION
                         | SECURITY_EFFECTIVE_ONLY,
                     ptr::null_mut(),
                 )
@@ -1459,9 +1560,79 @@ mod tests {
         scalar_from_token::<u32>(&session).expect("read session");
         process_creation_time(process.raw()).expect("read creation time");
         process_image(process.raw()).expect("read image");
-        appmodel_string(process.raw(), GetPackageFullName).expect("query package full name");
-        appmodel_string(process.raw(), GetPackageFamilyName).expect("query package family name");
-        appmodel_string(process.raw(), GetApplicationUserModelId).expect("query AUMID");
+        appmodel_string(token.raw(), GetPackageFullNameFromToken).expect("query package full name");
+        appmodel_string(token.raw(), GetPackageFamilyNameFromToken)
+            .expect("query package family name");
+        appmodel_string(token.raw(), GetApplicationUserModelIdFromToken).expect("query AUMID");
+    }
+
+    #[test]
+    fn pipe_bound_client_token_rejects_a_substituted_process_identity() {
+        let _serial = AGENT_INSTANCE_TEST
+            .lock()
+            .expect("agent instance tests serialize");
+        let pool = ListenerPool::create().expect("complete listener pool");
+        let pipe_name = pool.pipe_name().to_owned();
+        let (connected_tx, connected_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let client = std::thread::spawn(move || {
+            let name = wide_string(&pipe_name).expect("pipe name");
+            // SAFETY: the local name is null terminated and the identification
+            // QoS exposes only the token facts required for authorization.
+            let raw = unsafe {
+                CreateFileW(
+                    name.as_ptr(),
+                    GENERIC_READ | GENERIC_WRITE,
+                    0,
+                    ptr::null(),
+                    OPEN_EXISTING,
+                    FILE_FLAG_OVERLAPPED
+                        | SECURITY_SQOS_PRESENT
+                        | SECURITY_IDENTIFICATION
+                        | SECURITY_EFFECTIVE_ONLY,
+                    ptr::null_mut(),
+                )
+            };
+            let handle = OwnedHandle::new(raw).expect("client connects");
+            connected_tx.send(()).expect("connected signal");
+            release_rx.recv().expect("release signal");
+            drop(handle);
+        });
+        connected_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("client connection");
+        let selected =
+            accept_listener_pool(&pool.listeners, Duration::from_secs(2)).expect("accepted client");
+        let pipe = &pool.listeners[selected];
+        let bound_token =
+            observe_pipe_client_token(pipe.raw()).expect("pipe-bound identification token");
+        let mut process_id = 0_u32;
+        // SAFETY: `pipe` is a connected server-side named-pipe instance and
+        // the process-ID output points to writable storage.
+        assert_ne!(
+            unsafe { GetNamedPipeClientProcessId(pipe.raw(), &raw mut process_id) },
+            0
+        );
+        let peer = observe_process(process_id).expect("retained connected process");
+        assert!(token_matches_peer(&bound_token, peer.observation()));
+
+        let mut substituted = peer.observation().clone();
+        substituted.package_full_name = Some(format!(
+            "{}#substituted",
+            substituted
+                .package_full_name
+                .as_deref()
+                .unwrap_or("unpackaged")
+        ));
+        assert!(
+            !token_matches_peer(&bound_token, &substituted),
+            "a reopened PID cannot substitute a process whose token identity was not bound to the pipe"
+        );
+
+        release_tx.send(()).expect("release client");
+        client.join().expect("client worker");
+        // SAFETY: the client handle is closed and no I/O is pending.
+        assert_ne!(unsafe { DisconnectNamedPipe(pipe.raw()) }, 0);
     }
 
     #[test]

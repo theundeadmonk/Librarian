@@ -2,7 +2,7 @@ use std::{
     fs,
     path::{Path, PathBuf},
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc,
     },
@@ -20,6 +20,7 @@ use minicbor::Decoder;
 use zeroize::Zeroizing;
 
 static TEST_DIRECTORY_COUNTER: AtomicU64 = AtomicU64::new(1);
+static KDF_TEST_GATE: Mutex<()> = Mutex::new(());
 const BUILD_ID: [u8; 32] = [0x42; 32];
 
 struct TestDirectory(PathBuf);
@@ -81,6 +82,15 @@ fn dispatch(
     operation: &OperationRequest,
     idempotency_key: Option<[u8; 16]>,
 ) -> ResponseEnvelope {
+    let _kdf_gate = matches!(
+        operation,
+        OperationRequest::CreateVault { .. } | OperationRequest::UnlockMasterPassword { .. }
+    )
+    .then(|| {
+        KDF_TEST_GATE
+            .lock()
+            .expect("integration KDF tests serialize")
+    });
     let (request, header) =
         request_parts(runtime, connection, request_id, operation, idempotency_key);
     runtime
@@ -303,7 +313,7 @@ fn secret_response_write_completes_before_lock_acknowledgement() {
         .error(),
         None
     );
-    let added = dispatch(
+    let added = dispatch_success(
         &runtime,
         &setup_client,
         2,
@@ -329,7 +339,7 @@ fn secret_response_write_completes_before_lock_acknowledgement() {
             .expect("get dispatch")
     });
     write_started_rx
-        .recv_timeout(Duration::from_secs(5))
+        .recv_timeout(Duration::from_secs(30))
         .expect("secret response entered transport writer");
 
     let lock_runtime = Arc::clone(&runtime);
@@ -361,7 +371,7 @@ fn secret_response_write_completes_before_lock_acknowledgement() {
             .any(|window| window == b"RUNTIME-PASSWORD-CANARY-CA1C88")
     );
     let locked = lock_done_rx
-        .recv_timeout(Duration::from_secs(5))
+        .recv_timeout(Duration::from_secs(30))
         .expect("lock completes after response write");
     assert_eq!(locked.error(), None);
     lock_worker.join().expect("lock worker");
@@ -573,7 +583,7 @@ fn cancellation_wins_an_in_flight_password_unlock() {
             .expect("unlock dispatch")
     });
 
-    let wait_deadline = Instant::now() + Duration::from_secs(5);
+    let wait_deadline = Instant::now() + Duration::from_secs(30);
     while runtime.state() != AgentState::Unlocking && Instant::now() < wait_deadline {
         thread::yield_now();
     }
@@ -605,7 +615,7 @@ fn lock_wins_create_before_atomic_publication() {
         )
     });
 
-    let wait_deadline = Instant::now() + Duration::from_secs(5);
+    let wait_deadline = Instant::now() + Duration::from_secs(30);
     while !has_staging_reservation(&directory) && Instant::now() < wait_deadline {
         thread::yield_now();
     }
@@ -705,7 +715,7 @@ fn lock_and_signout_shutdown_win_unlock_races_and_restart_locked() {
 }
 
 fn wait_for_state(runtime: &AgentRuntime, expected: AgentState) {
-    let wait_deadline = Instant::now() + Duration::from_secs(5);
+    let wait_deadline = Instant::now() + Duration::from_secs(30);
     while runtime.state() != expected && Instant::now() < wait_deadline {
         thread::yield_now();
     }
