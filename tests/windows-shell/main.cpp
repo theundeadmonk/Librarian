@@ -1,5 +1,6 @@
 #include "../../apps/windows/Librarian.Windows/ShellViewModel.h"
 
+#include <atomic>
 #include <fstream>
 #include <iostream>
 #include <memory>
@@ -57,17 +58,29 @@ namespace
         AccountListResult list_result{};
         std::wstring expected_password;
         bool password_matched{ false };
+        int status_calls{ 0 };
         int unlock_calls{ 0 };
+        int lock_calls{ 0 };
         int save_calls{ 0 };
-        int cancel_calls{ 0 };
+        int close_calls{ 0 };
+        std::atomic_bool closed{ false };
 
         [[nodiscard]] ClientResult GetStatus() override
         {
+            ++status_calls;
+            if (closed.load(std::memory_order_acquire))
+            {
+                return Closed();
+            }
             return status_result;
         }
 
         [[nodiscard]] ClientResult CreateVault(SecretText const& master_password) override
         {
+            if (closed.load(std::memory_order_acquire))
+            {
+                return Closed();
+            }
             password_matched = master_password.value() == expected_password;
             return create_result;
         }
@@ -75,23 +88,40 @@ namespace
         [[nodiscard]] ClientResult Unlock(SecretText const& master_password) override
         {
             ++unlock_calls;
+            if (closed.load(std::memory_order_acquire))
+            {
+                return Closed();
+            }
             password_matched = master_password.value() == expected_password;
             return unlock_result;
         }
 
         [[nodiscard]] ClientResult Lock() override
         {
+            ++lock_calls;
+            if (closed.load(std::memory_order_acquire))
+            {
+                return Closed();
+            }
             return lock_result;
         }
 
         [[nodiscard]] AccountListResult ListAccounts() override
         {
+            if (closed.load(std::memory_order_acquire))
+            {
+                return { ClientError::Cancelled, {} };
+            }
             return list_result;
         }
 
         [[nodiscard]] ClientResult SaveAccount(AccountDraft const& account) override
         {
             ++save_calls;
+            if (closed.load(std::memory_order_acquire))
+            {
+                return Closed();
+            }
             password_matched = account.password.value() == expected_password;
             if (save_result.error == ClientError::None)
             {
@@ -105,9 +135,16 @@ namespace
             return save_result;
         }
 
-        void CancelPendingOperations() noexcept override
+        void Close() noexcept override
         {
-            ++cancel_calls;
+            ++close_calls;
+            closed.store(true, std::memory_order_release);
+        }
+
+    private:
+        [[nodiscard]] static ClientResult Closed() noexcept
+        {
+            return { ClientError::Cancelled, VaultStatus::Locked };
         }
     };
 
@@ -118,19 +155,27 @@ namespace
         return client;
     }
 
+    void InitializeModel(ShellViewModel& model)
+    {
+        if (model.BeginInitialize())
+        {
+            model.CompleteInitialize();
+        }
+    }
+
     void TestInitialStates(TestContext& test)
     {
         {
             auto client = ClientWithStatus(VaultStatus::FirstRun);
             ShellViewModel model{ client };
-            model.Initialize();
+            InitializeModel(model);
             test.Check(model.State() == ShellState::FirstRun, "first-run status maps to setup");
         }
 
         {
             auto client = ClientWithStatus(VaultStatus::Locked);
             ShellViewModel model{ client };
-            model.Initialize();
+            InitializeModel(model);
             test.Check(model.State() == ShellState::Locked, "locked status maps to unlock");
         }
 
@@ -139,7 +184,7 @@ namespace
             client->list_result.accounts.push_back(
                 { L"record", L"Example", L"https://example.com", L"person" });
             ShellViewModel model{ client };
-            model.Initialize();
+            InitializeModel(model);
             test.Check(model.State() == ShellState::Unlocked, "unlocked status maps to accounts");
             test.Check(model.Accounts().size() == 1, "unlocked status loads account summaries");
         }
@@ -148,7 +193,7 @@ namespace
             auto client = ClientWithStatus(VaultStatus::Locked);
             client->status_result.error = ClientError::AgentUnavailable;
             ShellViewModel model{ client };
-            model.Initialize();
+            InitializeModel(model);
             test.Check(
                 model.State() == ShellState::AgentUnavailable,
                 "unavailable agent fails closed");
@@ -163,7 +208,7 @@ namespace
             { L"record", L"Example", L"https://example.com", L"person" });
 
         ShellViewModel model{ client };
-        model.Initialize();
+        InitializeModel(model);
 
         test.Check(model.BeginUnlock(), "locked vault begins unlock");
         test.Check(model.State() == ShellState::Unlocking, "unlocking is a distinct state");
@@ -176,7 +221,14 @@ namespace
         test.Check(model.State() == ShellState::Unlocked, "successful unlock opens accounts");
         test.Check(model.Accounts().size() == 1, "successful unlock refreshes account summaries");
 
-        model.Lock();
+        test.Check(model.BeginLock(), "unlocked vault begins locking");
+        test.Check(
+            model.State() == ShellState::Unlocking,
+            "lock uses the busy security state");
+        test.Check(
+            model.Accounts().empty(),
+            "lock intent hides account summaries before the client call");
+        model.CompleteLock();
         test.Check(model.State() == ShellState::Locked, "lock returns to the native unlock surface");
         test.Check(model.Accounts().empty(), "lock clears account summaries from the view model");
     }
@@ -188,7 +240,7 @@ namespace
             client->unlock_result = { ClientError::InvalidCredentials, VaultStatus::Locked };
 
             ShellViewModel model{ client };
-            model.Initialize();
+            InitializeModel(model);
             test.Check(model.BeginUnlock(), "failed unlock starts from locked state");
 
             SecretText password{ L"do-not-render-this-value" };
@@ -207,7 +259,7 @@ namespace
             client->unlock_result = { ClientError::Unexpected, VaultStatus::Locked };
 
             ShellViewModel model{ client };
-            model.Initialize();
+            InitializeModel(model);
             test.Check(model.BeginUnlock(), "unexpected unlock begins from locked state");
 
             SecretText password{ L"disposable unexpected failure" };
@@ -225,7 +277,7 @@ namespace
         client->expected_password = L"disposable setup";
 
         ShellViewModel model{ client };
-        model.Initialize();
+        InitializeModel(model);
         test.Check(model.BeginCreate(), "first run begins vault creation");
         test.Check(model.State() == ShellState::Unlocking, "vault creation uses the busy security state");
 
@@ -257,7 +309,7 @@ namespace
     void TestProductionClientFailsClosed(TestContext& test)
     {
         ShellViewModel model{ librarian::windows::MakeDesktopClient() };
-        model.Initialize();
+        InitializeModel(model);
         test.Check(
             model.State() == ShellState::AgentUnavailable,
             "production placeholder never simulates an unlocked vault");
@@ -269,7 +321,7 @@ namespace
             auto client = ClientWithStatus(VaultStatus::Locked);
             client->unlock_result = { ClientError::Cancelled, VaultStatus::Locked };
             ShellViewModel model{ client };
-            model.Initialize();
+            InitializeModel(model);
             test.Check(model.BeginUnlock(), "cancelled unlock begins from locked state");
 
             SecretText password{ L"disposable cancelled unlock" };
@@ -286,16 +338,34 @@ namespace
                 { L"record", L"Example", L"https://example.com", L"person" });
             client->lock_result = { ClientError::Cancelled, VaultStatus::Unlocked };
             ShellViewModel model{ client };
-            model.Initialize();
+            InitializeModel(model);
 
-            model.Lock();
+            test.Check(model.BeginLock(), "cancelled lock begins from the unlocked state");
+            model.CompleteLock();
 
             test.Check(
                 model.State() == ShellState::Error,
-                "cancelled lock hides access until status is rechecked");
+                "cancelled lock hides access until lock is retried");
             test.Check(
                 model.Accounts().empty(),
                 "cancelled lock clears cached account summaries");
+
+            client->lock_result = { ClientError::None, VaultStatus::Locked };
+            test.Check(model.BeginRetry(), "retry preserves the pending lock intent");
+            test.Check(
+                model.State() == ShellState::Unlocking,
+                "lock retry remains in the busy fail-closed state");
+            model.CompleteRetry();
+
+            test.Check(
+                client->lock_calls == 2,
+                "lock retry sends a second lock instead of refreshing status");
+            test.Check(
+                client->status_calls == 1,
+                "lock retry does not reopen from an unlocked status response");
+            test.Check(
+                model.State() == ShellState::Locked,
+                "lock retry requires an authoritative locked result");
         }
 
         {
@@ -304,7 +374,7 @@ namespace
                 { L"record", L"Example", L"https://example.com", L"person" });
             client->save_result = { ClientError::Cancelled, VaultStatus::Unlocked };
             ShellViewModel model{ client };
-            model.Initialize();
+            InitializeModel(model);
             model.ShowAccountEditor();
 
             AccountDraft draft{
@@ -332,7 +402,7 @@ namespace
             client->list_result.error = ClientError::Cancelled;
             ShellViewModel model{ client };
 
-            model.Initialize();
+            InitializeModel(model);
 
             test.Check(
                 model.State() == ShellState::Error,
@@ -346,17 +416,30 @@ namespace
         }
     }
 
-    void TestCancellationReachesDesktopClient(TestContext& test)
+    void TestWindowCloseLatchesDesktopClient(TestContext& test)
     {
         auto client = ClientWithStatus(VaultStatus::Locked);
+        client->expected_password = L"must not be observed after close";
         ShellViewModel model{ client };
-        model.Initialize();
+        InitializeModel(model);
+        test.Check(model.BeginUnlock(), "unlock can be queued before window close");
 
-        model.CancelPendingOperations();
+        model.Close();
+        SecretText password{ L"must not be observed after close" };
+        model.CompleteUnlock(password);
 
         test.Check(
-            client->cancel_calls == 1,
-            "window lifecycle cancellation reaches the desktop client");
+            client->close_calls == 1,
+            "window close permanently closes the desktop client");
+        test.Check(
+            client->unlock_calls == 1,
+            "request startup after close reaches the client latch");
+        test.Check(
+            !client->password_matched,
+            "the closed client rejects later requests before observing their secret");
+        test.Check(
+            model.State() == ShellState::Locked,
+            "a request rejected by the close latch remains fail closed");
     }
 
     std::string ReadFile(std::string const& path)
@@ -379,11 +462,14 @@ namespace
             "x:Name=\"UnlockedPanel\"",
             "x:Name=\"ErrorPanel\"",
             "x:Name=\"AgentUnavailablePanel\"",
+            "x:Name=\"UnlockingProgressRing\"",
+            "Activated=\"OnActivated\"",
             "Closed=\"OnClosed\"",
             "AutomationProperties.LiveSetting=\"Polite\"",
             "x:Name=\"StateDescriptionTextBlock\"",
             "AutomationProperties.Name=\"Master password\"",
             "PasswordRevealMode=\"Hidden\"",
+            "IsTabStop=\"True\"",
             "Click=\"OnUnlockClicked\"",
             "Click=\"OnRetryClicked\"",
         };
@@ -410,12 +496,16 @@ namespace
         test.Check(!source.empty(), "WinUI shell source can be read");
 
         std::vector<std::string_view> const required{
-            "view_model_.CancelPendingOperations();",
+            "view_model_.Close();",
             "MasterPasswordBox().Password(L\"\");",
             "AccountPasswordBox().Password(L\"\");",
             "L\"Service name: \"",
             "L\"Website origin: \"",
             "L\"Username: \"",
+            "void MainWindow::OnActivated",
+            "fire_and_forget MainWindow::OnLoaded",
+            "fire_and_forget MainWindow::OnLockClicked",
+            "fire_and_forget MainWindow::OnRetryClicked",
             "fire_and_forget MainWindow::OnSaveAccountClicked",
         };
 
@@ -437,7 +527,7 @@ int main(int const argc, char const* const* const argv)
     TestCreateAndAccountEditor(test);
     TestProductionClientFailsClosed(test);
     TestCancelledActionsResumeSafely(test);
-    TestCancellationReachesDesktopClient(test);
+    TestWindowCloseLatchesDesktopClient(test);
 
     if (
         argc == 5 &&

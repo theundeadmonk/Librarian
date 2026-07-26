@@ -200,7 +200,13 @@ try {
 
     foreach ($check in $checks.GetEnumerator()) {
         if (-not $check.Value) {
-            throw "Windows shell UI smoke check failed: $($check.Key)."
+            $focusDetail = if ($check.Key -eq "Initial keyboard focus") {
+                " Focused element: '$focusedName'."
+            }
+            else {
+                ""
+            }
+            throw "Windows shell UI smoke check failed: $($check.Key).$focusDetail"
         }
         Write-Host "[PASS] $($check.Key)"
     }
@@ -208,61 +214,64 @@ try {
     Write-Host "Windows shell packaged UI smoke test passed."
 }
 finally {
-    if ($null -ne $process) {
-        $process.Refresh()
-        if (-not $process.HasExited) {
-            $actualPath = $process.Path
-            if (Test-SamePath -First $actualPath -Second $executablePath) {
-                Stop-Process -Id $process.Id -Force
-                Wait-Process -Id $process.Id -Timeout 10 -ErrorAction SilentlyContinue
-            }
-            else {
-                Write-Warning (
-                    "Did not stop process $($process.Id) because its executable path changed to " +
-                    "'$actualPath'."
-                )
+    try {
+        if ($null -ne $process) {
+            $process.Refresh()
+            if (-not $process.HasExited) {
+                $actualPath = $process.Path
+                if (Test-SamePath -First $actualPath -Second $executablePath) {
+                    Stop-Process -Id $process.Id -Force
+                    Wait-Process -Id $process.Id -Timeout 10 -ErrorAction SilentlyContinue
+                }
+                else {
+                    Write-Warning (
+                        "Did not stop process $($process.Id) because its executable path changed to " +
+                        "'$actualPath'."
+                    )
+                }
             }
         }
     }
+    finally {
+        if ($registeredByScript) {
+            try {
+                $packageToRemove = $package
+                if ($null -eq $packageToRemove) {
+                    $packageToRemove = Get-AppxPackage -Name $packageName |
+                        Where-Object {
+                            $_.IsDevelopmentMode -and
+                            (Test-SamePath -First $_.InstallLocation -Second $layoutDirectory)
+                        } |
+                        Select-Object -First 1
+                }
 
-    if ($registeredByScript) {
-        try {
-            $packageToRemove = $package
-            if ($null -eq $packageToRemove) {
-                $packageToRemove = Get-AppxPackage -Name $packageName |
+                if (
+                    $null -ne $packageToRemove -and
+                    $packageToRemove.IsDevelopmentMode -and
+                    (Test-SamePath -First $packageToRemove.InstallLocation -Second $layoutDirectory)
+                ) {
+                    Remove-AppxPackage -Package $packageToRemove.PackageFullName
+                }
+
+                $remainingRegistration = Get-AppxPackage -Name $packageName |
                     Where-Object {
                         $_.IsDevelopmentMode -and
                         (Test-SamePath -First $_.InstallLocation -Second $layoutDirectory)
                     } |
                     Select-Object -First 1
+                if ($null -ne $remainingRegistration) {
+                    throw (
+                        "The temporary development package remains registered as " +
+                        "'$($remainingRegistration.PackageFullName)'."
+                    )
+                }
             }
-
-            if (
-                $null -ne $packageToRemove -and
-                $packageToRemove.IsDevelopmentMode -and
-                (Test-SamePath -First $packageToRemove.InstallLocation -Second $layoutDirectory)
-            ) {
-                Remove-AppxPackage -Package $packageToRemove.PackageFullName
-            }
-
-            $remainingRegistration = Get-AppxPackage -Name $packageName |
-                Where-Object {
-                    $_.IsDevelopmentMode -and
-                    (Test-SamePath -First $_.InstallLocation -Second $layoutDirectory)
-                } |
-                Select-Object -First 1
-            if ($null -ne $remainingRegistration) {
+            catch {
                 throw (
-                    "The temporary development package remains registered as " +
-                    "'$($remainingRegistration.PackageFullName)'."
+                    "The UI smoke test could not remove the development package registration it " +
+                    "created: $($_.Exception.Message)"
                 )
             }
-        }
-        catch {
-            throw (
-                "The UI smoke test could not remove the development package registration it " +
-                "created: $($_.Exception.Message)"
-            )
         }
     }
 }

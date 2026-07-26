@@ -97,9 +97,10 @@ namespace librarian::windows
         [[nodiscard]] virtual ClientResult Lock() = 0;
         [[nodiscard]] virtual AccountListResult ListAccounts() = 0;
         [[nodiscard]] virtual ClientResult SaveAccount(AccountDraft const& account) = 0;
-        // This may race an in-flight request and must cancel only work owned by
-        // this client connection; it is not a global vault lock operation.
-        virtual void CancelPendingOperations() noexcept = 0;
+        // Close is permanent and must linearize with request startup: an
+        // in-flight request is cancelled and every later request fails closed.
+        // It affects only this client connection and is not a global vault lock.
+        virtual void Close() noexcept = 0;
     };
 
     [[nodiscard]] std::shared_ptr<IDesktopClient> MakeDesktopClient();

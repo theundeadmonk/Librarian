@@ -13,6 +13,8 @@ namespace librarian::windows
             L"Unlock Librarian with your master password.";
         constexpr wchar_t UnlockingMessage[] =
             L"Librarian is completing a security-sensitive request.";
+        constexpr wchar_t LockingMessage[] =
+            L"Librarian is locking the vault through the local vault agent.";
         constexpr wchar_t SavingMessage[] =
             L"Librarian is saving the account through the local vault agent.";
         constexpr wchar_t EmptyAccountsMessage[] =
@@ -28,7 +30,7 @@ namespace librarian::windows
         constexpr wchar_t LockedDuringRequestMessage[] =
             L"The vault locked before the request completed.";
         constexpr wchar_t LockStatusUnknownMessage[] =
-            L"Librarian could not confirm that the vault locked. Access remains hidden until status is rechecked.";
+            L"Librarian could not confirm that the vault locked. Access remains hidden until the vault confirms it is locked.";
         constexpr wchar_t AccountLoadCancelledMessage[] =
             L"Librarian could not confirm the account list. Retry vault status.";
         constexpr wchar_t UnexpectedMessage[] =
@@ -44,14 +46,40 @@ namespace librarian::windows
         }
     }
 
-    void ShellViewModel::Initialize()
+    bool ShellViewModel::BeginInitialize()
     {
-        RefreshStatus();
+        return BeginStatusRequest(PendingAction::Initialize);
     }
 
-    void ShellViewModel::Retry()
+    void ShellViewModel::CompleteInitialize()
     {
-        RefreshStatus();
+        CompleteStatusRequest(PendingAction::Initialize);
+    }
+
+    bool ShellViewModel::BeginRetry()
+    {
+        if (state_ != ShellState::Error && state_ != ShellState::AgentUnavailable)
+        {
+            return false;
+        }
+
+        if (lock_intent_pending_)
+        {
+            return BeginLockRequest();
+        }
+
+        return BeginStatusRequest(PendingAction::RetryStatus);
+    }
+
+    void ShellViewModel::CompleteRetry()
+    {
+        if (pending_action_ == PendingAction::Lock)
+        {
+            CompleteLock();
+            return;
+        }
+
+        CompleteStatusRequest(PendingAction::RetryStatus);
     }
 
     bool ShellViewModel::BeginCreate()
@@ -132,31 +160,45 @@ namespace librarian::windows
         }
     }
 
-    void ShellViewModel::Lock()
+    bool ShellViewModel::BeginLock()
     {
-        if (state_ != ShellState::Unlocked)
+        if (
+            state_ != ShellState::Unlocked ||
+            pending_action_ != PendingAction::None)
+        {
+            return false;
+        }
+
+        lock_intent_pending_ = true;
+        return BeginLockRequest();
+    }
+
+    void ShellViewModel::CompleteLock()
+    {
+        if (pending_action_ != PendingAction::Lock)
         {
             return;
         }
 
-        resume_state_ = state_;
+        pending_action_ = PendingAction::None;
         try
         {
             auto const result = client_->Lock();
-            if (result.error == ClientError::Cancelled)
+            if (
+                (result.error == ClientError::None &&
+                    result.status == VaultStatus::Locked) ||
+                result.error == ClientError::Locked)
             {
-                account_editor_visible_ = false;
-                accounts_.clear();
-                state_ = ShellState::Error;
-                message_ = LockStatusUnknownMessage;
+                lock_intent_pending_ = false;
+                SetVaultStatus(VaultStatus::Locked);
                 return;
             }
 
-            Apply(result);
+            ApplyLockFailure(result.error);
         }
         catch (...)
         {
-            ApplyError(ClientError::Unexpected);
+            ApplyLockFailure(ClientError::Unexpected);
         }
     }
 
@@ -210,9 +252,9 @@ namespace librarian::windows
         }
     }
 
-    void ShellViewModel::CancelPendingOperations() noexcept
+    void ShellViewModel::Close() noexcept
     {
-        client_->CancelPendingOperations();
+        client_->Close();
     }
 
     ShellState ShellViewModel::State() const noexcept
@@ -235,11 +277,30 @@ namespace librarian::windows
         return account_editor_visible_;
     }
 
-    void ShellViewModel::RefreshStatus()
+    bool ShellViewModel::BeginStatusRequest(PendingAction const action)
     {
+        if (pending_action_ != PendingAction::None)
+        {
+            return false;
+        }
+
         resume_state_ = state_;
-        pending_action_ = PendingAction::None;
+        pending_action_ = action;
         account_editor_visible_ = false;
+        accounts_.clear();
+        state_ = ShellState::Unlocking;
+        message_ = UnlockingMessage;
+        return true;
+    }
+
+    void ShellViewModel::CompleteStatusRequest(PendingAction const action)
+    {
+        if (pending_action_ != action)
+        {
+            return;
+        }
+
+        pending_action_ = PendingAction::None;
 
         try
         {
@@ -249,6 +310,38 @@ namespace librarian::windows
         {
             ApplyError(ClientError::Unexpected);
         }
+    }
+
+    bool ShellViewModel::BeginLockRequest()
+    {
+        if (pending_action_ != PendingAction::None)
+        {
+            return false;
+        }
+
+        resume_state_ = state_;
+        pending_action_ = PendingAction::Lock;
+        account_editor_visible_ = false;
+        accounts_.clear();
+        state_ = ShellState::Unlocking;
+        message_ = LockingMessage;
+        return true;
+    }
+
+    void ShellViewModel::ApplyLockFailure(ClientError const error)
+    {
+        account_editor_visible_ = false;
+        accounts_.clear();
+
+        if (error == ClientError::AgentUnavailable)
+        {
+            state_ = ShellState::AgentUnavailable;
+            message_ = AgentUnavailableMessage;
+            return;
+        }
+
+        state_ = ShellState::Error;
+        message_ = LockStatusUnknownMessage;
     }
 
     void ShellViewModel::Apply(ClientResult const& result)
@@ -314,6 +407,13 @@ namespace librarian::windows
         account_editor_visible_ = false;
         accounts_.clear();
 
+        if (lock_intent_pending_ && status != VaultStatus::Locked)
+        {
+            state_ = ShellState::Error;
+            message_ = LockStatusUnknownMessage;
+            return;
+        }
+
         switch (status)
         {
         case VaultStatus::FirstRun:
@@ -321,6 +421,7 @@ namespace librarian::windows
             message_ = FirstRunMessage;
             break;
         case VaultStatus::Locked:
+            lock_intent_pending_ = false;
             state_ = ShellState::Locked;
             message_ = LockedMessage;
             break;

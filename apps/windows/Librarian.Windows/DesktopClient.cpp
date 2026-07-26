@@ -2,6 +2,7 @@
 
 #include <Windows.h>
 
+#include <atomic>
 #include <utility>
 
 namespace librarian::windows
@@ -13,46 +14,57 @@ namespace librarian::windows
         public:
             [[nodiscard]] ClientResult GetStatus() override
             {
-                return Unavailable();
+                return ClosedOrUnavailable();
             }
 
             [[nodiscard]] ClientResult CreateVault(
                 [[maybe_unused]] SecretText const& master_password) override
             {
-                return Unavailable();
+                return ClosedOrUnavailable();
             }
 
             [[nodiscard]] ClientResult Unlock(
                 [[maybe_unused]] SecretText const& master_password) override
             {
-                return Unavailable();
+                return ClosedOrUnavailable();
             }
 
             [[nodiscard]] ClientResult Lock() override
             {
-                return Unavailable();
+                return ClosedOrUnavailable();
             }
 
             [[nodiscard]] AccountListResult ListAccounts() override
             {
+                if (closed_.load(std::memory_order_acquire))
+                {
+                    return { ClientError::Cancelled, {} };
+                }
                 return { ClientError::AgentUnavailable, {} };
             }
 
             [[nodiscard]] ClientResult SaveAccount(
                 [[maybe_unused]] AccountDraft const& account) override
             {
-                return Unavailable();
+                return ClosedOrUnavailable();
             }
 
-            void CancelPendingOperations() noexcept override
+            void Close() noexcept override
             {
+                closed_.store(true, std::memory_order_release);
             }
 
         private:
-            [[nodiscard]] static ClientResult Unavailable()
+            [[nodiscard]] ClientResult ClosedOrUnavailable() const noexcept
             {
+                if (closed_.load(std::memory_order_acquire))
+                {
+                    return { ClientError::Cancelled, VaultStatus::Locked };
+                }
                 return { ClientError::AgentUnavailable, VaultStatus::Locked };
             }
+
+            std::atomic_bool closed_{ false };
         };
     }
 

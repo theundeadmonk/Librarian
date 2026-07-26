@@ -6,6 +6,7 @@
     xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
     mc:Ignorable="d"
+    Activated="OnActivated"
     Closed="OnClosed"
     Title="Librarian">
     <Grid
@@ -112,6 +113,7 @@
                             AutomationProperties.Name="Security request in progress"
                             Height="48"
                             IsActive="False"
+                            IsTabStop="True"
                             Width="48" />
                         <TextBlock
                             HorizontalAlignment="Center"

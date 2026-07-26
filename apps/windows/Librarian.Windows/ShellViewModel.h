@@ -24,8 +24,11 @@ namespace librarian::windows
     public:
         explicit ShellViewModel(std::shared_ptr<IDesktopClient> client);
 
-        void Initialize();
-        void Retry();
+        [[nodiscard]] bool BeginInitialize();
+        void CompleteInitialize();
+
+        [[nodiscard]] bool BeginRetry();
+        void CompleteRetry();
 
         [[nodiscard]] bool BeginCreate();
         void CompleteCreate(SecretText const& master_password);
@@ -33,13 +36,14 @@ namespace librarian::windows
         [[nodiscard]] bool BeginUnlock();
         void CompleteUnlock(SecretText const& master_password);
 
-        void Lock();
+        [[nodiscard]] bool BeginLock();
+        void CompleteLock();
 
         void ShowAccountEditor();
         void CancelAccountEditor();
         [[nodiscard]] bool BeginSaveAccount();
         void CompleteSaveAccount(AccountDraft const& account);
-        void CancelPendingOperations() noexcept;
+        void Close() noexcept;
 
         [[nodiscard]] ShellState State() const noexcept;
         [[nodiscard]] std::wstring const& Message() const noexcept;
@@ -50,12 +54,18 @@ namespace librarian::windows
         enum class PendingAction
         {
             None,
+            Initialize,
+            RetryStatus,
             Create,
             Unlock,
+            Lock,
             SaveAccount,
         };
 
-        void RefreshStatus();
+        [[nodiscard]] bool BeginStatusRequest(PendingAction action);
+        void CompleteStatusRequest(PendingAction action);
+        [[nodiscard]] bool BeginLockRequest();
+        void ApplyLockFailure(ClientError error);
         void Apply(ClientResult const& result);
         void ApplyError(ClientError error);
         void SetVaultStatus(VaultStatus status);
@@ -68,5 +78,6 @@ namespace librarian::windows
         std::wstring message_;
         std::vector<AccountSummary> accounts_;
         bool account_editor_visible_{ false };
+        bool lock_intent_pending_{ false };
     };
 }

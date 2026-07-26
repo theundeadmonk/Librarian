@@ -11,9 +11,12 @@ namespace winrt::Librarian::Windows::implementation
     {
         MainWindow();
 
-        void OnLoaded(
+        winrt::fire_and_forget OnLoaded(
             winrt::Windows::Foundation::IInspectable const&,
             Microsoft::UI::Xaml::RoutedEventArgs const&);
+        void OnActivated(
+            winrt::Windows::Foundation::IInspectable const&,
+            Microsoft::UI::Xaml::WindowActivatedEventArgs const&);
         void OnClosed(
             winrt::Windows::Foundation::IInspectable const&,
             Microsoft::UI::Xaml::WindowEventArgs const&);
@@ -23,10 +26,10 @@ namespace winrt::Librarian::Windows::implementation
         winrt::fire_and_forget OnUnlockClicked(
             winrt::Windows::Foundation::IInspectable const&,
             Microsoft::UI::Xaml::RoutedEventArgs const&);
-        void OnLockClicked(
+        winrt::fire_and_forget OnLockClicked(
             winrt::Windows::Foundation::IInspectable const&,
             Microsoft::UI::Xaml::RoutedEventArgs const&);
-        void OnRetryClicked(
+        winrt::fire_and_forget OnRetryClicked(
             winrt::Windows::Foundation::IInspectable const&,
             Microsoft::UI::Xaml::RoutedEventArgs const&);
         void OnNewAccountClicked(
@@ -43,6 +46,7 @@ namespace winrt::Librarian::Windows::implementation
         void Render();
         void RenderAccounts();
         void FocusCurrentState();
+        void QueueFocusCurrentState();
         void RenderSecurityTransitionIfOpen();
         void RenderAccountSaveIfOpen();
         void ClearSetupPasswords();
@@ -51,6 +55,7 @@ namespace winrt::Librarian::Windows::implementation
         librarian::windows::ShellViewModel view_model_;
         std::atomic_bool is_closed_{ false };
         bool is_loaded_{ false };
+        bool is_active_{ false };
     };
 }
 
