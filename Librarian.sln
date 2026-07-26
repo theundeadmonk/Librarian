@@ -8,6 +8,8 @@ Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "Librarian.WindowsPasskey", 
 EndProject
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "Librarian.WindowsIpcProbe", "platform\windows-ipc-probe\Librarian.WindowsIpcProbe.vcxproj", "{7BD3B71A-7B53-4B3D-912F-6BBA1F9CD84E}"
 EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "Librarian.WindowsShellTests", "tests\windows-shell\Librarian.WindowsShellTests.vcxproj", "{7F950E11-12A6-4E9A-A0A9-211011A5B419}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|x64 = Debug|x64
@@ -28,6 +30,10 @@ Global
 		{7BD3B71A-7B53-4B3D-912F-6BBA1F9CD84E}.Debug|x64.Build.0 = Debug|x64
 		{7BD3B71A-7B53-4B3D-912F-6BBA1F9CD84E}.Release|x64.ActiveCfg = Release|x64
 		{7BD3B71A-7B53-4B3D-912F-6BBA1F9CD84E}.Release|x64.Build.0 = Release|x64
+		{7F950E11-12A6-4E9A-A0A9-211011A5B419}.Debug|x64.ActiveCfg = Debug|x64
+		{7F950E11-12A6-4E9A-A0A9-211011A5B419}.Debug|x64.Build.0 = Debug|x64
+		{7F950E11-12A6-4E9A-A0A9-211011A5B419}.Release|x64.ActiveCfg = Release|x64
+		{7F950E11-12A6-4E9A-A0A9-211011A5B419}.Release|x64.Build.0 = Release|x64
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE

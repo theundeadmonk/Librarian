@@ -8,7 +8,13 @@
   <ItemGroup>
     <ClCompile Include="pch.cpp" />
     <ClCompile Include="App.xaml.cpp" />
+    <ClCompile Include="DesktopClient.cpp">
+      <Filter>Client</Filter>
+    </ClCompile>
     <ClCompile Include="MainWindow.xaml.cpp" />
+    <ClCompile Include="ShellViewModel.cpp">
+      <Filter>Client</Filter>
+    </ClCompile>
     <ClCompile Include="$(GeneratedFilesDir)module.g.cpp">
       <Filter>Generated Files</Filter>
     </ClCompile>
@@ -16,7 +22,13 @@
   <ItemGroup>
     <ClInclude Include="pch.h" />
     <ClInclude Include="App.xaml.h" />
+    <ClInclude Include="DesktopClient.h">
+      <Filter>Client</Filter>
+    </ClInclude>
     <ClInclude Include="MainWindow.xaml.h" />
+    <ClInclude Include="ShellViewModel.h">
+      <Filter>Client</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <Image Include="Assets\LockScreenLogo.scale-200.png">
@@ -44,6 +56,9 @@
   <ItemGroup>
     <Filter Include="Assets">
       <UniqueIdentifier>{D44485DC-25CD-4416-BE64-888A4F34FD02}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Client">
+      <UniqueIdentifier>{9E5D3C34-D4C7-4809-AD4D-423525043B46}</UniqueIdentifier>
     </Filter>
     <Filter Include="Generated Files">
       <UniqueIdentifier>{F7E88ECD-8B56-40BC-BDC3-13FA11D33FA0}</UniqueIdentifier>

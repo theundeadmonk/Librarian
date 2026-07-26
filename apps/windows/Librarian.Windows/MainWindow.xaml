@@ -6,25 +6,252 @@
     xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
     mc:Ignorable="d"
+    Activated="OnActivated"
+    Closed="OnClosed"
     Title="Librarian">
-    <Grid Padding="32">
-        <StackPanel
-            MaxWidth="640"
-            HorizontalAlignment="Center"
-            VerticalAlignment="Center"
-            Spacing="16">
-            <TextBlock
-                Style="{StaticResource TitleTextBlockStyle}"
-                Text="Librarian" />
-            <TextBlock
-                Style="{StaticResource SubtitleTextBlockStyle}"
-                Text="Windows MVP foundation" />
-            <InfoBar
-                IsClosable="False"
-                IsOpen="True"
-                Message="This build does not store credentials. Security design and implementation are still in progress."
-                Severity="Informational"
-                Title="Foundation build" />
-        </StackPanel>
+    <Grid
+        x:Name="RootLayout"
+        Background="{ThemeResource ApplicationPageBackgroundThemeBrush}"
+        Loaded="OnLoaded">
+        <ScrollViewer
+            HorizontalScrollBarVisibility="Disabled"
+            VerticalScrollBarVisibility="Auto">
+            <Grid
+                MaxWidth="760"
+                Padding="32"
+                HorizontalAlignment="Center"
+                RowSpacing="12">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="*" />
+                </Grid.RowDefinitions>
+
+                <TextBlock
+                    Grid.Row="0"
+                    AutomationProperties.HeadingLevel="Level1"
+                    Style="{StaticResource TitleTextBlockStyle}"
+                    Text="Librarian" />
+
+                <TextBlock
+                    x:Name="StateTitleTextBlock"
+                    Grid.Row="1"
+                    AutomationProperties.HeadingLevel="Level2"
+                    AutomationProperties.LiveSetting="Polite"
+                    Style="{StaticResource SubtitleTextBlockStyle}"
+                    Text="Starting" />
+
+                <TextBlock
+                    x:Name="StateDescriptionTextBlock"
+                    Grid.Row="2"
+                    MaxWidth="680"
+                    AutomationProperties.LiveSetting="Polite"
+                    HorizontalAlignment="Stretch"
+                    Text="Checking the local vault agent."
+                    TextWrapping="Wrap" />
+
+                <Grid Grid.Row="3" Margin="0,16,0,0">
+                    <StackPanel
+                        x:Name="FirstRunPanel"
+                        Spacing="12"
+                        Visibility="Collapsed">
+                        <InfoBar
+                            IsClosable="False"
+                            IsOpen="True"
+                            Message="Librarian stores vault data through the local agent. The Windows app never opens the vault database directly."
+                            Severity="Informational"
+                            Title="Local vault setup" />
+                        <PasswordBox
+                            x:Name="SetupPasswordBox"
+                            AutomationProperties.Name="New master password"
+                            Header="Master password"
+                            PasswordRevealMode="Hidden"
+                            TabIndex="1" />
+                        <PasswordBox
+                            x:Name="ConfirmPasswordBox"
+                            AutomationProperties.Name="Confirm new master password"
+                            Header="Confirm master password"
+                            PasswordRevealMode="Hidden"
+                            TabIndex="2" />
+                        <Button
+                            x:Name="CreateVaultButton"
+                            AutomationProperties.Name="Create local vault"
+                            Click="OnCreateVaultClicked"
+                            Content="Create vault"
+                            HorizontalAlignment="Left"
+                            TabIndex="3" />
+                    </StackPanel>
+
+                    <StackPanel
+                        x:Name="LockedPanel"
+                        Spacing="12"
+                        Visibility="Collapsed">
+                        <PasswordBox
+                            x:Name="MasterPasswordBox"
+                            AutomationProperties.Name="Master password"
+                            Header="Master password"
+                            PasswordRevealMode="Hidden"
+                            TabIndex="1" />
+                        <Button
+                            x:Name="UnlockButton"
+                            AutomationProperties.Name="Unlock local vault"
+                            Click="OnUnlockClicked"
+                            Content="Unlock"
+                            HorizontalAlignment="Left"
+                            TabIndex="2" />
+                    </StackPanel>
+
+                    <StackPanel
+                        x:Name="UnlockingPanel"
+                        AutomationProperties.LiveSetting="Polite"
+                        HorizontalAlignment="Center"
+                        Spacing="12"
+                        Visibility="Collapsed">
+                        <ProgressRing
+                            x:Name="UnlockingProgressRing"
+                            AutomationProperties.Name="Security request in progress"
+                            Height="48"
+                            IsActive="False"
+                            IsTabStop="True"
+                            Width="48" />
+                        <TextBlock
+                            HorizontalAlignment="Center"
+                            Text="Please wait."
+                            TextWrapping="Wrap" />
+                    </StackPanel>
+
+                    <StackPanel
+                        x:Name="UnlockedPanel"
+                        Spacing="16"
+                        Visibility="Collapsed">
+                        <StackPanel Spacing="8">
+                            <TextBlock
+                                x:Name="AccountHeaderTitle"
+                                VerticalAlignment="Center"
+                                AutomationProperties.HeadingLevel="Level3"
+                                Style="{StaticResource BodyStrongTextBlockStyle}"
+                                Text="Website accounts" />
+                            <Button
+                                x:Name="AddAccountButton"
+                                AutomationProperties.Name="Add website account"
+                                Click="OnNewAccountClicked"
+                                Content="Add account"
+                                HorizontalAlignment="Left"
+                                TabIndex="1" />
+                            <Button
+                                x:Name="LockButton"
+                                AutomationProperties.Name="Lock local vault"
+                                Click="OnLockClicked"
+                                Content="Lock"
+                                HorizontalAlignment="Left"
+                                TabIndex="2" />
+                        </StackPanel>
+
+                        <TextBlock
+                            x:Name="EmptyAccountsTextBlock"
+                            Text="No accounts are stored in this vault yet."
+                            TextWrapping="Wrap" />
+
+                        <ListView
+                            x:Name="AccountsListView"
+                            AutomationProperties.Name="Website accounts"
+                            IsItemClickEnabled="False"
+                            SelectionMode="None"
+                            TabIndex="3" />
+
+                        <Border
+                            x:Name="AccountEditorPanel"
+                            BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                            BorderThickness="1"
+                            CornerRadius="8"
+                            Padding="16"
+                            Visibility="Collapsed">
+                            <StackPanel Spacing="12">
+                                <TextBlock
+                                    AutomationProperties.HeadingLevel="Level3"
+                                    Style="{StaticResource BodyStrongTextBlockStyle}"
+                                    Text="New website account" />
+                                <TextBox
+                                    x:Name="ServiceNameTextBox"
+                                    AutomationProperties.Name="Service name"
+                                    Header="Service name"
+                                    TabIndex="4" />
+                                <TextBox
+                                    x:Name="OriginTextBox"
+                                    AutomationProperties.Name="Website origin"
+                                    Header="Website origin"
+                                    PlaceholderText="https://example.com"
+                                    TabIndex="5" />
+                                <TextBox
+                                    x:Name="UsernameTextBox"
+                                    AutomationProperties.Name="Username"
+                                    Header="Username"
+                                    TabIndex="6" />
+                                <PasswordBox
+                                    x:Name="AccountPasswordBox"
+                                    AutomationProperties.Name="Account password"
+                                    Header="Password"
+                                    PasswordRevealMode="Hidden"
+                                    TabIndex="7" />
+                                <StackPanel Spacing="8">
+                                    <Button
+                                        AutomationProperties.Name="Save website account"
+                                        Click="OnSaveAccountClicked"
+                                        Content="Save"
+                                        HorizontalAlignment="Left"
+                                        TabIndex="8" />
+                                    <Button
+                                        AutomationProperties.Name="Cancel account editing"
+                                        Click="OnCancelAccountClicked"
+                                        Content="Cancel"
+                                        HorizontalAlignment="Left"
+                                        TabIndex="9" />
+                                </StackPanel>
+                            </StackPanel>
+                        </Border>
+                    </StackPanel>
+
+                    <StackPanel
+                        x:Name="ErrorPanel"
+                        Spacing="12"
+                        Visibility="Collapsed">
+                        <InfoBar
+                            x:Name="ErrorInfoBar"
+                            IsClosable="False"
+                            IsOpen="True"
+                            Message="Librarian could not complete the request."
+                            Severity="Error"
+                            Title="Request failed" />
+                        <Button
+                            x:Name="ErrorRetryButton"
+                            AutomationProperties.Name="Retry vault status"
+                            Click="OnRetryClicked"
+                            Content="Try again"
+                            HorizontalAlignment="Left"
+                            TabIndex="1" />
+                    </StackPanel>
+
+                    <StackPanel
+                        x:Name="AgentUnavailablePanel"
+                        Spacing="12"
+                        Visibility="Collapsed">
+                        <InfoBar
+                            IsClosable="False"
+                            IsOpen="True"
+                            Message="Librarian remains locked while the local vault agent is unavailable."
+                            Severity="Warning"
+                            Title="Vault agent unavailable" />
+                        <Button
+                            x:Name="AgentUnavailableRetryButton"
+                            AutomationProperties.Name="Retry vault agent connection"
+                            Click="OnRetryClicked"
+                            Content="Try again"
+                            HorizontalAlignment="Left"
+                            TabIndex="1" />
+                    </StackPanel>
+                </Grid>
+            </Grid>
+        </ScrollViewer>
     </Grid>
 </Window>

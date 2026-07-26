@@ -23,7 +23,16 @@ namespace winrt::Librarian::Windows::implementation
 
     void App::OnLaunched([[maybe_unused]] LaunchActivatedEventArgs const& event)
     {
-        window = make<MainWindow>();
+        if (!window)
+        {
+            window = make<MainWindow>();
+            window.Closed([this](
+                [[maybe_unused]] IInspectable const& sender,
+                [[maybe_unused]] WindowEventArgs const& event)
+            {
+                window = nullptr;
+            });
+        }
         window.Activate();
     }
 }
