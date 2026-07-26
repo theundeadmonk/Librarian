@@ -61,10 +61,16 @@ This decision was reviewed against primary sources current on 2026-07-25:
   states that the package full name incorporates name, version, architecture,
   resource identifier, and publisher. Exact package-full-name comparison is
   therefore also the mixed-version guard for Slice 1.
-- Microsoft’s current
-  [named-pipe privilege-escalation guidance](https://learn.microsoft.com/en-us/aspnet/core/grpc/interprocess)
-  recommends that a client use no impersonation or anonymous impersonation
-  unless impersonation is required. Librarian does not require impersonation.
+- Microsoft defines
+  [SecurityIdentification](https://learn.microsoft.com/en-us/windows/win32/secauthz/impersonation-levels)
+  as allowing a server to obtain a client's identity and privileges without
+  letting it act as that client when accessing resources.
+  [`OpenThreadToken`](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-openthreadtoken)
+  explicitly supports query-only access to a SecurityIdentification token with
+  `OpenAsSelf`, and the AppModel APIs expose
+  [package identity from that token](https://learn.microsoft.com/en-us/windows/win32/api/appmodel/nf-appmodel-getpackagefullnamefromtoken).
+  Librarian uses that pipe-bound token to close the PID-reopen race while
+  retaining least-privilege impersonation semantics.
 - Microsoft Security Intelligence’s January 2026 update for
   [named-pipe impersonation tooling](https://www.microsoft.com/en-us/wdsi/threats/malware-encyclopedia-description?Name=VirTool%3AWin64%2FImpersonate%21rfn&ThreatID=2147938841)
   documents active abuse of predictable, weakly protected named-pipe servers.
@@ -124,6 +130,12 @@ This decision was reviewed against primary sources current on 2026-07-25:
 Run one non-elevated vault agent for one Windows logon session. The agent is
 not a Windows service and does not listen across user sessions.
 
+Before creating listeners, the agent holds the protected, session-local named
+mutex `Local\Librarian.Agent.Singleton.v1` for its process lifetime. An
+existing object fails startup closed. A same-session process can therefore
+cause denial of service by squatting the name, but cannot become an
+authenticated agent or make a second agent open the vault.
+
 The agent creates an eight-instance pipe pool before publishing discovery
 metadata:
 
@@ -166,6 +178,17 @@ This design combines:
 A hostile local process can still cause temporary denial of service by racing
 startup or repeatedly connecting. It cannot become an authenticated peer merely
 by winning that race.
+
+Within the agent process, a runtime also reserves the vault target before
+opening it. Existing targets retain a stable open file-identity handle in
+addition to their normalized canonical path, so hard links, alternate casing,
+and syntactic aliases cannot create two owners for one vault. Missing targets
+use a canonical parent plus a case-normalized final component on Windows; the
+reservation is upgraded to the published file identity while the ownership and
+commit gates are both held. Unlock captures the identity of the guarded file
+that was authenticated, then compares and binds that exact identity under the
+same two gates before publishing the unlocked state. A replaced target already
+leased through another path therefore fails closed.
 
 ### Pipe security descriptor
 
@@ -216,6 +239,12 @@ The descriptor:
 - uses safe create/replace, no-follow, regular-file, ownership, size, and
   parent-path checks equivalent to the vault filesystem boundary;
 - is written only after listeners are ready;
+- is removed by stable file identity if validation, durability, or ancestor
+  revalidation fails after atomic replacement, without deleting a concurrently
+  substituted file;
+- is deleted through the same no-follow, owner-verified handle that was opened
+  with delete access, both during failed-publication cleanup and ordinary
+  removal; a pathname replacement is preserved and reported as a conflict;
 - is removed before intentional shutdown; and
 - is considered stale unless the connected server independently passes the
   complete peer-verification sequence.
@@ -231,26 +260,46 @@ server identity remains ambiguous.
 Immediately after `ConnectNamedPipe` completes and before reading any
 application bytes, the agent must:
 
-1. Call `GetNamedPipeClientProcessId` on the connected pipe handle.
-2. Open that process with only `PROCESS_QUERY_LIMITED_INFORMATION |
+1. Call `ImpersonateNamedPipeClient`, open the resulting
+   SecurityIdentification thread token with query-only access, and immediately
+   `RevertToSelf`. Failure to acquire the token rejects the connection. Per
+   Microsoft's
+   [`RevertToSelf` contract](https://learn.microsoft.com/en-us/windows/win32/api/securitybaseapi/nf-securitybaseapi-reverttoself),
+   failure to revert terminates the agent process because continuing could
+   execute vault work in the client's security context.
+2. Query the pipe-bound token for user SID, logon SID, session, integrity,
+   elevation, AppContainer state, package full name, package family, and
+   application identity. This token—not a subsequently reopened PID—is the
+   authority for the security context that established the connection.
+3. Call `GetNamedPipeClientProcessId` on the connected pipe handle.
+4. Open that process with only `PROCESS_QUERY_LIMITED_INFORMATION |
    SYNCHRONIZE`.
-3. Retain the process handle for the lifetime of the connection so PID reuse
+5. Retain the process handle for the lifetime of the connection so PID reuse
    cannot substitute a new process and peer exit can cancel work.
-4. Query the process token and require:
+   Recheck that handle after complete frame assembly and immediately before
+   runtime admission; a frame buffered before process exit is not admissible.
+6. Query the retained process token and require an exact match with every
+   pipe-bound token field. A connector that exits before `OpenProcess` cannot
+   become an approved client merely because its numeric PID is later reused.
+   Then require:
    - the expected Windows user SID;
    - the same logon SID;
    - the same Windows session;
    - the approved non-elevated integrity policy; and
    - no unexpected AppContainer or elevation state.
-5. Query AppModel identity and require:
+7. Require the token-bound AppModel identity to contain:
    - the Librarian package family;
    - the exact package full name of the running agent; and
    - the expected application identity when that role has one.
-6. Query the executable image and require the exact role entry beneath the
+8. Query the executable image from the retained process and require the exact
+   role entry beneath the
    registered, signed package install root.
-7. Derive exactly one client role from the installed component manifest.
+9. Derive exactly one client role from the installed component manifest.
    Zero or multiple matches are authorization failure.
-8. Close the connection without a protocol response on any identity failure.
+10. Close the connection without a protocol response on any identity failure.
+    Identity-observation APIs are side-checked: a server-side connection can
+    expose only its retained client observation, and a client-side connection
+    can expose only its retained server observation.
 
 The exact package full name intentionally rejects a partially updated product
 set. A package family match alone is insufficient because it would allow an old
@@ -263,8 +312,9 @@ Immediately after `CreateFileW` connects and before sending even `ClientHello`,
 every client must perform the symmetric sequence:
 
 1. Open the pipe using
-   `SECURITY_SQOS_PRESENT | SECURITY_ANONYMOUS |
-   SECURITY_EFFECTIVE_ONLY`. The agent never needs to impersonate a client.
+   `SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION |
+   SECURITY_EFFECTIVE_ONLY`. This permits the agent to query the connection's
+   token identity but not to access resources as the client.
 2. Call `GetNamedPipeServerProcessId`.
 3. Open and retain the process handle with
    `PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE`.
@@ -347,6 +397,7 @@ Version 1 defines only:
 | `event` | Agent to client | Bounded state transition such as `locked` or `shutting_down` |
 
 Unknown kinds and nonzero flags close the connection.
+`cancel` is header-only and therefore requires a zero payload length.
 
 ### Strict deterministic CBOR
 
@@ -374,6 +425,9 @@ Version 1 forbids:
 Every decoded payload is re-encoded and compared byte-for-byte, or validated by
 an equivalent deterministic decoder, before dispatch. Secret-bearing buffers
 use zeroizing ownership from allocation through final response disposal.
+Public request and response constructors enforce the same bounds and nonzero
+identifier invariants as their decoders, so the implementation cannot emit a
+message it would reject on receipt.
 
 ## Handshake and version negotiation
 
@@ -424,7 +478,9 @@ authority.
 The server generates the nonzero connection ID in the `ServerHello` header.
 That header carries the selected protocol major and minor and a zero request
 ID. Every subsequent request, response, cancellation, and event carries the
-selected exact version and nonzero connection ID.
+selected exact version and nonzero connection ID. The negotiated payload limit
+applies symmetrically to every request and response envelope. It cannot be
+lower than the 21 bytes required for a canonical detail-free failure.
 
 Version rules:
 
@@ -448,6 +504,9 @@ After `ServerHello`:
 - the 128-bit connection ID must match every frame;
 - only `request` frames allocate IDs: the client begins at 1 and each later
   request ID is strictly greater than the last request ID sent;
+- request-frame validation and ID issuance occur before that request worker
+  contends for the global admission gate, so a later cancel cannot misclassify
+  an already received request as never issued;
 - a zero, reused, decreasing, or wrapped `request` ID closes the connection;
 - a `response` echoes the exact ID of one in-flight request and is terminal;
   responses may arrive in any order, but an unknown, duplicate, or already
@@ -464,10 +523,43 @@ After `ServerHello`:
 - the agent captures the current epoch again before side effects and before
   plaintext or signature disclosure;
 - client-supplied timeouts are relative durations, clamped by the agent, and
-  converted to a server monotonic deadline;
+  converted to a server monotonic deadline before waiting for the admission
+  gate, so admission backpressure consumes rather than resets the request
+  budget;
 - `cancel` is idempotent and refers only to an in-flight request on the same
   connection; and
 - disconnect or peer-process exit cancels all work owned by that connection.
+
+Every pending overlapped read or write is cancelled and synchronously drained
+before its stack `OVERLAPPED` structure or caller buffer is released, including
+when the monotonic deadline has already expired before the wait begins.
+Authenticated pipe connections use process-wide owned-handle types and
+per-direction I/O gates, allowing one frame reader and response workers to
+share a connection without interleaving same-direction byte-stream operations.
+
+Admission, registration, cancel, disconnect, lock, and terminal response
+commitment share one ordering gate. An admitted request is registered before a
+lock or disconnect may complete. A terminal response remains behind that gate
+until the authenticated transport synchronously writes all bytes or reports
+failure, including authorization, stale-epoch, and capacity rejections; it
+cannot be queued for a later write after a lock acknowledgement or disconnect.
+Authenticated `not_found` results remain authorization-bound at this terminal
+gate because existence is vault-derived metadata; cancellation, deadline,
+lock, or epoch change replaces them before publication.
+Status state and unlock epoch are captured together while this gate is held.
+The server uses that paired snapshot when constructing `ServerHello`; callers
+must not compose handshake status from the separate diagnostic accessors.
+Likewise, replaying a cached create-vault result refreshes its status and epoch
+at terminal commitment instead of returning the snapshot cached by the
+original request. Because that replay discloses only current non-secret status,
+an already committed create may report the current locked state; an original
+in-flight create remains subordinate to a concurrent lock.
+
+After a secret-bearing request waits for the vault mutex, it repeats the
+cancellation, monotonic-deadline, lock-state, and epoch checks before doing
+cryptographic work. Authentication of account pages and mutation snapshots
+repeats those checks before every encrypted record, so large vaults do not turn
+one admission check into an uninterruptible scan.
 
 No authorization token, connection ID, request ID, nonce, or discovery field is
 accepted on a different connection. Captured frames are therefore unusable as
@@ -558,26 +650,51 @@ Version 1 defaults:
 | Peer verification plus handshake | 2 seconds |
 | In-flight requests per connection | 4 |
 | In-flight requests globally | 32 |
+| Issued request IDs per connection lifetime | 65,536 |
+| Cached mutation idempotency outcomes in the replay window | 1,024 |
+| Peer-authentication retry delay | 25 ms exponential backoff, 1 second cap |
 | Concurrent password KDF operations | 1 |
 | Concurrent vault mutations | 1 |
+| Concurrent lock transitions | 1 |
 | Ordinary operation deadline | 5 seconds |
-| Password unlock deadline | 30 seconds |
+| Password KDF or lock-transition deadline | 30 seconds |
 | Windows-mediated passkey transaction | 120 seconds |
 | Event queue per connection | 8 |
 
 All limits apply before unbounded allocation or work. The server may advertise
-lower limits. A client cannot raise them.
+lower limits, subject to the minimum failure-envelope size. A client cannot
+raise them. Before the synchronous transport callback receives any terminal
+response, the agent checks the exact canonical response-envelope length against
+that connection's negotiated limit. An oversized successful body is discarded
+and replaced by detail-free `operation_failed`; an idempotent mutation outcome
+remains cached so a retry over a connection with an adequate limit cannot
+repeat the side effect.
+
+Lock uses the transition deadline because it must cancel and synchronously
+drain both an in-flight password KDF and any local create-vault KDF or generated
+key material before acknowledging that key state is clear. Create holds a
+dedicated drain gate from before password work until all local vault and
+recovery material has either been published or dropped. Lock and shutdown
+cancel first, then wait for that gate. A successful lock retains its transition
+authority through the synchronous terminal response write, so unlock cannot
+publish in the gap between the state change and its acknowledgement. Lock must
+not inherit the shorter ordinary-operation cap while waiting for work that was
+legitimately admitted with the KDF cap.
 
 Backpressure is explicit:
 
 - excess connections are rejected;
-- excess frames receive `busy` only after client authentication;
+- excess frames receive `busy` only after client authentication and only while
+  their admission-wide deadline remains live; capacity discovered after that
+  deadline returns `deadline_exceeded`, not a retryable backoff, for both
+  per-connection and global capacity;
 - KDF, mutation, and lock transitions are serialized;
 - expensive operations consume bounded global permits;
 - event overflow closes the slow connection rather than retaining unbounded
   state; and
-- repeated unauthenticated or malformed connections are rate-limited without
-  producing secret-bearing diagnostics.
+- repeated peer-authentication failures use listener-pool-wide exponential
+  backoff, reset only by successful authentication, without producing
+  secret-bearing diagnostics.
 
 ## Agent states and failure behavior
 
@@ -596,10 +713,57 @@ Backpressure is explicit:
 | Incompatible protocol | Return one non-secret `incompatible` result only to an authenticated peer, then close. |
 | Windows sign-out | Lock and exit. No endpoint survives the logon session. |
 
+After the core authenticates an unlock, the runtime retains the vault mutex
+through extraction of the authenticated cryptographic vault identifier. A lock
+or shutdown that starts in that interval cancels the unlock, waits for the
+guard, clears the session, and produces a terminal lifecycle result rather than
+turning the expected race into a connection-fatal internal error. If the
+unlock deadline instead expires while publication waits for the transition
+gate, the runtime clears the session and preserves `deadline_exceeded` rather
+than misreporting cancellation.
+
 Ambiguous completion is failure. A client may retry an idempotent status read
 after reconnecting. A mutating request requires an operation-specific
 idempotency key and status check designed in issue #13; it must not be blindly
 replayed after a timeout or disconnect.
+
+The implementation binds each cached mutation result to an HMAC-SHA-256
+fingerprint of the complete canonical operation and body under a random
+per-agent-start key. Reusing a key for a different payload is a conflict, and
+the cache retains neither a plaintext credential nor a reusable unkeyed
+password digest. The raw bounded body is fingerprinted and its key is reserved
+before operation-specific decoding, so a terminal malformed-body result claims
+the same key/payload pair and a corrected payload must use a new key. Only
+operations defined as idempotent mutations may carry a key; a key on a read,
+status, unlock, or lock request is rejected during canonical envelope
+validation. The cache is a bounded first-in, first-out replay window: admitting
+a new mutation evicts the oldest completed outcome when necessary, while
+in-flight keys remain reserved. Exhausting the window therefore cannot
+permanently disable mutations; clients must not rely on replay results after an
+entry has aged out.
+
+Every terminal `operation_failed` result from an admitted idempotent mutation is
+also cached. A storage error observed after SQLite commit can be
+indistinguishable from a pre-commit failure at the public boundary; replaying
+the same key must return the same terminal result rather than risk applying an
+add, update, or delete twice. Recovery or reconciliation uses a new operation
+only after the vault has been authenticated again.
+
+The replay window is scoped to the cryptographic vault identifier in the
+authenticated header, in addition to the owned file identity. When a locked
+runtime successfully authenticates a different vault at its owned path, even
+after an in-place overwrite that preserves filesystem identity, it clears
+completed outcomes before binding and publishing that identity. If an old
+idempotent mutation is still in flight, the identity transition fails closed
+instead of allowing that reservation to repopulate the new vault's cache.
+
+Cancellation, deadline, or epoch change observed at a mutation's commit gate
+uses a distinct rollback result. It does not masquerade as storage corruption
+and does not lock the shared vault session; only an actual integrity, storage,
+or cryptographic failure invalidates that session. A mutation retains the gate
+through successful commit verification, but releases it before classifying any
+failure or synchronizing the locked runtime state, so failure handling never
+re-enters the non-reentrant gate while holding its original guard.
 
 ## Public error model
 
@@ -676,8 +840,11 @@ The probe proves:
 8. the client rejects a copied executable that squats on the expected pipe
    name.
 
-The probe uses disposable marker bytes only. It opens clients with anonymous
-security QoS and never impersonates them.
+The probe uses disposable marker bytes only. Its copied-binary fixture remains
+an independent anonymous-QoS boundary test. The production Rust transport
+separately exercises SecurityIdentification token capture and rejects a
+substituted process observation whose token identity does not match the
+pipe-bound token.
 
 Observed on the supported Windows 11 development machine:
 
@@ -704,12 +871,12 @@ and #20 add package and end-to-end cases.
 
 | Threat | Required test |
 |---|---|
-| Endpoint discovery | Stale, truncated, oversized, replaced, redirected, and future-version descriptors |
+| Endpoint discovery | Stale, truncated, oversized, replaced, redirected, future-version, and post-publication failure descriptors |
 | Server squatting | Copied binary, wrong package, wrong signer, wrong path, stale PID, PID reuse, and pre-created endpoint |
 | Client impersonation | Unknown executable, copied executable, wrong package, wrong AUMID, wrong user, wrong logon SID, wrong session, elevated peer, and exited peer |
 | Multi-instance interception | Full pre-created pool, duplicate instance attempt, listener loss and endpoint rotation |
-| Impersonation abuse | Client uses anonymous security QoS; server has no impersonation path |
-| Framing | Partial header, bad magic, bad header version, invalid pre-negotiation version, unknown kind, nonzero flags, length 65,537, early EOF, trailing data, slow read, and frame flood |
+| Impersonation abuse | Client uses identification-only security QoS; server can query but cannot use the token for resource access; pipe-bound token must exactly match the reopened retained process |
+| Framing | Partial header, bad magic, bad header version, invalid pre-negotiation version, unknown kind, nonzero flags, payload-bearing cancel, length 65,537, early EOF, trailing data, slow read, exited-peer buffered frame, and frame flood |
 | CBOR | Nonpreferred integers, indefinite values, map, tag, float, invalid UTF-8, excessive depth, wrong array length, unknown field, and noncanonical re-encoding |
 | Authorization | Every operation attempted by every unauthorized role |
 | Replay | Zero/reused/decreasing/wrapped request, unknown/duplicate response, invalid cancel target, nonzero event ID, cross-connection ID, stale epoch, and post-restart request |
@@ -800,6 +967,33 @@ Issue #13 should implement this decision in three layers:
 
 The probe is evidence, not reusable production code. Copying its broad C++
 test harness into the agent is prohibited.
+
+Issue #13 implements these layers as:
+
+- `crates/agent-protocol`, containing the checked-in CDDL, fixed frame codec,
+  canonical operation bodies and results, closed role table, negotiation,
+  replay/cancellation state machine, bounded event queue, and arbitrary-input
+  conformance tests;
+- `platform/windows-ipc`, containing the complete listener pool, protected
+  DACL and single-agent mutex, overlapped deadline/peer-exit I/O, mutual
+  token/AppModel observation, retained process handles, identification-only
+  client security QoS, pipe-bound client-token/process matching, and guarded
+  atomic discovery descriptor lifecycle; and
+- `crates/vault-agent::runtime`, containing the sole vault owner, global/KDF/
+  mutation/lock admission, a commit gate that orders publication and terminal
+  transport writes against lock, cancel, disconnect, and sign-out, typed
+  desktop dispatch, encoded-size-aware bounded account paging,
+  connection-bound cancellation, lock epochs, stable file-identity ownership,
+  per-record authority checks during authenticated reads and mutations,
+  coherent handshake and response status snapshots, authenticated unlock
+  ownership rebinding, core-failure state synchronization, sign-out shutdown,
+  and bounded keyed idempotency outcomes whose terminal failures are retained
+  and whose replayed state is refreshed at terminal commitment.
+
+The production entry point remains fail closed until issue #19 supplies the
+signed MSIX manifest, immutable role paths, package-local state path, and
+positive packaged identity fixture. There is no runtime switch that downgrades
+the production peer policy to unpackaged path trust.
 
 ## Consequences
 

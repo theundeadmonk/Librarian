@@ -78,17 +78,18 @@ pub(crate) fn reserve_staging_file(target: &Path) -> Result<StagedVault, CreateE
     Err(CreateError::Failed)
 }
 
+#[cfg(test)]
 pub(crate) fn publish_staged_vault(
     staging: &mut StagedVault,
     target: &Path,
 ) -> Result<File, CreateError> {
-    publish_staged_vault_with_before_link(staging, target, || {})
+    publish_staged_vault_with_before_link(staging, target, || Ok(()))
 }
 
 pub(crate) fn publish_staged_vault_with_before_link(
     staging: &mut StagedVault,
     target: &Path,
-    before_link: impl FnOnce(),
+    before_link: impl FnOnce() -> Result<(), CreateError>,
 ) -> Result<File, CreateError> {
     ensure_sidecars_absent_with_ancestor_guards(staging.ancestor_guards(), target)
         .map_err(|_| CreateError::Failed)?;
@@ -101,7 +102,7 @@ pub(crate) fn publish_staged_vault_with_before_link(
         staging.ancestor_guards(),
     )
     .map_err(|_| CreateError::Failed)?;
-    before_link();
+    before_link()?;
     match hard_link_with_ancestor_guards(staging.ancestor_guards(), staging.path(), target) {
         Ok(()) => {
             let published_guard = open_regular_file_guard_with_ancestor_guards(

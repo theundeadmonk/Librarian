@@ -4,6 +4,101 @@
   "platformOnlyTests": [
     {
       "platform": "windows",
+      "test": "librarian-windows-ipc::lib:librarian_windows_ipc::platform::tests::authenticated_pipe_connections_are_send_and_sync::test:active",
+      "rationale": "Compile-time proof that the Windows owned process and named-pipe handles can be shared between the single frame reader and response workers, with same-direction I/O serialized by connection-local gates."
+    },
+    {
+      "platform": "windows",
+      "test": "librarian-windows-ipc::lib:librarian_windows_ipc::platform::tests::authentication_failures_back_off_with_a_cap_and_success_reset::test:active",
+      "rationale": "Exercises the Windows listener-pool authentication-failure throttle, including exponential delay, the denial-of-service cap, and reset only after successful peer authentication."
+    },
+    {
+      "platform": "windows",
+      "test": "librarian-windows-ipc::lib:librarian_windows_ipc::discovery::tests::publish_load_replace_and_remove_are_canonical::test:active",
+      "rationale": "Exercises guarded Windows package-local descriptor publication, atomic replacement, canonical loading, durability, and shutdown removal."
+    },
+    {
+      "platform": "windows",
+      "test": "librarian-windows-ipc::lib:librarian_windows_ipc::discovery::tests::post_publication_cleanup_preserves_a_replacement::test:active",
+      "rationale": "Exercises Windows file-identity checks that prevent failed-publication cleanup from deleting a descriptor replaced after the atomic move."
+    },
+    {
+      "platform": "windows",
+      "test": "librarian-windows-ipc::lib:librarian_windows_ipc::discovery::tests::post_publication_failure_removes_the_published_descriptor::test:active",
+      "rationale": "Exercises identity-guarded cleanup of an endpoint descriptor when validation or durability fails after the atomic move."
+    },
+    {
+      "platform": "windows",
+      "test": "librarian-windows-ipc::lib:librarian_windows_ipc::discovery::tests::removal_deletes_the_verified_handle_not_a_replacement_path::test:active",
+      "rationale": "Exercises Windows handle-based descriptor deletion and proves a pathname replacement is preserved after the original file is verified."
+    },
+    {
+      "platform": "windows",
+      "test": "librarian-windows-ipc::lib:librarian_windows_ipc::discovery::tests::redirected_descriptors_fail_and_inflight_replacement_is_blocked::test:active",
+      "rationale": "Exercises Windows reparse-point rejection and file-sharing guards that block descriptor deletion or replacement during a read."
+    },
+    {
+      "platform": "windows",
+      "test": "librarian-windows-ipc::lib:librarian_windows_ipc::discovery::tests::truncated_oversized_and_future_descriptors_fail_closed::test:active",
+      "rationale": "Exercises Windows guarded reads while rejecting truncated, over-limit, and future-schema discovery files before trust."
+    },
+    {
+      "platform": "windows",
+      "test": "librarian-windows-ipc::lib:librarian_windows_ipc::platform::tests::current_process_identity_fields_are_queryable::test:active",
+      "rationale": "Queries Windows access-token, integrity, session, process-image, creation-time, and AppModel identity fields used for mutual named-pipe authentication."
+    },
+    {
+      "platform": "windows",
+      "test": "librarian-windows-ipc::lib:librarian_windows_ipc::platform::tests::pipe_bound_client_token_rejects_a_substituted_process_identity::test:active",
+      "rationale": "Exercises Windows-only SecurityIdentification named-pipe impersonation, access-token and AppModel identity binding, and rejection of a substituted process identity that could otherwise exploit PID reuse."
+    },
+    {
+      "platform": "windows",
+      "test": "librarian-windows-ipc::lib:librarian_windows_ipc::platform::tests::peer_observation_rejects_wrong_connection_side::test:active",
+      "rationale": "Exercises Windows-only named-pipe connection orientation so client and server identity accessors cannot silently return the observation for the wrong endpoint."
+    },
+    {
+      "platform": "windows",
+      "test": "librarian-windows-ipc::lib:librarian_windows_ipc::platform::tests::completed_frames_from_exited_peers_are_rejected::test:active",
+      "rationale": "Exercises retained Windows process-handle liveness after complete frame assembly so buffered requests from exited peers are not admitted."
+    },
+    {
+      "platform": "windows",
+      "test": "librarian-windows-ipc::lib:librarian_windows_ipc::platform::tests::expired_deadlines_are_reported_before_a_wait::test:active",
+      "rationale": "Exercises the expired-deadline branch used to cancel and drain pending Windows overlapped I/O before releasing its storage."
+    },
+    {
+      "platform": "windows",
+      "test": "librarian-windows-ipc::lib:librarian_windows_ipc::platform::tests::failed_impersonation_reversion_is_fatal::test:active",
+      "rationale": "Exercises the Windows-only fail-stop path required when RevertToSelf cannot restore the agent thread after named-pipe client impersonation."
+    },
+    {
+      "platform": "windows",
+      "test": "librarian-windows-ipc::lib:librarian_windows_ipc::platform::tests::first_instance_flag_blocks_a_duplicate_server::test:active",
+      "rationale": "Exercises the protected session-local single-agent mutex and Windows FILE_FLAG_FIRST_PIPE_INSTANCE endpoint-squatting protection across the complete named-pipe listener pool."
+    },
+    {
+      "platform": "windows",
+      "test": "librarian-windows-ipc::lib:librarian_windows_ipc::platform::tests::protected_dacl_is_constructible_for_current_logon::test:active",
+      "rationale": "Validates the Windows protected pipe DACL contains only LocalSystem and the current logon SID."
+    },
+    {
+      "platform": "windows",
+      "test": "librarian-windows-ipc::lib:librarian_windows_ipc::platform::tests::random_pipe_names_are_scoped_and_distinct::test:active",
+      "rationale": "Validates Windows local named-pipe endpoint syntax and per-start cryptographic randomization."
+    },
+    {
+      "platform": "windows",
+      "test": "librarian-windows-ipc::lib:librarian_windows_ipc::platform::tests::unpackaged_current_process_cannot_satisfy_production_policy::test:active",
+      "rationale": "Exercises Windows AppModel queries and proves missing MSIX package identity fails the production peer policy."
+    },
+    {
+      "platform": "windows",
+      "test": "librarian-windows-ipc::lib:librarian_windows_ipc::platform::tests::unpackaged_hostile_client_is_rejected_before_bytes_and_listener_is_reused::test:active",
+      "rationale": "Connects a same-user unpackaged Windows process and verifies pre-protocol rejection without sacrificing a listener instance."
+    },
+    {
+      "platform": "windows",
       "test": "librarian-vault-agent::lib:librarian_vault_agent::unit_tests::tests::checked_vault_file_cannot_be_replaced_before_sqlite_opens::test:active",
       "rationale": "Exercises Windows file-share locks that prevent vault replacement before SQLite opens the guarded file."
     },

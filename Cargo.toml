@@ -1,9 +1,11 @@
 [workspace]
 members = [
+    "crates/agent-protocol",
     "crates/vault-agent",
     "crates/vault-core",
     "crates/vault-format",
     "platform/chromium-native-host",
+    "platform/windows-ipc",
 ]
 resolver = "3"
 

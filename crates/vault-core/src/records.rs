@@ -16,6 +16,7 @@ use super::{
 
 const RECORD_LABEL_PREFIX: &[u8] = b"librarian/vault/v1/record/";
 const MAX_RECORD_ID_ATTEMPTS: usize = 128;
+const MAX_WEBSITE_ACCOUNT_PAGE_SIZE: usize = 100;
 
 /// A stable, random identifier with no embedded timestamp or semantic value.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -179,6 +180,7 @@ impl WebsiteAccount {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RecordOperationError {
     NotFound,
+    Cancelled,
     Failed,
 }
 
@@ -186,6 +188,7 @@ impl fmt::Display for RecordOperationError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
             Self::NotFound => "website account was not found",
+            Self::Cancelled => "website account operation was cancelled",
             Self::Failed => "website account operation failed",
         })
     }
@@ -247,9 +250,72 @@ impl UnlockedVault {
     ) -> Result<Vec<WebsiteAccount>, RecordOperationError> {
         self.authenticate_snapshot_metadata(header_bytes, manifest_envelope_bytes)?;
         let mut accounts = Vec::with_capacity(records.len());
-        visit_authenticated_records(self, records, None, |account| accounts.push(account))
-            .map_err(|_| RecordOperationError::Failed)?;
+        visit_authenticated_records(self, records, || false, |account| accounts.push(account))
+            .map_err(map_snapshot_operation_error)?;
         Ok(accounts)
+    }
+
+    /// Fully authenticates a snapshot while retaining only one bounded account
+    /// page in plaintext.
+    ///
+    /// # Errors
+    ///
+    /// Any stale generation, malformed row, digest mismatch, unsupported
+    /// record, authentication failure, or invalid page range returns `Failed`.
+    pub fn list_website_account_page(
+        &self,
+        header_bytes: &[u8],
+        manifest_envelope_bytes: &[u8],
+        records: &[EncryptedRecord],
+        offset: usize,
+        limit: usize,
+    ) -> Result<(Vec<WebsiteAccount>, bool), RecordOperationError> {
+        self.list_website_account_page_with_check(
+            header_bytes,
+            manifest_envelope_bytes,
+            records,
+            offset,
+            limit,
+            || false,
+        )
+    }
+
+    /// Fully authenticates a bounded page while checking request authority
+    /// before each record is decrypted.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Cancelled` when `should_cancel` wins. Integrity failures and
+    /// invalid page ranges return `Failed`.
+    pub fn list_website_account_page_with_check(
+        &self,
+        header_bytes: &[u8],
+        manifest_envelope_bytes: &[u8],
+        records: &[EncryptedRecord],
+        offset: usize,
+        limit: usize,
+        should_cancel: impl FnMut() -> bool,
+    ) -> Result<(Vec<WebsiteAccount>, bool), RecordOperationError> {
+        if limit == 0 || limit > MAX_WEBSITE_ACCOUNT_PAGE_SIZE {
+            return Err(RecordOperationError::Failed);
+        }
+        self.authenticate_snapshot_metadata(header_bytes, manifest_envelope_bytes)?;
+        let end = offset
+            .checked_add(limit)
+            .ok_or(RecordOperationError::Failed)?;
+        let mut index = 0_usize;
+        let mut accounts = Vec::with_capacity(limit);
+        let mut has_more = false;
+        visit_authenticated_records(self, records, should_cancel, |account| {
+            if index >= offset && index < end {
+                accounts.push(account);
+            } else if index >= end {
+                has_more = true;
+            }
+            index = index.saturating_add(1);
+        })
+        .map_err(map_snapshot_operation_error)?;
+        Ok((accounts, has_more))
     }
 
     /// Fully authenticates a snapshot and returns one matching account.
@@ -264,14 +330,38 @@ impl UnlockedVault {
         records: &[EncryptedRecord],
         id: RecordId,
     ) -> Result<WebsiteAccount, RecordOperationError> {
+        self.get_website_account_with_check(
+            header_bytes,
+            manifest_envelope_bytes,
+            records,
+            id,
+            || false,
+        )
+    }
+
+    /// Authenticates a snapshot while checking request authority before each
+    /// record is decrypted.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Cancelled` when `should_cancel` wins, `NotFound` only after a
+    /// complete authenticated visit, and `Failed` for integrity errors.
+    pub fn get_website_account_with_check(
+        &self,
+        header_bytes: &[u8],
+        manifest_envelope_bytes: &[u8],
+        records: &[EncryptedRecord],
+        id: RecordId,
+        should_cancel: impl FnMut() -> bool,
+    ) -> Result<WebsiteAccount, RecordOperationError> {
         self.authenticate_snapshot_metadata(header_bytes, manifest_envelope_bytes)?;
         let mut found = None;
-        visit_authenticated_records(self, records, None, |account| {
+        visit_authenticated_records(self, records, should_cancel, |account| {
             if account.id == id {
                 found = Some(account);
             }
         })
-        .map_err(|_| RecordOperationError::Failed)?;
+        .map_err(map_snapshot_operation_error)?;
         found.ok_or(RecordOperationError::NotFound)
     }
 
@@ -289,8 +379,33 @@ impl UnlockedVault {
         input: WebsiteAccountInput,
         committed_at_ms: u64,
     ) -> Result<PreparedRecordMutation, RecordOperationError> {
+        self.prepare_add_website_account_with_check(
+            header_bytes,
+            manifest_envelope_bytes,
+            records,
+            input,
+            committed_at_ms,
+            || false,
+        )
+    }
+
+    /// Prepares an insert while checking request authority before every record.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Cancelled` when `should_cancel` wins and `Failed` for integrity
+    /// or cryptographic failures.
+    pub fn prepare_add_website_account_with_check(
+        &self,
+        header_bytes: &[u8],
+        manifest_envelope_bytes: &[u8],
+        records: &[EncryptedRecord],
+        input: WebsiteAccountInput,
+        committed_at_ms: u64,
+        should_cancel: impl FnMut() -> bool,
+    ) -> Result<PreparedRecordMutation, RecordOperationError> {
         self.authenticate_snapshot_metadata(header_bytes, manifest_envelope_bytes)?;
-        authenticate_records_only(self, records)?;
+        authenticate_records_only_with_check(self, records, should_cancel)?;
         self.prepare_add_with_entropy(input, committed_at_ms, &mut SystemEntropy)
     }
 
@@ -308,8 +423,41 @@ impl UnlockedVault {
         input: WebsiteAccountInput,
         committed_at_ms: u64,
     ) -> Result<PreparedRecordMutation, RecordOperationError> {
-        let account =
-            self.get_website_account(header_bytes, manifest_envelope_bytes, records, id)?;
+        self.prepare_update_website_account_with_check(
+            header_bytes,
+            manifest_envelope_bytes,
+            records,
+            id,
+            input,
+            committed_at_ms,
+            || false,
+        )
+    }
+
+    /// Prepares an update while checking request authority before every record.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Cancelled` when `should_cancel` wins, `NotFound` after full
+    /// authentication, and `Failed` for integrity or cryptographic failures.
+    #[allow(clippy::too_many_arguments)]
+    pub fn prepare_update_website_account_with_check(
+        &self,
+        header_bytes: &[u8],
+        manifest_envelope_bytes: &[u8],
+        records: &[EncryptedRecord],
+        id: RecordId,
+        input: WebsiteAccountInput,
+        committed_at_ms: u64,
+        should_cancel: impl FnMut() -> bool,
+    ) -> Result<PreparedRecordMutation, RecordOperationError> {
+        let account = self.get_website_account_with_check(
+            header_bytes,
+            manifest_envelope_bytes,
+            records,
+            id,
+            should_cancel,
+        )?;
         let revision = account
             .revision
             .checked_add(1)
@@ -340,8 +488,38 @@ impl UnlockedVault {
         id: RecordId,
         committed_at_ms: u64,
     ) -> Result<PreparedRecordMutation, RecordOperationError> {
-        let account =
-            self.get_website_account(header_bytes, manifest_envelope_bytes, records, id)?;
+        self.prepare_delete_website_account_with_check(
+            header_bytes,
+            manifest_envelope_bytes,
+            records,
+            id,
+            committed_at_ms,
+            || false,
+        )
+    }
+
+    /// Prepares deletion while checking request authority before every record.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Cancelled` when `should_cancel` wins, `NotFound` after full
+    /// authentication, and `Failed` for integrity or cryptographic failures.
+    pub fn prepare_delete_website_account_with_check(
+        &self,
+        header_bytes: &[u8],
+        manifest_envelope_bytes: &[u8],
+        records: &[EncryptedRecord],
+        id: RecordId,
+        committed_at_ms: u64,
+        should_cancel: impl FnMut() -> bool,
+    ) -> Result<PreparedRecordMutation, RecordOperationError> {
+        let account = self.get_website_account_with_check(
+            header_bytes,
+            manifest_envelope_bytes,
+            records,
+            id,
+            should_cancel,
+        )?;
         drop(account);
         let mut entries = self.manifest.entries().to_vec();
         let original_len = entries.len();
@@ -526,30 +704,31 @@ pub(super) fn authenticate_records(
     records: &[EncryptedRecord],
     cancellation: &CancellationFlag,
 ) -> Result<(), super::UnlockError> {
-    visit_authenticated_records(vault, records, Some(cancellation), drop).map_err(|error| {
-        match error {
+    visit_authenticated_records(vault, records, || cancellation.is_cancelled(), drop).map_err(
+        |error| match error {
             SnapshotAuthenticationError::Cancelled => super::UnlockError::Cancelled,
             SnapshotAuthenticationError::Failed => super::UnlockError::Failed,
-        }
-    })?;
+        },
+    )?;
     if cancellation.is_cancelled() {
         return Err(super::UnlockError::Cancelled);
     }
     Ok(())
 }
 
-fn authenticate_records_only(
+fn authenticate_records_only_with_check(
     vault: &UnlockedVault,
     records: &[EncryptedRecord],
+    should_cancel: impl FnMut() -> bool,
 ) -> Result<(), RecordOperationError> {
-    visit_authenticated_records(vault, records, None, drop)
-        .map_err(|_| RecordOperationError::Failed)
+    visit_authenticated_records(vault, records, should_cancel, drop)
+        .map_err(map_snapshot_operation_error)
 }
 
 fn visit_authenticated_records(
     vault: &UnlockedVault,
     records: &[EncryptedRecord],
-    cancellation: Option<&CancellationFlag>,
+    mut should_cancel: impl FnMut() -> bool,
     mut visit: impl FnMut(WebsiteAccount),
 ) -> Result<(), SnapshotAuthenticationError> {
     if records.len() != vault.manifest.entries().len() || records.len() > MAX_RECORDS {
@@ -562,7 +741,7 @@ fn visit_authenticated_records(
         return Err(SnapshotAuthenticationError::Failed);
     }
     for (record, commitment) in records.iter().zip(vault.manifest.entries()) {
-        if cancellation.is_some_and(CancellationFlag::is_cancelled) {
+        if should_cancel() {
             return Err(SnapshotAuthenticationError::Cancelled);
         }
         if record.id.as_bytes() != commitment.record_id()
@@ -684,6 +863,13 @@ fn validate_input_lengths(
 enum SnapshotAuthenticationError {
     Cancelled,
     Failed,
+}
+
+const fn map_snapshot_operation_error(error: SnapshotAuthenticationError) -> RecordOperationError {
+    match error {
+        SnapshotAuthenticationError::Cancelled => RecordOperationError::Cancelled,
+        SnapshotAuthenticationError::Failed => RecordOperationError::Failed,
+    }
 }
 
 impl From<RecordOperationError> for SnapshotAuthenticationError {

@@ -1,0 +1,100 @@
+client-hello = [
+  client-nonce: bytes .size 32,
+  minimum-major: uint,
+  maximum-major: uint,
+  minimum-minor: uint,
+  maximum-minor: uint,
+  claimed-role: 1..3,
+  component-build-id: bytes .size 32,
+  required-features: [*16 uint]
+]
+
+server-hello = [
+  server-nonce: bytes .size 32,
+  selected-major: uint,
+  selected-minor: uint,
+  derived-role: 1..3,
+  granted-features: [*16 uint],
+  maximum-payload-bytes: uint,
+  maximum-in-flight: uint,
+  agent-state: 1..7,
+  unlock-epoch: uint
+]
+
+endpoint-descriptor = [
+  schema: 1,
+  pipe-name: text .size (1..512),
+  agent-process-id: uint,
+  agent-process-creation-time: uint,
+  package-full-name: text .size (1..256),
+  minimum-major: uint,
+  maximum-major: uint,
+  startup-nonce: bytes .size 32
+]
+
+request = [
+  operation: uint,
+  unlock-epoch: uint,
+  relative-timeout-ms: 1..4294967295,
+  idempotency-key: bytes .size 16 / null,
+  operation-body: bytes .size (0..65408)
+]
+
+response = [
+  error-code: uint,
+  retry-category: uint,
+  correlation-id: bytes .size 16,
+  result-body: bytes .size (0..65440)
+]
+
+event = [
+  agent-state: 1..7,
+  unlock-epoch: uint
+]
+
+status-body = []
+create-vault-body = [master-password: text .size (0..1024)]
+unlock-master-password-body = [master-password: text .size (0..1024)]
+lock-body = []
+list-account-summaries-body = [
+  offset: uint,
+  limit: 1..100
+]
+get-account-body = [record-id: bytes .size 16]
+add-account-body = [account-fields]
+update-account-body = [record-id: bytes .size 16, account-fields]
+delete-account-body = [record-id: bytes .size 16]
+
+account-fields = (
+  service-name: text .size (0..256),
+  permitted-origin: text .size (0..2048),
+  username: text .size (0..1024),
+  password: text .size (0..16384)
+)
+
+status-result = [agent-state: 1..7, unlock-epoch: uint]
+empty-result = []
+account-id-result = [record-id: bytes .size 16]
+account-result = [
+  record-id: bytes .size 16,
+  revision: uint,
+  created-at-ms: uint,
+  modified-at-ms: uint,
+  service-name: text .size (0..256),
+  permitted-origin: text .size (0..2048),
+  username: text .size (0..1024),
+  password: text .size (0..16384)
+]
+account-summaries-result = [
+  next-offset: uint / null,
+  summaries: [*100 account-summary]
+]
+account-summary = [
+  record-id: bytes .size 16,
+  revision: uint,
+  created-at-ms: uint,
+  modified-at-ms: uint,
+  service-name: text .size (0..256),
+  permitted-origin: text .size (0..2048),
+  username: text .size (0..1024)
+]

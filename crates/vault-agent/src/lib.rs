@@ -1,7 +1,5 @@
-//! `SQLite` ownership and lock-state lifecycle for the trusted local vault agent.
-//!
-//! This is not an IPC server yet. Issue #13 will expose a constrained protocol.
-//! The agent remains the sole owner of vault files and unlocked key state.
+//! `SQLite`, key-state, and constrained-protocol ownership for the trusted
+//! local vault agent.
 
 #![forbid(unsafe_code)]
 
@@ -9,6 +7,7 @@ mod errors;
 mod filesystem;
 mod lifecycle;
 mod records;
+mod runtime;
 mod snapshot;
 mod sqlite;
 mod storage;
@@ -18,6 +17,7 @@ pub use librarian_vault_core::{
     RecordId, WebsiteAccount, WebsiteAccountInput, WebsiteAccountInputError,
 };
 pub use lifecycle::{OperationPermit, VaultAgent};
+pub use runtime::{AgentRuntime, DispatchError, RuntimeStartError};
 
 #[cfg(test)]
 pub(crate) use filesystem::{parent_directory, sqlite_sidecar, sync_parent_directory};
