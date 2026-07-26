@@ -3,6 +3,7 @@
 
 #include <winrt/Microsoft.UI.Dispatching.h>
 #include <winrt/Microsoft.UI.Xaml.Automation.h>
+#include <winrt/Microsoft.UI.Xaml.Input.h>
 
 #if __has_include("MainWindow.g.cpp")
 #include "MainWindow.g.cpp"
@@ -94,7 +95,7 @@ namespace winrt::Librarian::Windows::implementation
         is_active_ = event.WindowActivationState() != WindowActivationState::Deactivated;
         if (is_active_)
         {
-            QueueFocusCurrentState();
+            QueueFocusForActivation();
         }
     }
 
@@ -104,7 +105,10 @@ namespace winrt::Librarian::Windows::implementation
     {
         is_closed_.store(true, std::memory_order_release);
         is_active_ = false;
-        view_model_.Close();
+        if (!lock_request_in_flight_.load(std::memory_order_acquire))
+        {
+            CloseDesktopClient();
+        }
         ClearSetupPasswords();
         MasterPasswordBox().Password(L"");
         AccountPasswordBox().Password(L"");
@@ -215,15 +219,14 @@ namespace winrt::Librarian::Windows::implementation
             co_return;
         }
 
+        lock_request_in_flight_.store(true, std::memory_order_release);
         Render();
         co_await resume_background();
-        if (lifetime->is_closed_.load(std::memory_order_acquire))
-        {
-            co_return;
-        }
         lifetime->view_model_.CompleteLock();
+        lifetime->lock_request_in_flight_.store(false, std::memory_order_release);
         if (lifetime->is_closed_.load(std::memory_order_acquire))
         {
+            lifetime->CloseDesktopClient();
             co_return;
         }
         if (!dispatcher.TryEnqueue([lifetime]
@@ -247,15 +250,21 @@ namespace winrt::Librarian::Windows::implementation
             co_return;
         }
 
+        auto const retries_lock = view_model_.IsLockRequestPending();
+        lock_request_in_flight_.store(retries_lock, std::memory_order_release);
         Render();
         co_await resume_background();
-        if (lifetime->is_closed_.load(std::memory_order_acquire))
+        if (
+            lifetime->is_closed_.load(std::memory_order_acquire) &&
+            !retries_lock)
         {
             co_return;
         }
         lifetime->view_model_.CompleteRetry();
+        lifetime->lock_request_in_flight_.store(false, std::memory_order_release);
         if (lifetime->is_closed_.load(std::memory_order_acquire))
         {
+            lifetime->CloseDesktopClient();
             co_return;
         }
         if (!dispatcher.TryEnqueue([lifetime]
@@ -413,39 +422,32 @@ namespace winrt::Librarian::Windows::implementation
         }
     }
 
-    void MainWindow::FocusCurrentState()
+    bool MainWindow::FocusCurrentState()
     {
         using librarian::windows::ShellState;
 
         switch (view_model_.State())
         {
         case ShellState::FirstRun:
-            SetupPasswordBox().Focus(FocusState::Programmatic);
-            break;
+            return SetupPasswordBox().Focus(FocusState::Programmatic);
         case ShellState::Locked:
-            MasterPasswordBox().Focus(FocusState::Programmatic);
-            break;
+            return MasterPasswordBox().Focus(FocusState::Programmatic);
         case ShellState::Unlocking:
         case ShellState::Saving:
-            UnlockingProgressRing().Focus(FocusState::Programmatic);
-            break;
+            return UnlockingProgressRing().Focus(FocusState::Programmatic);
         case ShellState::Unlocked:
             if (view_model_.IsAccountEditorVisible())
             {
-                ServiceNameTextBox().Focus(FocusState::Programmatic);
+                return ServiceNameTextBox().Focus(FocusState::Programmatic);
             }
-            else
-            {
-                AddAccountButton().Focus(FocusState::Programmatic);
-            }
-            break;
+            return AddAccountButton().Focus(FocusState::Programmatic);
         case ShellState::Error:
-            ErrorRetryButton().Focus(FocusState::Programmatic);
-            break;
+            return ErrorRetryButton().Focus(FocusState::Programmatic);
         case ShellState::AgentUnavailable:
-            AgentUnavailableRetryButton().Focus(FocusState::Programmatic);
-            break;
+            return AgentUnavailableRetryButton().Focus(FocusState::Programmatic);
         }
+
+        return false;
     }
 
     void MainWindow::QueueFocusCurrentState()
@@ -467,8 +469,44 @@ namespace winrt::Librarian::Windows::implementation
                     lifetime->is_active_ &&
                     !lifetime->is_closed_.load(std::memory_order_acquire))
                 {
-                    lifetime->FocusCurrentState();
+                    (void)lifetime->FocusCurrentState();
                 }
+            });
+    }
+
+    void MainWindow::QueueFocusForActivation()
+    {
+        if (
+            !is_loaded_ ||
+            !is_active_ ||
+            is_closed_.load(std::memory_order_acquire))
+        {
+            return;
+        }
+
+        auto lifetime = get_strong();
+        (void)DispatcherQueue().TryEnqueue(
+            Microsoft::UI::Dispatching::DispatcherQueuePriority::Low,
+            [lifetime]
+            {
+                if (
+                    !lifetime->is_active_ ||
+                    lifetime->is_closed_.load(std::memory_order_acquire))
+                {
+                    return;
+                }
+
+                auto const focused = Microsoft::UI::Xaml::Input::FocusManager::
+                    GetFocusedElement(lifetime->RootLayout().XamlRoot());
+                if (auto const control = focused.try_as<Controls::Control>())
+                {
+                    if (control.Focus(FocusState::Programmatic))
+                    {
+                        return;
+                    }
+                }
+
+                (void)lifetime->FocusCurrentState();
             });
     }
 
@@ -494,6 +532,14 @@ namespace winrt::Librarian::Windows::implementation
             ClearAccountEditor();
         }
         Render();
+    }
+
+    void MainWindow::CloseDesktopClient() noexcept
+    {
+        if (!client_closed_.exchange(true, std::memory_order_acq_rel))
+        {
+            view_model_.Close();
+        }
     }
 
     void MainWindow::ClearSetupPasswords()

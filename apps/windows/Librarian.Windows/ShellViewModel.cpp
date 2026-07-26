@@ -277,6 +277,11 @@ namespace librarian::windows
         return account_editor_visible_;
     }
 
+    bool ShellViewModel::IsLockRequestPending() const noexcept
+    {
+        return pending_action_ == PendingAction::Lock;
+    }
+
     bool ShellViewModel::BeginStatusRequest(PendingAction const action)
     {
         if (pending_action_ != PendingAction::None)

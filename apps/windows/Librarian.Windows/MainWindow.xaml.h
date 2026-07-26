@@ -45,15 +45,19 @@ namespace winrt::Librarian::Windows::implementation
     private:
         void Render();
         void RenderAccounts();
-        void FocusCurrentState();
+        [[nodiscard]] bool FocusCurrentState();
         void QueueFocusCurrentState();
+        void QueueFocusForActivation();
         void RenderSecurityTransitionIfOpen();
         void RenderAccountSaveIfOpen();
+        void CloseDesktopClient() noexcept;
         void ClearSetupPasswords();
         void ClearAccountEditor();
 
         librarian::windows::ShellViewModel view_model_;
         std::atomic_bool is_closed_{ false };
+        std::atomic_bool client_closed_{ false };
+        std::atomic_bool lock_request_in_flight_{ false };
         bool is_loaded_{ false };
         bool is_active_{ false };
     };

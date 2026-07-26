@@ -223,12 +223,18 @@ namespace
 
         test.Check(model.BeginLock(), "unlocked vault begins locking");
         test.Check(
+            model.IsLockRequestPending(),
+            "accepted lock remains identifiable until its client result");
+        test.Check(
             model.State() == ShellState::Unlocking,
             "lock uses the busy security state");
         test.Check(
             model.Accounts().empty(),
             "lock intent hides account summaries before the client call");
         model.CompleteLock();
+        test.Check(
+            !model.IsLockRequestPending(),
+            "completed lock no longer reports an in-flight request");
         test.Check(model.State() == ShellState::Locked, "lock returns to the native unlock surface");
         test.Check(model.Accounts().empty(), "lock clears account summaries from the view model");
     }
@@ -353,10 +359,16 @@ namespace
             client->lock_result = { ClientError::None, VaultStatus::Locked };
             test.Check(model.BeginRetry(), "retry preserves the pending lock intent");
             test.Check(
+                model.IsLockRequestPending(),
+                "lock retry remains identifiable for close-time completion");
+            test.Check(
                 model.State() == ShellState::Unlocking,
                 "lock retry remains in the busy fail-closed state");
             model.CompleteRetry();
 
+            test.Check(
+                !model.IsLockRequestPending(),
+                "completed lock retry clears its in-flight request marker");
             test.Check(
                 client->lock_calls == 2,
                 "lock retry sends a second lock instead of refreshing status");
@@ -503,6 +515,10 @@ namespace
             "L\"Website origin: \"",
             "L\"Username: \"",
             "void MainWindow::OnActivated",
+            "lock_request_in_flight_.store(true",
+            "lifetime->CloseDesktopClient();",
+            "FocusManager::",
+            "GetFocusedElement(lifetime->RootLayout().XamlRoot())",
             "fire_and_forget MainWindow::OnLoaded",
             "fire_and_forget MainWindow::OnLockClicked",
             "fire_and_forget MainWindow::OnRetryClicked",

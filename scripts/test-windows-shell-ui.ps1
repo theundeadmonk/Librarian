@@ -88,6 +88,7 @@ try {
         }
     }
     else {
+        $registeredByScript = $true
         try {
             Add-AppxPackage -Register $manifestPath
         }
@@ -98,7 +99,6 @@ try {
             )
         }
 
-        $registeredByScript = $true
         $package = Get-AppxPackage -Name $packageName
         if ($null -eq $package -or $package.Status -ne "Ok") {
             throw "The development package was not healthy after loose registration."

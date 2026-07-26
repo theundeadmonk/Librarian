@@ -49,6 +49,7 @@ namespace librarian::windows
         [[nodiscard]] std::wstring const& Message() const noexcept;
         [[nodiscard]] std::vector<AccountSummary> const& Accounts() const noexcept;
         [[nodiscard]] bool IsAccountEditorVisible() const noexcept;
+        [[nodiscard]] bool IsLockRequestPending() const noexcept;
 
     private:
         enum class PendingAction
