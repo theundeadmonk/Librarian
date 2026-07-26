@@ -684,7 +684,10 @@ only after the vault has been authenticated again.
 Cancellation, deadline, or epoch change observed at a mutation's commit gate
 uses a distinct rollback result. It does not masquerade as storage corruption
 and does not lock the shared vault session; only an actual integrity, storage,
-or cryptographic failure invalidates that session.
+or cryptographic failure invalidates that session. A mutation retains the gate
+through successful commit verification, but releases it before classifying any
+failure or synchronizing the locked runtime state, so failure handling never
+re-enters the non-reentrant gate while holding its original guard.
 
 ## Public error model
 

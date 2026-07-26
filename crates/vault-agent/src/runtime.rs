@@ -1126,7 +1126,7 @@ impl AgentRuntime {
         };
         let coordinator = Arc::clone(&self.coordinator);
         let cancellation = Arc::clone(&registration.cancellation);
-        let mut _commit_guard = None;
+        let mut commit_guard = None;
         let mut vault = lock(&self.vault)?;
         if let Some(outcome) = self.pre_secret_operation(request_epoch, registration, deadline) {
             return Ok(outcome);
@@ -1146,10 +1146,11 @@ impl AgentRuntime {
                 {
                     return Err(crate::errors::StorageError::Aborted);
                 }
-                _commit_guard = Some(guard);
+                commit_guard = Some(guard);
                 Ok(())
             },
         );
+        release_failed_commit_guard(&result, &mut commit_guard);
         match result {
             Ok(id) => Ok(ExecutionOutcome::success(encode_account_id(
                 *id.as_bytes(),
@@ -1188,7 +1189,7 @@ impl AgentRuntime {
         };
         let coordinator = Arc::clone(&self.coordinator);
         let cancellation = Arc::clone(&registration.cancellation);
-        let mut _commit_guard = None;
+        let mut commit_guard = None;
         let mut vault = lock(&self.vault)?;
         if let Some(outcome) = self.pre_secret_operation(request_epoch, registration, deadline) {
             return Ok(outcome);
@@ -1209,10 +1210,11 @@ impl AgentRuntime {
                 {
                     return Err(crate::errors::StorageError::Aborted);
                 }
-                _commit_guard = Some(guard);
+                commit_guard = Some(guard);
                 Ok(())
             },
         );
+        release_failed_commit_guard(&result, &mut commit_guard);
         match result {
             Ok(()) => Ok(ExecutionOutcome::success(encode_empty_result()?)),
             Err(AccountError::Aborted) => {
@@ -1245,7 +1247,7 @@ impl AgentRuntime {
         }
         let coordinator = Arc::clone(&self.coordinator);
         let cancellation = Arc::clone(&registration.cancellation);
-        let mut _commit_guard = None;
+        let mut commit_guard = None;
         let mut vault = lock(&self.vault)?;
         if let Some(outcome) = self.pre_secret_operation(request_epoch, registration, deadline) {
             return Ok(outcome);
@@ -1265,10 +1267,11 @@ impl AgentRuntime {
                 {
                     return Err(crate::errors::StorageError::Aborted);
                 }
-                _commit_guard = Some(guard);
+                commit_guard = Some(guard);
                 Ok(())
             },
         );
+        release_failed_commit_guard(&result, &mut commit_guard);
         match result {
             Ok(()) => Ok(ExecutionOutcome::success(encode_empty_result()?)),
             Err(AccountError::Aborted) => {
@@ -1671,6 +1674,15 @@ fn lock<T>(mutex: &Mutex<T>) -> Result<MutexGuard<'_, T>, DispatchError> {
     mutex.lock().map_err(|_| DispatchError::Internal)
 }
 
+fn release_failed_commit_guard<T, E>(
+    result: &Result<T, E>,
+    commit_guard: &mut Option<MutexGuard<'_, ()>>,
+) {
+    if result.is_err() {
+        drop(commit_guard.take());
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1793,6 +1805,20 @@ mod tests {
         assert!(FlagPermit::acquire(&flag).is_none());
         drop(permit);
         assert!(FlagPermit::acquire(&flag).is_some());
+    }
+
+    #[test]
+    fn mutation_commit_guard_is_released_before_failure_handling() {
+        let coordinator = Coordinator::new();
+        let mut commit_guard = Some(lock(&coordinator.commit_gate).expect("mutation commit gate"));
+        let failed: Result<(), AccountError> = Err(AccountError::Failed);
+
+        release_failed_commit_guard(&failed, &mut commit_guard);
+
+        assert!(
+            coordinator.commit_gate.try_lock().is_ok(),
+            "failure handling must be able to re-enter the commit gate"
+        );
     }
 
     #[test]
