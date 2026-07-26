@@ -2,8 +2,11 @@ use std::{
     ffi::c_void,
     fmt,
     mem::{offset_of, size_of},
+    os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle as StdOwnedHandle},
     path::PathBuf,
     ptr, slice,
+    sync::Mutex,
+    thread,
     time::{Duration, Instant},
 };
 
@@ -11,11 +14,10 @@ use librarian_agent_protocol::{Frame, FrameError, FrameHeader, HEADER_BYTES, MAX
 use windows_sys::{
     Win32::{
         Foundation::{
-            APPMODEL_ERROR_NO_APPLICATION, APPMODEL_ERROR_NO_PACKAGE, CloseHandle,
-            ERROR_ALREADY_EXISTS, ERROR_INSUFFICIENT_BUFFER, ERROR_IO_PENDING, ERROR_PIPE_BUSY,
-            ERROR_PIPE_CONNECTED, ERROR_SUCCESS, FILETIME, GENERIC_ALL, GENERIC_READ,
-            GENERIC_WRITE, GetLastError, HANDLE, INVALID_HANDLE_VALUE, LocalFree, WAIT_OBJECT_0,
-            WAIT_TIMEOUT,
+            APPMODEL_ERROR_NO_APPLICATION, APPMODEL_ERROR_NO_PACKAGE, ERROR_ALREADY_EXISTS,
+            ERROR_INSUFFICIENT_BUFFER, ERROR_IO_PENDING, ERROR_PIPE_BUSY, ERROR_PIPE_CONNECTED,
+            ERROR_SUCCESS, FILETIME, GENERIC_ALL, GENERIC_READ, GENERIC_WRITE, GetLastError,
+            HANDLE, INVALID_HANDLE_VALUE, LocalFree, WAIT_OBJECT_0, WAIT_TIMEOUT,
         },
         Security::{
             ACCESS_ALLOWED_ACE, ACL, ACL_SIZE_INFORMATION, AclSizeInformation,
@@ -110,28 +112,21 @@ impl From<FrameError> for TransportError {
     }
 }
 
-struct OwnedHandle(HANDLE);
+struct OwnedHandle(StdOwnedHandle);
 
 impl OwnedHandle {
     fn new(handle: HANDLE) -> Result<Self, TransportError> {
         if handle.is_null() || handle == INVALID_HANDLE_VALUE {
             return Err(TransportError::Internal);
         }
-        Ok(Self(handle))
+        // SAFETY: the caller transfers one valid, uniquely owned Windows
+        // kernel handle. `StdOwnedHandle` closes it exactly once and carries
+        // the platform's Send/Sync guarantees for process-wide handles.
+        Ok(Self(unsafe { StdOwnedHandle::from_raw_handle(handle) }))
     }
 
-    const fn raw(&self) -> HANDLE {
-        self.0
-    }
-}
-
-impl Drop for OwnedHandle {
-    fn drop(&mut self) {
-        // SAFETY: `OwnedHandle` is constructed only from an owned, non-null,
-        // non-INVALID_HANDLE_VALUE handle and closes it exactly once here.
-        unsafe {
-            let _ = CloseHandle(self.0);
-        }
+    fn raw(&self) -> HANDLE {
+        self.0.as_raw_handle()
     }
 }
 
@@ -709,12 +704,64 @@ fn wide_string(value: &str) -> Result<Vec<u16>, TransportError> {
     Ok(value.encode_utf16().chain(Some(0)).collect())
 }
 
+const AUTHENTICATION_BACKOFF_BASE: Duration = Duration::from_millis(25);
+const AUTHENTICATION_BACKOFF_MAXIMUM: Duration = Duration::from_secs(1);
+
+#[derive(Default)]
+struct AuthenticationThrottle {
+    consecutive_failures: u32,
+    resume_at: Option<Instant>,
+}
+
+impl AuthenticationThrottle {
+    fn wait_until_allowed(&self, deadline: Instant) -> Result<(), TransportError> {
+        let now = Instant::now();
+        let delay = self.remaining_delay(now);
+        if delay.is_zero() {
+            return Ok(());
+        }
+        let remaining = deadline
+            .checked_duration_since(now)
+            .ok_or(TransportError::Timeout)?;
+        if delay > remaining {
+            if !remaining.is_zero() {
+                thread::sleep(remaining);
+            }
+            return Err(TransportError::Timeout);
+        }
+        thread::sleep(delay);
+        Ok(())
+    }
+
+    fn record_failure(&mut self, now: Instant) {
+        self.consecutive_failures = self.consecutive_failures.saturating_add(1);
+        let exponent = self.consecutive_failures.saturating_sub(1).min(31);
+        let multiplier = 1_u32.checked_shl(exponent).unwrap_or(u32::MAX);
+        let delay = AUTHENTICATION_BACKOFF_BASE
+            .saturating_mul(multiplier)
+            .min(AUTHENTICATION_BACKOFF_MAXIMUM);
+        self.resume_at = now.checked_add(delay);
+    }
+
+    fn record_success(&mut self) {
+        self.consecutive_failures = 0;
+        self.resume_at = None;
+    }
+
+    fn remaining_delay(&self, now: Instant) -> Duration {
+        self.resume_at
+            .and_then(|resume_at| resume_at.checked_duration_since(now))
+            .unwrap_or(Duration::ZERO)
+    }
+}
+
 /// Complete eight-instance server pool. The name must not be published until
 /// construction succeeds.
 pub struct ListenerPool {
     pipe_name: String,
     listeners: Vec<OwnedHandle>,
     _instance_guard: OwnedHandle,
+    authentication_throttle: AuthenticationThrottle,
 }
 
 impl ListenerPool {
@@ -761,6 +808,7 @@ impl ListenerPool {
             pipe_name,
             listeners,
             _instance_guard: instance_guard,
+            authentication_throttle: AuthenticationThrottle::default(),
         })
     }
 
@@ -791,7 +839,12 @@ impl ListenerPool {
         if self.listeners.is_empty() {
             return Err(TransportError::ResourceLimit);
         }
-        let selected = match accept_listener_pool(&self.listeners, timeout) {
+        let deadline = deadline_after(timeout)?;
+        self.authentication_throttle.wait_until_allowed(deadline)?;
+        let accept_timeout = deadline
+            .checked_duration_since(Instant::now())
+            .ok_or(TransportError::Timeout)?;
+        let selected = match accept_listener_pool(&self.listeners, accept_timeout) {
             Ok(selected) => selected,
             Err(TransportError::Timeout) => return Err(TransportError::Timeout),
             Err(_) => {
@@ -808,6 +861,7 @@ impl ListenerPool {
             Ok(peer) => peer,
             Err(error) => {
                 self.recycle_rejected(pipe)?;
+                self.authentication_throttle.record_failure(Instant::now());
                 return Err(error);
             }
         };
@@ -817,6 +871,7 @@ impl ListenerPool {
             Err(error) => {
                 drop(peer);
                 self.recycle_rejected(pipe)?;
+                self.authentication_throttle.record_failure(Instant::now());
                 return Err(error);
             }
         };
@@ -825,11 +880,14 @@ impl ListenerPool {
             self.recycle_rejected(pipe)?;
             return Err(TransportError::PeerExited);
         }
+        self.authentication_throttle.record_success();
         Ok(PipeConnection {
             pipe,
             peer,
             server_side: true,
             component_role: role.into(),
+            read_gate: Mutex::new(()),
+            write_gate: Mutex::new(()),
         })
     }
 
@@ -848,6 +906,8 @@ impl ListenerPool {
             peer,
             server_side: _,
             component_role: _,
+            read_gate: _,
+            write_gate: _,
         } = connection;
         drop(peer);
         // SAFETY: `pipe` is a valid server-side named-pipe instance with no
@@ -995,6 +1055,8 @@ pub struct PipeConnection {
     peer: PeerHandle,
     server_side: bool,
     component_role: ComponentRole,
+    read_gate: Mutex<()>,
+    write_gate: Mutex<()>,
 }
 
 impl PipeConnection {
@@ -1065,6 +1127,8 @@ impl PipeConnection {
             peer,
             server_side: false,
             component_role,
+            read_gate: Mutex::new(()),
+            write_gate: Mutex::new(()),
         })
     }
 
@@ -1099,6 +1163,10 @@ impl PipeConnection {
     /// Partial, malformed, oversized, timed-out, or peer-exit reads fail and
     /// must close the connection.
     pub fn read_frame(&self, timeout: Duration) -> Result<Frame, TransportError> {
+        let _read = self
+            .read_gate
+            .lock()
+            .map_err(|_| TransportError::Internal)?;
         let deadline = deadline_after(timeout)?;
         let mut header_bytes = [0_u8; HEADER_BYTES];
         read_exact(
@@ -1127,6 +1195,10 @@ impl PipeConnection {
     ///
     /// Partial, timed-out, or peer-exit writes fail and close the connection.
     pub fn write_frame(&self, frame: &Frame, timeout: Duration) -> Result<(), TransportError> {
+        let _write = self
+            .write_gate
+            .lock()
+            .map_err(|_| TransportError::Internal)?;
         self.ensure_peer_alive()?;
         let bytes = frame.encode()?;
         write_all(
@@ -1552,6 +1624,44 @@ mod tests {
     }
 
     #[test]
+    fn authentication_failures_back_off_with_a_cap_and_success_reset() {
+        let now = Instant::now();
+        let mut throttle = AuthenticationThrottle::default();
+        assert_eq!(throttle.remaining_delay(now), Duration::ZERO);
+
+        throttle.record_failure(now);
+        assert_eq!(throttle.remaining_delay(now), AUTHENTICATION_BACKOFF_BASE);
+        assert_eq!(
+            throttle.wait_until_allowed(now),
+            Err(TransportError::Timeout),
+            "an active backoff must reject work that cannot fit its caller deadline"
+        );
+        throttle.record_failure(now);
+        assert_eq!(
+            throttle.remaining_delay(now),
+            AUTHENTICATION_BACKOFF_BASE.saturating_mul(2)
+        );
+        for _ in 0..32 {
+            throttle.record_failure(now);
+        }
+        assert_eq!(
+            throttle.remaining_delay(now),
+            AUTHENTICATION_BACKOFF_MAXIMUM
+        );
+
+        throttle.record_success();
+        assert_eq!(throttle.remaining_delay(now), Duration::ZERO);
+    }
+
+    #[test]
+    fn authenticated_pipe_connections_are_send_and_sync() {
+        fn assert_send_and_sync<T: Send + Sync>() {}
+
+        assert_send_and_sync::<PeerHandle>();
+        assert_send_and_sync::<PipeConnection>();
+    }
+
+    #[test]
     fn protected_dacl_is_constructible_for_current_logon() {
         let current = current_process_observation().expect("current identity");
         PipeSecurity::for_current_logon(&current.observation.logon_sid)
@@ -1613,6 +1723,8 @@ mod tests {
             peer: current_process_observation().expect("current process peer"),
             server_side,
             component_role,
+            read_gate: Mutex::new(()),
+            write_gate: Mutex::new(()),
         };
         let server_side = test_connection(true, ComponentRole::Desktop);
         assert!(observe_pipe_client(&server_side).is_ok());

@@ -504,6 +504,9 @@ After `ServerHello`:
 - the 128-bit connection ID must match every frame;
 - only `request` frames allocate IDs: the client begins at 1 and each later
   request ID is strictly greater than the last request ID sent;
+- request-frame validation and ID issuance occur before that request worker
+  contends for the global admission gate, so a later cancel cannot misclassify
+  an already received request as never issued;
 - a zero, reused, decreasing, or wrapped `request` ID closes the connection;
 - a `response` echoes the exact ID of one in-flight request and is terminal;
   responses may arrive in any order, but an unknown, duplicate, or already
@@ -530,12 +533,16 @@ After `ServerHello`:
 Every pending overlapped read or write is cancelled and synchronously drained
 before its stack `OVERLAPPED` structure or caller buffer is released, including
 when the monotonic deadline has already expired before the wait begins.
+Authenticated pipe connections use process-wide owned-handle types and
+per-direction I/O gates, allowing one frame reader and response workers to
+share a connection without interleaving same-direction byte-stream operations.
 
 Admission, registration, cancel, disconnect, lock, and terminal response
 commitment share one ordering gate. An admitted request is registered before a
 lock or disconnect may complete. A terminal response remains behind that gate
 until the authenticated transport synchronously writes all bytes or reports
-failure; it cannot be queued for a later write after a lock acknowledgement.
+failure, including authorization, stale-epoch, and capacity rejections; it
+cannot be queued for a later write after a lock acknowledgement or disconnect.
 Authenticated `not_found` results remain authorization-bound at this terminal
 gate because existence is vault-derived metadata; cancellation, deadline,
 lock, or epoch change replaces them before publication.
@@ -645,6 +652,7 @@ Version 1 defaults:
 | In-flight requests globally | 32 |
 | Issued request IDs per connection lifetime | 65,536 |
 | Cached mutation idempotency outcomes in the replay window | 1,024 |
+| Peer-authentication retry delay | 25 ms exponential backoff, 1 second cap |
 | Concurrent password KDF operations | 1 |
 | Concurrent vault mutations | 1 |
 | Concurrent lock transitions | 1 |
@@ -684,8 +692,9 @@ Backpressure is explicit:
 - expensive operations consume bounded global permits;
 - event overflow closes the slow connection rather than retaining unbounded
   state; and
-- repeated unauthenticated or malformed connections are rate-limited without
-  producing secret-bearing diagnostics.
+- repeated peer-authentication failures use listener-pool-wide exponential
+  backoff, reset only by successful authentication, without producing
+  secret-bearing diagnostics.
 
 ## Agent states and failure behavior
 

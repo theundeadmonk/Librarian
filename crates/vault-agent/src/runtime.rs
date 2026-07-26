@@ -184,7 +184,10 @@ struct DispatchContext<'a> {
 
 enum RequestAdmission<'a> {
     Admitted(DispatchContext<'a>),
-    Rejected(ResponseEnvelope),
+    Rejected {
+        response: ResponseEnvelope,
+        _commit: MutexGuard<'a, ()>,
+    },
 }
 
 impl Drop for RequestRegistration {
@@ -520,7 +523,10 @@ impl AgentRuntime {
         let correlation = correlation_id()?;
         let context = match self.admit_request(connection, header, envelope, correlation)? {
             RequestAdmission::Admitted(context) => context,
-            RequestAdmission::Rejected(response) => {
+            RequestAdmission::Rejected {
+                response,
+                _commit: _commit_gate,
+            } => {
                 let response = Self::bounded_response(connection, response, correlation)?;
                 return write_response(&response);
             }
@@ -562,15 +568,21 @@ impl AgentRuntime {
         correlation: CorrelationId,
     ) -> Result<RequestAdmission<'a>, DispatchError> {
         let admission_started = Instant::now();
+        // Establish connection-local request ordering before contending with
+        // independently scheduled cancel, disconnect, or lifecycle workers.
+        let permit = connection.begin_request(header, envelope, self.unlock_epoch());
         let admission = lock(&self.coordinator.commit_gate)?;
-        let permit = match connection.begin_request(header, envelope, self.unlock_epoch()) {
+        let permit = match permit {
             Ok(permit) => permit,
             Err(BeginRequestError::Unauthorized) => {
-                return Ok(RequestAdmission::Rejected(ResponseEnvelope::failure(
-                    PublicErrorCode::UnauthorizedOperation,
-                    RetryCategory::Never,
-                    correlation,
-                )?));
+                return Ok(RequestAdmission::Rejected {
+                    response: ResponseEnvelope::failure(
+                        PublicErrorCode::UnauthorizedOperation,
+                        RetryCategory::Never,
+                        correlation,
+                    )?,
+                    _commit: admission,
+                });
             }
             Err(BeginRequestError::Busy {
                 effective_timeout_ms,
@@ -581,25 +593,34 @@ impl AgentRuntime {
                 } else {
                     ExecutionOutcome::busy()
                 };
-                return Ok(RequestAdmission::Rejected(ResponseEnvelope::failure(
-                    outcome.error.ok_or(DispatchError::Internal)?,
-                    outcome.retry,
-                    correlation,
-                )?));
+                return Ok(RequestAdmission::Rejected {
+                    response: ResponseEnvelope::failure(
+                        outcome.error.ok_or(DispatchError::Internal)?,
+                        outcome.retry,
+                        correlation,
+                    )?,
+                    _commit: admission,
+                });
             }
             Err(BeginRequestError::StaleEpoch) => {
-                return Ok(RequestAdmission::Rejected(ResponseEnvelope::failure(
-                    PublicErrorCode::Locked,
-                    RetryCategory::AfterUnlock,
-                    correlation,
-                )?));
+                return Ok(RequestAdmission::Rejected {
+                    response: ResponseEnvelope::failure(
+                        PublicErrorCode::Locked,
+                        RetryCategory::AfterUnlock,
+                        correlation,
+                    )?,
+                    _commit: admission,
+                });
             }
             Err(BeginRequestError::MissingIdempotencyKey) => {
-                return Ok(RequestAdmission::Rejected(ResponseEnvelope::failure(
-                    PublicErrorCode::InvalidRequest,
-                    RetryCategory::Never,
-                    correlation,
-                )?));
+                return Ok(RequestAdmission::Rejected {
+                    response: ResponseEnvelope::failure(
+                        PublicErrorCode::InvalidRequest,
+                        RetryCategory::Never,
+                        correlation,
+                    )?,
+                    _commit: admission,
+                });
             }
             Err(BeginRequestError::Connection(error)) => return Err(error.into()),
         };
@@ -614,17 +635,23 @@ impl AgentRuntime {
             } else {
                 ExecutionOutcome::busy()
             };
-            return Ok(RequestAdmission::Rejected(ResponseEnvelope::failure(
-                outcome.error.ok_or(DispatchError::Internal)?,
-                outcome.retry,
-                correlation,
-            )?));
+            return Ok(RequestAdmission::Rejected {
+                response: ResponseEnvelope::failure(
+                    outcome.error.ok_or(DispatchError::Internal)?,
+                    outcome.retry,
+                    correlation,
+                )?,
+                _commit: admission,
+            });
         };
         let key = RequestKey {
             connection_id: *connection.connection_id(),
             request_id: permit.request_id(),
         };
         let registration = self.coordinator.register(key)?;
+        if connection.is_cancelled(permit) {
+            registration.cancellation.cancel();
+        }
         drop(admission);
         Ok(RequestAdmission::Admitted(DispatchContext {
             connection,
@@ -2482,6 +2509,67 @@ mod tests {
             .expect("request worker")
             .expect("deadline response");
         assert_eq!(response.error(), Some(PublicErrorCode::DeadlineExceeded));
+    }
+
+    #[test]
+    fn request_ordering_precedes_admission_gate_for_cancellation() {
+        let directory = TestDirectory::new();
+        let runtime = Arc::new(AgentRuntime::start(directory.vault_path()).expect("runtime"));
+        let client = Arc::new(connection(&runtime, 74));
+        let operation = OperationRequest::Status;
+        let body = operation.encode().expect("status body");
+        let request = RequestEnvelope::new(
+            OperationCode::Status,
+            runtime.unlock_epoch(),
+            5_000,
+            None,
+            body,
+        )
+        .expect("status request");
+        let connection_id = *client.connection_id();
+        let header = FrameHeader::new(
+            MessageKind::Request,
+            CURRENT_VERSION,
+            request.encode().expect("status request bytes").len(),
+            connection_id,
+            1,
+        )
+        .expect("status header");
+        let commit = lock(&runtime.coordinator.commit_gate).expect("hold admission gate");
+        let worker_runtime = Arc::clone(&runtime);
+        let worker_client = Arc::clone(&client);
+        let worker = std::thread::spawn(move || {
+            worker_runtime.dispatch(&worker_client, &header, &request, copy_response)
+        });
+
+        let wait_deadline = Instant::now() + Duration::from_secs(1);
+        while client.in_flight_count() != 1 {
+            assert!(
+                Instant::now() < wait_deadline,
+                "request ordering must be established before the admission gate"
+            );
+            std::thread::yield_now();
+        }
+        let cancel = FrameHeader::new(MessageKind::Cancel, CURRENT_VERSION, 0, connection_id, 1)
+            .expect("cancel header");
+        client
+            .cancel(&cancel)
+            .expect("cancel observes the already-issued request");
+        assert!(
+            !runtime
+                .cancel_request(connection_id, 1)
+                .expect("runtime cancellation lookup"),
+            "the runtime registration is intentionally still behind the gate"
+        );
+        drop(commit);
+
+        let response = worker
+            .join()
+            .expect("request worker")
+            .expect("cancelled response");
+        assert_eq!(response.error(), Some(PublicErrorCode::Cancelled));
+        assert_eq!(client.in_flight_count(), 0);
+        assert!(!client.is_closed());
     }
 
     #[test]

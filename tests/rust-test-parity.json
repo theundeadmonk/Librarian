@@ -4,6 +4,16 @@
   "platformOnlyTests": [
     {
       "platform": "windows",
+      "test": "librarian-windows-ipc::lib:librarian_windows_ipc::platform::tests::authenticated_pipe_connections_are_send_and_sync::test:active",
+      "rationale": "Compile-time proof that the Windows owned process and named-pipe handles can be shared between the single frame reader and response workers, with same-direction I/O serialized by connection-local gates."
+    },
+    {
+      "platform": "windows",
+      "test": "librarian-windows-ipc::lib:librarian_windows_ipc::platform::tests::authentication_failures_back_off_with_a_cap_and_success_reset::test:active",
+      "rationale": "Exercises the Windows listener-pool authentication-failure throttle, including exponential delay, the denial-of-service cap, and reset only after successful peer authentication."
+    },
+    {
+      "platform": "windows",
       "test": "librarian-windows-ipc::lib:librarian_windows_ipc::discovery::tests::publish_load_replace_and_remove_are_canonical::test:active",
       "rationale": "Exercises guarded Windows package-local descriptor publication, atomic replacement, canonical loading, durability, and shutdown removal."
     },

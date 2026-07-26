@@ -2,7 +2,7 @@ use std::{
     fs,
     path::{Path, PathBuf},
     sync::{
-        Arc, RwLock,
+        Arc, Mutex, MutexGuard,
         atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc,
     },
@@ -20,30 +20,42 @@ use minicbor::Decoder;
 use zeroize::Zeroizing;
 
 static TEST_DIRECTORY_COUNTER: AtomicU64 = AtomicU64::new(1);
-static KDF_TEST_GATE: RwLock<()> = RwLock::new(());
+// These cases exercise production deadline caps while performing memory-hard
+// KDFs and encrypted filesystem writes. Keep independent fixtures from
+// consuming one another's budgets; concurrency within each case remains real.
+static RUNTIME_TEST_GATE: Mutex<()> = Mutex::new(());
 const BUILD_ID: [u8; 32] = [0x42; 32];
 
-struct TestDirectory(PathBuf);
+struct TestDirectory {
+    path: PathBuf,
+    _test_gate: MutexGuard<'static, ()>,
+}
 
 impl TestDirectory {
     fn new() -> Self {
+        let test_gate = RUNTIME_TEST_GATE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let sequence = TEST_DIRECTORY_COUNTER.fetch_add(1, Ordering::Relaxed);
         let path = std::env::temp_dir().join(format!(
             "librarian-runtime-integration-{}-{sequence}",
             std::process::id()
         ));
         fs::create_dir(&path).expect("integration-test directory must be created");
-        Self(path)
+        Self {
+            path,
+            _test_gate: test_gate,
+        }
     }
 
     fn vault_path(&self) -> PathBuf {
-        self.0.join("vault.sqlite3")
+        self.path.join("vault.sqlite3")
     }
 }
 
 impl Drop for TestDirectory {
     fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.0);
+        let _ = fs::remove_dir_all(&self.path);
     }
 }
 
@@ -82,17 +94,6 @@ fn dispatch(
     operation: &OperationRequest,
     idempotency_key: Option<[u8; 16]>,
 ) -> ResponseEnvelope {
-    let is_kdf = matches!(
-        operation,
-        OperationRequest::CreateVault { .. } | OperationRequest::UnlockMasterPassword { .. }
-    );
-    let _kdf_exclusive = is_kdf.then(|| {
-        KDF_TEST_GATE
-            .write()
-            .expect("integration KDF tests serialize")
-    });
-    let _kdf_shared = (!is_kdf && !matches!(operation, OperationRequest::Lock))
-        .then(|| KDF_TEST_GATE.read().expect("ordinary integration dispatch"));
     let (request, header) =
         request_parts(runtime, connection, request_id, operation, idempotency_key);
     runtime
@@ -401,6 +402,63 @@ fn disconnect_closes_admission_before_returning() {
 }
 
 #[test]
+fn rejected_response_write_completes_before_disconnect_returns() {
+    let directory = TestDirectory::new();
+    let runtime = Arc::new(AgentRuntime::start(directory.vault_path()).expect("runtime starts"));
+    let client = Arc::new(connection(ClientRole::NativeHost, &runtime, 49));
+    let operation = OperationRequest::ListAccountSummaries {
+        offset: 0,
+        limit: 1,
+    };
+    let (request, header) = request_parts(&runtime, &client, 1, &operation, None);
+    let (write_started_tx, write_started_rx) = mpsc::channel();
+    let (release_write_tx, release_write_rx) = mpsc::channel();
+    let response_runtime = Arc::clone(&runtime);
+    let response_client = Arc::clone(&client);
+    let response_worker = thread::spawn(move || {
+        response_runtime
+            .dispatch(&response_client, &header, &request, |response| {
+                write_started_tx.send(()).expect("write started");
+                release_write_rx.recv().expect("release response write");
+                copy_response(response)
+            })
+            .expect("rejected response dispatch")
+    });
+    write_started_rx
+        .recv_timeout(Duration::from_secs(30))
+        .expect("rejected response entered transport writer");
+
+    let disconnect_runtime = Arc::clone(&runtime);
+    let disconnect_client = Arc::clone(&client);
+    let (disconnect_done_tx, disconnect_done_rx) = mpsc::channel();
+    let disconnect_worker = thread::spawn(move || {
+        disconnect_runtime
+            .disconnect(&disconnect_client)
+            .expect("disconnect");
+        disconnect_done_tx.send(()).expect("disconnect result");
+    });
+    assert!(
+        matches!(
+            disconnect_done_rx.recv_timeout(Duration::from_millis(100)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        ),
+        "disconnect must wait for a rejected response write"
+    );
+
+    release_write_tx.send(()).expect("release response");
+    let response = response_worker.join().expect("response worker");
+    assert_eq!(
+        response.error(),
+        Some(PublicErrorCode::UnauthorizedOperation)
+    );
+    disconnect_done_rx
+        .recv_timeout(Duration::from_secs(30))
+        .expect("disconnect completes after response write");
+    disconnect_worker.join().expect("disconnect worker");
+    assert!(client.is_closed());
+}
+
+#[test]
 fn core_integrity_failure_locks_runtime_advances_epoch_and_allows_unlock_attempt() {
     let directory = TestDirectory::new();
     let path = directory.vault_path();
@@ -647,7 +705,7 @@ fn lock_wins_create_before_atomic_publication() {
 }
 
 fn has_staging_reservation(directory: &TestDirectory) -> bool {
-    fs::read_dir(&directory.0)
+    fs::read_dir(&directory.path)
         .expect("read integration directory")
         .filter_map(Result::ok)
         .any(|entry| {
@@ -795,7 +853,7 @@ fn unlock_revalidates_the_authenticated_vault_ownership_lease() {
         None
     );
 
-    let replacement_path = directory.0.join("replacement.sqlite3");
+    let replacement_path = directory.path.join("replacement.sqlite3");
     let replacement = AgentRuntime::start(&replacement_path).expect("replacement runtime");
     let replacement_client = connection(ClientRole::Desktop, &replacement, 121);
     assert_eq!(
@@ -824,7 +882,7 @@ fn unlock_revalidates_the_authenticated_vault_ownership_lease() {
 
     fs::remove_file(&path).expect("remove original pathname");
     fs::rename(&replacement_path, &path).expect("install replacement vault");
-    let alias = directory.0.join("replacement-hard-link.sqlite3");
+    let alias = directory.path.join("replacement-hard-link.sqlite3");
     fs::hard_link(&path, &alias).expect("replacement hard-link alias");
     let competing = AgentRuntime::start(&alias).expect("competing replacement owner");
 
@@ -870,7 +928,7 @@ fn in_place_vault_replacement_invalidates_cached_mutation_outcomes() {
         None,
     );
 
-    let replacement_path = directory.0.join("cache-replacement.sqlite3");
+    let replacement_path = directory.path.join("cache-replacement.sqlite3");
     let replacement = AgentRuntime::start(&replacement_path).expect("replacement runtime");
     let replacement_client = connection(ClientRole::Desktop, &replacement, 151);
     dispatch_success(
