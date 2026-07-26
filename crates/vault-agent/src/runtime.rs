@@ -87,6 +87,7 @@ struct Coordinator {
     kdf_active: AtomicBool,
     mutation_active: AtomicBool,
     lock_active: AtomicBool,
+    creation_gate: Mutex<()>,
     commit_gate: Mutex<()>,
     cancellations: Mutex<BTreeMap<RequestKey, Arc<CancellationFlag>>>,
 }
@@ -99,6 +100,7 @@ impl Coordinator {
             kdf_active: AtomicBool::new(false),
             mutation_active: AtomicBool::new(false),
             lock_active: AtomicBool::new(false),
+            creation_gate: Mutex::new(()),
             commit_gate: Mutex::new(()),
             cancellations: Mutex::new(BTreeMap::new()),
         }
@@ -212,19 +214,30 @@ impl Drop for CounterPermit<'_> {
     }
 }
 
-struct FlagPermit<'a>(&'a AtomicBool);
+struct FlagPermit<'a>(Option<&'a AtomicBool>);
 
-impl FlagPermit<'_> {
-    fn acquire(flag: &AtomicBool) -> Option<FlagPermit<'_>> {
+impl<'a> FlagPermit<'a> {
+    fn acquire(flag: &'a AtomicBool) -> Option<Self> {
         flag.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .ok()
-            .map(|_| FlagPermit(flag))
+            .map(|_| FlagPermit(Some(flag)))
+    }
+
+    fn take_over_active(flag: &'a AtomicBool) -> Self {
+        debug_assert!(flag.load(Ordering::Acquire));
+        Self(Some(flag))
+    }
+
+    fn handoff(mut self) {
+        self.0 = None;
     }
 }
 
 impl Drop for FlagPermit<'_> {
     fn drop(&mut self) {
-        self.0.store(false, Ordering::Release);
+        if let Some(flag) = self.0 {
+            flag.store(false, Ordering::Release);
+        }
     }
 }
 
@@ -477,6 +490,7 @@ impl AgentRuntime {
                 .store(AgentState::ShuttingDown as u8, Ordering::Release);
             self.coordinator.advance_epoch()?;
         }
+        let _creation = lock(&self.coordinator.creation_gate)?;
         lock(&self.vault)?.lock();
         self.state
             .store(AgentState::ShuttingDown as u8, Ordering::Release);
@@ -508,35 +522,31 @@ impl AgentRuntime {
             RequestAdmission::Admitted(context) => context,
             RequestAdmission::Rejected(response) => return write_response(&response),
         };
-        let operation = match OperationRequest::decode(envelope.operation(), envelope.body()) {
-            Ok(operation) => operation,
-            Err(ProtocolError::Unsupported) => {
-                return self.finish_dispatch(context, ExecutionOutcome::failed(), write_response);
-            }
-            Err(_) => {
-                return self.finish_dispatch(context, ExecutionOutcome::invalid(), write_response);
-            }
-        };
-
         let outcome = if context.permit.operation().requires_idempotency_key() {
             let idempotency_key = envelope.idempotency_key().ok_or(DispatchError::Internal)?;
             let request_fingerprint =
                 self.request_fingerprint(envelope.operation(), envelope.body())?;
-            self.execute_idempotent(
-                *idempotency_key,
-                request_fingerprint,
-                operation,
-                context.permit.unlock_epoch(),
-                &context.registration,
-                context.deadline,
-            )?
+            self.execute_idempotent(*idempotency_key, request_fingerprint, || {
+                match OperationRequest::decode(envelope.operation(), envelope.body()) {
+                    Ok(operation) => self.execute(
+                        operation,
+                        context.permit.unlock_epoch(),
+                        &context.registration,
+                        context.deadline,
+                    ),
+                    Err(error) => Ok(map_operation_decode_error(error)),
+                }
+            })?
         } else {
-            self.execute(
-                operation,
-                context.permit.unlock_epoch(),
-                &context.registration,
-                context.deadline,
-            )?
+            match OperationRequest::decode(envelope.operation(), envelope.body()) {
+                Ok(operation) => self.execute(
+                    operation,
+                    context.permit.unlock_epoch(),
+                    &context.registration,
+                    context.deadline,
+                )?,
+                Err(error) => map_operation_decode_error(error),
+            }
         };
         self.finish_dispatch(context, outcome, write_response)
     }
@@ -618,10 +628,7 @@ impl AgentRuntime {
         &self,
         key: [u8; 16],
         request_fingerprint: [u8; 32],
-        operation: OperationRequest,
-        request_epoch: u64,
-        registration: &RequestRegistration,
-        deadline: Instant,
+        execute: impl FnOnce() -> Result<ExecutionOutcome, DispatchError>,
     ) -> Result<ExecutionOutcome, DispatchError> {
         let reservation = {
             let mut state = lock(&self.idempotency)?;
@@ -637,6 +644,7 @@ impl AgentRuntime {
                     retry: cached.retry,
                     body: Zeroizing::new(cached.body.to_vec()),
                     replayed: true,
+                    holds_lock_transition: false,
                 });
             }
             if state.in_flight.contains(&key) {
@@ -662,7 +670,7 @@ impl AgentRuntime {
                 active: true,
             }
         };
-        let outcome = self.execute(operation, request_epoch, registration, deadline)?;
+        let outcome = execute()?;
         let cached = should_cache(&outcome).then(|| CachedOutcome {
             request_fingerprint,
             error: outcome.error,
@@ -692,6 +700,9 @@ impl AgentRuntime {
         mut outcome: ExecutionOutcome,
         write_response: impl FnOnce(&ResponseEnvelope) -> Result<T, DispatchError>,
     ) -> Result<T, DispatchError> {
+        let _lock_transition = outcome
+            .holds_lock_transition
+            .then(|| FlagPermit::take_over_active(&self.coordinator.lock_active));
         let _commit = lock(&self.coordinator.commit_gate)?;
         let completion = context.connection.finish(context.permit)?;
         if completion == RequestCompletion::Cancelled {
@@ -798,6 +809,13 @@ impl AgentRuntime {
         let Some(_mutation) = FlagPermit::acquire(&self.coordinator.mutation_active) else {
             return Ok(ExecutionOutcome::busy());
         };
+        let _creation = lock(&self.coordinator.creation_gate)?;
+        if registration.cancellation.is_cancelled() {
+            return Ok(ExecutionOutcome::cancelled());
+        }
+        if Instant::now() >= deadline {
+            return Ok(ExecutionOutcome::deadline());
+        }
         if self.coordinator.lock_active.load(Ordering::Acquire) {
             return Ok(ExecutionOutcome::busy());
         }
@@ -1015,7 +1033,7 @@ impl AgentRuntime {
     }
 
     fn lock_vault(&self) -> Result<ExecutionOutcome, DispatchError> {
-        let Some(_lock_transition) = FlagPermit::acquire(&self.coordinator.lock_active) else {
+        let Some(lock_transition) = FlagPermit::acquire(&self.coordinator.lock_active) else {
             return Ok(ExecutionOutcome::busy());
         };
         let target_state = {
@@ -1030,6 +1048,7 @@ impl AgentRuntime {
             self.coordinator.advance_epoch()?;
             target_state
         };
+        let _creation = lock(&self.coordinator.creation_gate)?;
         lock(&self.vault)?.lock();
         if !matches!(
             self.state(),
@@ -1037,7 +1056,9 @@ impl AgentRuntime {
         ) {
             self.state.store(target_state as u8, Ordering::Release);
         }
-        Ok(ExecutionOutcome::success(encode_empty_result()?))
+        let outcome = ExecutionOutcome::success(encode_empty_result()?).hold_lock_transition();
+        lock_transition.handoff();
+        Ok(outcome)
     }
 
     fn set_locked_unless_shutting_down(&self) {
@@ -1547,6 +1568,7 @@ struct ExecutionOutcome {
     retry: RetryCategory,
     body: Zeroizing<Vec<u8>>,
     replayed: bool,
+    holds_lock_transition: bool,
 }
 
 impl ExecutionOutcome {
@@ -1556,6 +1578,7 @@ impl ExecutionOutcome {
             retry: RetryCategory::Never,
             body,
             replayed: false,
+            holds_lock_transition: false,
         }
     }
 
@@ -1565,7 +1588,13 @@ impl ExecutionOutcome {
             retry,
             body: Zeroizing::new(Vec::new()),
             replayed: false,
+            holds_lock_transition: false,
         }
+    }
+
+    fn hold_lock_transition(mut self) -> Self {
+        self.holds_lock_transition = true;
+        self
     }
 
     fn invalid() -> Self {
@@ -1604,6 +1633,14 @@ impl ExecutionOutcome {
 impl From<ProtocolError> for DispatchError {
     fn from(_: ProtocolError) -> Self {
         Self::Internal
+    }
+}
+
+fn map_operation_decode_error(error: ProtocolError) -> ExecutionOutcome {
+    if error == ProtocolError::Unsupported {
+        ExecutionOutcome::failed()
+    } else {
+        ExecutionOutcome::invalid()
     }
 }
 
@@ -1908,6 +1945,86 @@ mod tests {
     }
 
     #[test]
+    fn lock_transition_remains_active_through_terminal_response_write() {
+        let directory = TestDirectory::new();
+        let runtime = AgentRuntime::start(directory.vault_path()).expect("runtime");
+        runtime
+            .state
+            .store(AgentState::Unlocked as u8, Ordering::Release);
+        let client = connection(&runtime, 76);
+        let (_request, _header, permit) =
+            admitted_request(&runtime, &client, 1, &OperationRequest::Lock);
+        let registration = runtime
+            .coordinator
+            .register(RequestKey {
+                connection_id: *client.connection_id(),
+                request_id: 1,
+            })
+            .expect("registration");
+
+        let outcome = runtime.lock_vault().expect("lock outcome");
+        assert!(outcome.holds_lock_transition);
+        assert!(runtime.coordinator.lock_active.load(Ordering::Acquire));
+        let response = runtime
+            .finish_dispatch(
+                DispatchContext {
+                    connection: &client,
+                    permit,
+                    _global: CounterPermit::acquire(
+                        &runtime.coordinator.global_in_flight,
+                        MAX_IN_FLIGHT_GLOBAL,
+                    )
+                    .expect("global permit"),
+                    registration,
+                    deadline: Instant::now() + Duration::from_secs(1),
+                    correlation: CorrelationId::new([0x76; 16]),
+                },
+                outcome,
+                |response| {
+                    assert!(runtime.coordinator.lock_active.load(Ordering::Acquire));
+                    copy_response(response)
+                },
+            )
+            .expect("lock response");
+        assert_eq!(response.error(), None);
+        assert!(!runtime.coordinator.lock_active.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn lock_waits_for_creation_gate_before_returning() {
+        let directory = TestDirectory::new();
+        let runtime = Arc::new(AgentRuntime::start(directory.vault_path()).expect("runtime"));
+        let creation = lock(&runtime.coordinator.creation_gate).expect("creation gate");
+        let (result_tx, result_rx) = std::sync::mpsc::channel();
+        let worker_runtime = Arc::clone(&runtime);
+        let worker = std::thread::spawn(move || {
+            result_tx
+                .send(worker_runtime.lock_vault())
+                .expect("lock result");
+        });
+        let wait_deadline = Instant::now() + Duration::from_secs(1);
+        while !runtime.coordinator.lock_active.load(Ordering::Acquire) {
+            assert!(Instant::now() < wait_deadline, "lock transition must start");
+            std::thread::yield_now();
+        }
+        assert!(
+            result_rx.recv_timeout(Duration::from_millis(100)).is_err(),
+            "lock must wait until local creation material has drained"
+        );
+
+        drop(creation);
+        let outcome = result_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("lock completes after creation drains")
+            .expect("lock outcome");
+        assert!(outcome.holds_lock_transition);
+        drop(FlagPermit::take_over_active(
+            &runtime.coordinator.lock_active,
+        ));
+        worker.join().expect("lock worker");
+    }
+
+    #[test]
     fn mutation_commit_guard_is_released_before_failure_handling() {
         let coordinator = Coordinator::new();
         let mut commit_guard = Some(lock(&coordinator.commit_gate).expect("mutation commit gate"));
@@ -1958,14 +2075,14 @@ mod tests {
             .expect("request fingerprint");
         let newest = u128::MAX.to_be_bytes();
         let outcome = runtime
-            .execute_idempotent(
-                newest,
-                fingerprint,
-                operation,
-                runtime.unlock_epoch(),
-                &registration,
-                Instant::now() + Duration::from_secs(1),
-            )
+            .execute_idempotent(newest, fingerprint, || {
+                runtime.execute(
+                    operation,
+                    runtime.unlock_epoch(),
+                    &registration,
+                    Instant::now() + Duration::from_secs(1),
+                )
+            })
             .expect("rotated execution");
         assert_eq!(outcome.error, None);
 
@@ -2067,26 +2184,43 @@ mod tests {
         }))
         .expect("cache terminal failure");
 
-        let client = connection(&runtime, 67);
-        let registration = runtime
-            .coordinator
-            .register(RequestKey {
-                connection_id: *client.connection_id(),
-                request_id: 1,
-            })
-            .expect("registration");
         let replay = runtime
-            .execute_idempotent(
-                key,
-                fingerprint,
-                OperationRequest::Status,
-                runtime.unlock_epoch(),
-                &registration,
-                Instant::now() + Duration::from_secs(1),
-            )
+            .execute_idempotent(key, fingerprint, || {
+                panic!("a cached terminal result must not execute again")
+            })
             .expect("cached terminal failure");
         assert_eq!(replay.error, Some(PublicErrorCode::OperationFailed));
         assert!(replay.replayed);
+    }
+
+    #[test]
+    fn idempotency_key_is_reserved_before_body_decoding_or_execution() {
+        let directory = TestDirectory::new();
+        let runtime = AgentRuntime::start(directory.vault_path()).expect("runtime");
+        let key = [0x47; 16];
+        let fingerprint = [0x48; 32];
+        let outcome = runtime
+            .execute_idempotent(key, fingerprint, || {
+                assert!(
+                    lock(&runtime.idempotency)
+                        .expect("idempotency state")
+                        .in_flight
+                        .contains(&key),
+                    "the key must be claimed before the body is decoded"
+                );
+                Ok(ExecutionOutcome::invalid())
+            })
+            .expect("invalid request outcome");
+        assert_eq!(outcome.error, Some(PublicErrorCode::InvalidRequest));
+        let state = lock(&runtime.idempotency).expect("idempotency state");
+        assert!(state.in_flight.is_empty());
+        assert_eq!(
+            state
+                .cached
+                .get(&key)
+                .map(|cached| cached.request_fingerprint),
+            Some(fingerprint)
+        );
     }
 
     #[test]

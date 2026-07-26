@@ -630,9 +630,15 @@ All limits apply before unbounded allocation or work. The server may advertise
 lower limits. A client cannot raise them.
 
 Lock uses the transition deadline because it must cancel and synchronously
-drain an in-flight password KDF before acknowledging that key state is clear.
-It must not inherit the shorter ordinary-operation cap while waiting for work
-that was legitimately admitted with the KDF cap.
+drain both an in-flight password KDF and any local create-vault KDF or generated
+key material before acknowledging that key state is clear. Create holds a
+dedicated drain gate from before password work until all local vault and
+recovery material has either been published or dropped. Lock and shutdown
+cancel first, then wait for that gate. A successful lock retains its transition
+authority through the synchronous terminal response write, so unlock cannot
+publish in the gap between the state change and its acknowledgement. Lock must
+not inherit the shorter ordinary-operation cap while waiting for work that was
+legitimately admitted with the KDF cap.
 
 Backpressure is explicit:
 
@@ -671,13 +677,16 @@ The implementation binds each cached mutation result to an HMAC-SHA-256
 fingerprint of the complete canonical operation and body under a random
 per-agent-start key. Reusing a key for a different payload is a conflict, and
 the cache retains neither a plaintext credential nor a reusable unkeyed
-password digest. Only operations defined as idempotent mutations may carry a
-key; a key on a read, status, unlock, or lock request is rejected during
-canonical envelope validation. The cache is a bounded first-in, first-out
-replay window: admitting a new mutation evicts the oldest completed outcome
-when necessary, while in-flight keys remain reserved. Exhausting the window
-therefore cannot permanently disable mutations; clients must not rely on
-replay results after an entry has aged out.
+password digest. The raw bounded body is fingerprinted and its key is reserved
+before operation-specific decoding, so a terminal malformed-body result claims
+the same key/payload pair and a corrected payload must use a new key. Only
+operations defined as idempotent mutations may carry a key; a key on a read,
+status, unlock, or lock request is rejected during canonical envelope
+validation. The cache is a bounded first-in, first-out replay window: admitting
+a new mutation evicts the oldest completed outcome when necessary, while
+in-flight keys remain reserved. Exhausting the window therefore cannot
+permanently disable mutations; clients must not rely on replay results after an
+entry has aged out.
 
 Every terminal `operation_failed` result from an admitted idempotent mutation is
 also cached. A storage error observed after SQLite commit can be

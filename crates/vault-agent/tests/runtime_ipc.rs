@@ -469,6 +469,62 @@ fn role_authorization_precedes_operation_body_decoding() {
 }
 
 #[test]
+fn malformed_idempotent_body_claims_its_key_before_decoding() {
+    let directory = TestDirectory::new();
+    let runtime = AgentRuntime::start(directory.vault_path()).expect("runtime starts");
+    let client = connection(ClientRole::Desktop, &runtime, 27);
+    dispatch_success(
+        &runtime,
+        &client,
+        1,
+        &create("malformed idempotency integration password"),
+        Some([0x21; 16]),
+    );
+
+    let mutation_key = [0x22; 16];
+    let malformed = RequestEnvelope::new(
+        OperationCode::AddAccount,
+        runtime.unlock_epoch(),
+        5_000,
+        Some(mutation_key),
+        Zeroizing::new(vec![0x80]),
+    )
+    .expect("bounded malformed body");
+    let malformed_header = FrameHeader::new(
+        MessageKind::Request,
+        CURRENT_VERSION,
+        malformed.encode().expect("malformed request bytes").len(),
+        *client.connection_id(),
+        2,
+    )
+    .expect("malformed request header");
+    let rejected = runtime
+        .dispatch(&client, &malformed_header, &malformed, copy_response)
+        .expect("malformed request response");
+    assert_eq!(rejected.error(), Some(PublicErrorCode::InvalidRequest));
+
+    let corrected = dispatch(
+        &runtime,
+        &client,
+        3,
+        &OperationRequest::AddAccount { fields: fields() },
+        Some(mutation_key),
+    );
+    assert_eq!(corrected.error(), Some(PublicErrorCode::Conflict));
+    assert_eq!(
+        dispatch(
+            &runtime,
+            &client,
+            4,
+            &OperationRequest::AddAccount { fields: fields() },
+            Some([0x23; 16]),
+        )
+        .error(),
+        None
+    );
+}
+
+#[test]
 fn cancellation_wins_an_in_flight_password_unlock() {
     let directory = TestDirectory::new();
     let runtime = Arc::new(AgentRuntime::start(directory.vault_path()).expect("runtime starts"));
