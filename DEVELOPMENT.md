@@ -111,9 +111,10 @@ passkey storage remain disabled until their security gates and implementation
 issues are complete. The Windows local-IPC probe validates operating-system
 assumptions with disposable marker bytes; it is not the issue #13 production
 transport. The Windows Hello PRF probe performs a non-interactive capability
-check during the build; its explicit manual mode uses only a disposable local
-platform credential and never opens a vault. Tests use uniquely identifiable
-disposable values; do not use the current build with real credentials.
+and synthetic security-negative-path check during the build; its explicit
+manual mode uses only a disposable local platform credential and never opens a
+vault. Tests use uniquely identifiable disposable values; do not use the
+current build with real credentials.
 
 ## Dependency updates
 

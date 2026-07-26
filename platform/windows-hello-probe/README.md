@@ -20,7 +20,11 @@ The authoritative Windows Release pipeline runs:
 This reports the installed WebAuthn API version and whether Windows currently
 has a user-verifying platform authenticator. A missing authenticator is a
 supported fail-closed state, so the CI-safe self-test does not display Windows
-Hello UI and does not fail merely because Hello is not enrolled.
+Hello UI and does not fail merely because Hello is not enrolled. It also uses
+synthetic assertions and injected API results to reject malformed
+authenticator data, missing user-verification flags, wrong credentials,
+missing or malformed PRF output, salt-independent output, cancellation, and
+credential-deletion failure without creating a real credential.
 
 ## Explicit manual test
 
@@ -32,10 +36,12 @@ Only run the following with disposable development state:
 
 Manual mode requires WebAuthn API version 6 or later, an enrolled Windows Hello
 platform authenticator, an interactive console window, and explicit approval
-of three Windows-owned prompts. It uses the relying-party identifier
+of four Windows-owned prompts. It uses the relying-party identifier
 `librarian.local`, requests the platform authenticator with user verification
-required, enables the PRF extension, and checks two releases against the same
-random salt. The PRF bytes are zeroed after comparison and are never printed.
+required, verifies the returned authenticator-data user-verification flag,
+enables the PRF extension, checks two releases against the same random salt,
+and requires a third release against an independent salt to differ. Copied PRF
+bytes are zeroed immediately after comparison and are never printed.
 
 Cancellation, missing enrollment, unsupported PRF, a malformed result, or
 credential removal failure returns a nonzero exit status. No fallback is

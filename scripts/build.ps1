@@ -275,7 +275,7 @@ if (-not (Test-Path $helloProbe)) {
 }
 
 Invoke-CheckedProcess `
-    -Label "Windows Hello PRF capability probe" `
+    -Label "Windows Hello PRF security self-test" `
     -FilePath $helloProbe `
     -Arguments @("--self-test") `
     -WorkingDirectory $repoRoot
