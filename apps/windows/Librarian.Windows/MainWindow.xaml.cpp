@@ -1,6 +1,8 @@
 #include "pch.h"
 #include "MainWindow.xaml.h"
 
+#include <winrt/Microsoft.UI.Xaml.Automation.h>
+
 #if __has_include("MainWindow.g.cpp")
 #include "MainWindow.g.cpp"
 #endif
@@ -10,6 +12,7 @@
 
 using namespace winrt;
 using namespace Microsoft::UI::Xaml;
+using namespace Microsoft::UI::Xaml::Automation;
 using namespace Microsoft::UI::Xaml::Controls;
 
 namespace winrt::Librarian::Windows::implementation
@@ -33,6 +36,8 @@ namespace winrt::Librarian::Windows::implementation
                 return L"Vault locked";
             case ShellState::Unlocking:
                 return L"Working securely";
+            case ShellState::Saving:
+                return L"Saving account";
             case ShellState::Unlocked:
                 return L"Accounts";
             case ShellState::Error:
@@ -66,6 +71,10 @@ namespace winrt::Librarian::Windows::implementation
         [[maybe_unused]] WindowEventArgs const& event)
     {
         is_closed_.store(true, std::memory_order_release);
+        ClearSetupPasswords();
+        MasterPasswordBox().Password(L"");
+        AccountPasswordBox().Password(L"");
+        view_model_.CancelPendingOperations();
     }
 
     fire_and_forget MainWindow::OnCreateVaultClicked(
@@ -102,6 +111,10 @@ namespace winrt::Librarian::Windows::implementation
 
         Render();
         co_await resume_background();
+        if (lifetime->is_closed_.load(std::memory_order_acquire))
+        {
+            co_return;
+        }
         lifetime->view_model_.CompleteCreate(password);
         if (lifetime->is_closed_.load(std::memory_order_acquire))
         {
@@ -139,6 +152,10 @@ namespace winrt::Librarian::Windows::implementation
 
         Render();
         co_await resume_background();
+        if (lifetime->is_closed_.load(std::memory_order_acquire))
+        {
+            co_return;
+        }
         lifetime->view_model_.CompleteUnlock(password);
         if (lifetime->is_closed_.load(std::memory_order_acquire))
         {
@@ -187,10 +204,12 @@ namespace winrt::Librarian::Windows::implementation
         Render();
     }
 
-    void MainWindow::OnSaveAccountClicked(
+    fire_and_forget MainWindow::OnSaveAccountClicked(
         [[maybe_unused]] IInspectable const& sender,
         [[maybe_unused]] RoutedEventArgs const& event)
     {
+        auto lifetime = get_strong();
+        auto const dispatcher = DispatcherQueue();
         librarian::windows::SecretText password{ AccountPasswordBox().Password() };
         AccountPasswordBox().Password(L"");
 
@@ -201,12 +220,29 @@ namespace winrt::Librarian::Windows::implementation
             std::move(password),
         };
 
-        view_model_.SaveAccount(account);
-        if (!view_model_.IsAccountEditorVisible())
+        if (!view_model_.BeginSaveAccount())
         {
-            ClearAccountEditor();
+            co_return;
         }
+
         Render();
+        co_await resume_background();
+        if (lifetime->is_closed_.load(std::memory_order_acquire))
+        {
+            co_return;
+        }
+        lifetime->view_model_.CompleteSaveAccount(account);
+        if (lifetime->is_closed_.load(std::memory_order_acquire))
+        {
+            co_return;
+        }
+        if (!dispatcher.TryEnqueue([lifetime]
+        {
+            lifetime->RenderAccountSaveIfOpen();
+        }))
+        {
+            co_return;
+        }
     }
 
     void MainWindow::Render()
@@ -221,13 +257,15 @@ namespace winrt::Librarian::Windows::implementation
 
         FirstRunPanel().Visibility(VisibleWhen(state == ShellState::FirstRun));
         LockedPanel().Visibility(VisibleWhen(state == ShellState::Locked));
-        UnlockingPanel().Visibility(VisibleWhen(state == ShellState::Unlocking));
+        auto const is_working =
+            state == ShellState::Unlocking || state == ShellState::Saving;
+        UnlockingPanel().Visibility(VisibleWhen(is_working));
         UnlockedPanel().Visibility(VisibleWhen(state == ShellState::Unlocked));
         ErrorPanel().Visibility(VisibleWhen(state == ShellState::Error));
         AgentUnavailablePanel().Visibility(
             VisibleWhen(state == ShellState::AgentUnavailable));
 
-        UnlockingProgressRing().IsActive(state == ShellState::Unlocking);
+        UnlockingProgressRing().IsActive(is_working);
         AccountEditorPanel().Visibility(
             VisibleWhen(view_model_.IsAccountEditorVisible()));
 
@@ -240,7 +278,7 @@ namespace winrt::Librarian::Windows::implementation
         {
             RenderAccounts();
         }
-        else
+        else if (state != ShellState::Saving)
         {
             AccountsListView().Items().Clear();
             ClearAccountEditor();
@@ -266,6 +304,9 @@ namespace winrt::Librarian::Windows::implementation
 
             auto service_name = TextBlock();
             service_name.Text(account.service_name);
+            AutomationProperties::SetName(
+                service_name,
+                hstring{ std::wstring{ L"Service name: " } + account.service_name });
             service_name.Style(
                 Application::Current().Resources().Lookup(
                     box_value(L"BodyStrongTextBlockStyle")).as<Style>());
@@ -273,11 +314,17 @@ namespace winrt::Librarian::Windows::implementation
 
             auto origin = TextBlock();
             origin.Text(account.origin);
+            AutomationProperties::SetName(
+                origin,
+                hstring{ std::wstring{ L"Website origin: " } + account.origin });
             origin.TextWrapping(TextWrapping::Wrap);
             details.Children().Append(origin);
 
             auto username = TextBlock();
             username.Text(account.username);
+            AutomationProperties::SetName(
+                username,
+                hstring{ std::wstring{ L"Username: " } + account.username });
             username.TextWrapping(TextWrapping::Wrap);
             details.Children().Append(username);
 
@@ -301,6 +348,7 @@ namespace winrt::Librarian::Windows::implementation
             MasterPasswordBox().Focus(FocusState::Programmatic);
             break;
         case ShellState::Unlocking:
+        case ShellState::Saving:
             UnlockingProgressRing().Focus(FocusState::Programmatic);
             break;
         case ShellState::Unlocked:
@@ -329,6 +377,20 @@ namespace winrt::Librarian::Windows::implementation
             return;
         }
 
+        Render();
+    }
+
+    void MainWindow::RenderAccountSaveIfOpen()
+    {
+        if (is_closed_.load(std::memory_order_acquire))
+        {
+            return;
+        }
+
+        if (!view_model_.IsAccountEditorVisible())
+        {
+            ClearAccountEditor();
+        }
         Render();
     }
 

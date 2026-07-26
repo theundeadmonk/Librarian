@@ -59,6 +59,7 @@ namespace
         bool password_matched{ false };
         int unlock_calls{ 0 };
         int save_calls{ 0 };
+        int cancel_calls{ 0 };
 
         [[nodiscard]] ClientResult GetStatus() override
         {
@@ -102,6 +103,11 @@ namespace
                 });
             }
             return save_result;
+        }
+
+        void CancelPendingOperations() noexcept override
+        {
+            ++cancel_calls;
         }
     };
 
@@ -238,7 +244,9 @@ namespace
             L"person",
             SecretText{ L"disposable account" },
         };
-        model.SaveAccount(draft);
+        test.Check(model.BeginSaveAccount(), "account editor begins saving");
+        test.Check(model.State() == ShellState::Saving, "account save uses a busy state");
+        model.CompleteSaveAccount(draft);
 
         test.Check(client->password_matched, "account editor forwards its password as secret text");
         test.Check(client->save_calls == 1, "account editor submits exactly once");
@@ -283,11 +291,11 @@ namespace
             model.Lock();
 
             test.Check(
-                model.State() == ShellState::Unlocked,
-                "cancelled lock keeps the unlocked state");
+                model.State() == ShellState::Error,
+                "cancelled lock hides access until status is rechecked");
             test.Check(
-                model.Accounts().size() == 1,
-                "cancelled lock keeps the current account summaries");
+                model.Accounts().empty(),
+                "cancelled lock clears cached account summaries");
         }
 
         {
@@ -305,7 +313,8 @@ namespace
                 L"person",
                 SecretText{ L"disposable cancelled save" },
             };
-            model.SaveAccount(draft);
+            test.Check(model.BeginSaveAccount(), "cancelled save begins from the editor");
+            model.CompleteSaveAccount(draft);
 
             test.Check(
                 model.State() == ShellState::Unlocked,
@@ -326,12 +335,28 @@ namespace
             model.Initialize();
 
             test.Check(
-                model.State() == ShellState::Unlocked,
-                "cancelled account loading keeps the unlocked state");
+                model.State() == ShellState::Error,
+                "cancelled account loading requires an authoritative retry");
             test.Check(
                 model.Accounts().empty(),
                 "cancelled account loading returns no partial summaries");
+            test.Check(
+                model.Message().find(L"account list") != std::wstring::npos,
+                "cancelled account loading is not presented as an empty vault");
         }
+    }
+
+    void TestCancellationReachesDesktopClient(TestContext& test)
+    {
+        auto client = ClientWithStatus(VaultStatus::Locked);
+        ShellViewModel model{ client };
+        model.Initialize();
+
+        model.CancelPendingOperations();
+
+        test.Check(
+            client->cancel_calls == 1,
+            "window lifecycle cancellation reaches the desktop client");
     }
 
     std::string ReadFile(std::string const& path)
@@ -378,6 +403,29 @@ namespace
             xaml.find(" Password=\"") == std::string::npos,
             "XAML never embeds or binds a password value");
     }
+
+    void TestWindowSourceContract(TestContext& test, std::string const& path)
+    {
+        auto const source = ReadFile(path);
+        test.Check(!source.empty(), "WinUI shell source can be read");
+
+        std::vector<std::string_view> const required{
+            "view_model_.CancelPendingOperations();",
+            "MasterPasswordBox().Password(L\"\");",
+            "AccountPasswordBox().Password(L\"\");",
+            "L\"Service name: \"",
+            "L\"Website origin: \"",
+            "L\"Username: \"",
+            "fire_and_forget MainWindow::OnSaveAccountClicked",
+        };
+
+        for (auto const fragment : required)
+        {
+            test.Check(
+                source.find(fragment) != std::string::npos,
+                std::string{ "window source contains " } + std::string{ fragment });
+        }
+    }
 }
 
 int main(int const argc, char const* const* const argv)
@@ -389,14 +437,19 @@ int main(int const argc, char const* const* const argv)
     TestCreateAndAccountEditor(test);
     TestProductionClientFailsClosed(test);
     TestCancelledActionsResumeSafely(test);
+    TestCancellationReachesDesktopClient(test);
 
-    if (argc == 3 && std::string_view{ argv[1] } == "--xaml")
+    if (
+        argc == 5 &&
+        std::string_view{ argv[1] } == "--xaml" &&
+        std::string_view{ argv[3] } == "--source")
     {
         TestXamlContract(test, argv[2]);
+        TestWindowSourceContract(test, argv[4]);
     }
     else
     {
-        test.Check(false, "XAML path argument is required");
+        test.Check(false, "XAML and window source path arguments are required");
     }
 
     if (test.Failures() != 0)

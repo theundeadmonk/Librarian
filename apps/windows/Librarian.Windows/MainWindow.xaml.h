@@ -35,7 +35,7 @@ namespace winrt::Librarian::Windows::implementation
         void OnCancelAccountClicked(
             winrt::Windows::Foundation::IInspectable const&,
             Microsoft::UI::Xaml::RoutedEventArgs const&);
-        void OnSaveAccountClicked(
+        winrt::fire_and_forget OnSaveAccountClicked(
             winrt::Windows::Foundation::IInspectable const&,
             Microsoft::UI::Xaml::RoutedEventArgs const&);
 
@@ -44,6 +44,7 @@ namespace winrt::Librarian::Windows::implementation
         void RenderAccounts();
         void FocusCurrentState();
         void RenderSecurityTransitionIfOpen();
+        void RenderAccountSaveIfOpen();
         void ClearSetupPasswords();
         void ClearAccountEditor();
 

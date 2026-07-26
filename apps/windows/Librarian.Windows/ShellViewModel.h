@@ -13,6 +13,7 @@ namespace librarian::windows
         FirstRun,
         Locked,
         Unlocking,
+        Saving,
         Unlocked,
         Error,
         AgentUnavailable,
@@ -36,7 +37,9 @@ namespace librarian::windows
 
         void ShowAccountEditor();
         void CancelAccountEditor();
-        void SaveAccount(AccountDraft const& account);
+        [[nodiscard]] bool BeginSaveAccount();
+        void CompleteSaveAccount(AccountDraft const& account);
+        void CancelPendingOperations() noexcept;
 
         [[nodiscard]] ShellState State() const noexcept;
         [[nodiscard]] std::wstring const& Message() const noexcept;
@@ -49,6 +52,7 @@ namespace librarian::windows
             None,
             Create,
             Unlock,
+            SaveAccount,
         };
 
         void RefreshStatus();

@@ -280,6 +280,8 @@ Invoke-CheckedProcess `
     -Arguments @(
         "--xaml"
         "apps\windows\Librarian.Windows\MainWindow.xaml"
+        "--source"
+        "apps\windows\Librarian.Windows\MainWindow.xaml.cpp"
     ) `
     -WorkingDirectory $repoRoot
 

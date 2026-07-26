@@ -26,6 +26,12 @@ namespace winrt::Librarian::Windows::implementation
         if (!window)
         {
             window = make<MainWindow>();
+            window.Closed([this](
+                [[maybe_unused]] IInspectable const& sender,
+                [[maybe_unused]] WindowEventArgs const& event)
+            {
+                window = nullptr;
+            });
         }
         window.Activate();
     }

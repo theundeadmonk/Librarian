@@ -13,6 +13,8 @@ namespace librarian::windows
             L"Unlock Librarian with your master password.";
         constexpr wchar_t UnlockingMessage[] =
             L"Librarian is completing a security-sensitive request.";
+        constexpr wchar_t SavingMessage[] =
+            L"Librarian is saving the account through the local vault agent.";
         constexpr wchar_t EmptyAccountsMessage[] =
             L"No accounts are stored in this vault yet.";
         constexpr wchar_t AgentUnavailableMessage[] =
@@ -25,6 +27,10 @@ namespace librarian::windows
             L"Librarian could not complete that request. Check your password and try again.";
         constexpr wchar_t LockedDuringRequestMessage[] =
             L"The vault locked before the request completed.";
+        constexpr wchar_t LockStatusUnknownMessage[] =
+            L"Librarian could not confirm that the vault locked. Access remains hidden until status is rechecked.";
+        constexpr wchar_t AccountLoadCancelledMessage[] =
+            L"Librarian could not confirm the account list. Retry vault status.";
         constexpr wchar_t UnexpectedMessage[] =
             L"Librarian could not complete the request. No changes were made.";
     }
@@ -136,7 +142,17 @@ namespace librarian::windows
         resume_state_ = state_;
         try
         {
-            Apply(client_->Lock());
+            auto const result = client_->Lock();
+            if (result.error == ClientError::Cancelled)
+            {
+                account_editor_visible_ = false;
+                accounts_.clear();
+                state_ = ShellState::Error;
+                message_ = LockStatusUnknownMessage;
+                return;
+            }
+
+            Apply(result);
         }
         catch (...)
         {
@@ -157,14 +173,28 @@ namespace librarian::windows
         account_editor_visible_ = false;
     }
 
-    void ShellViewModel::SaveAccount(AccountDraft const& account)
+    bool ShellViewModel::BeginSaveAccount()
     {
         if (state_ != ShellState::Unlocked || !account_editor_visible_)
+        {
+            return false;
+        }
+
+        resume_state_ = state_;
+        pending_action_ = PendingAction::SaveAccount;
+        state_ = ShellState::Saving;
+        message_ = SavingMessage;
+        return true;
+    }
+
+    void ShellViewModel::CompleteSaveAccount(AccountDraft const& account)
+    {
+        if (pending_action_ != PendingAction::SaveAccount)
         {
             return;
         }
 
-        resume_state_ = state_;
+        pending_action_ = PendingAction::None;
         try
         {
             auto const result = client_->SaveAccount(account);
@@ -178,6 +208,11 @@ namespace librarian::windows
         {
             ApplyError(ClientError::Unexpected);
         }
+    }
+
+    void ShellViewModel::CancelPendingOperations() noexcept
+    {
+        client_->CancelPendingOperations();
     }
 
     ShellState ShellViewModel::State() const noexcept
@@ -305,6 +340,15 @@ namespace librarian::windows
             auto result = client_->ListAccounts();
             if (result.error != ClientError::None)
             {
+                if (result.error == ClientError::Cancelled)
+                {
+                    account_editor_visible_ = false;
+                    accounts_.clear();
+                    state_ = ShellState::Error;
+                    message_ = AccountLoadCancelledMessage;
+                    return;
+                }
+
                 ApplyError(result.error);
                 return;
             }

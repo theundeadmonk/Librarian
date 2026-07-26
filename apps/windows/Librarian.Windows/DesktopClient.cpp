@@ -44,6 +44,10 @@ namespace librarian::windows
                 return Unavailable();
             }
 
+            void CancelPendingOperations() noexcept override
+            {
+            }
+
         private:
             [[nodiscard]] static ClientResult Unavailable()
             {
