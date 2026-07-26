@@ -485,11 +485,12 @@ fn request_ids_cancellation_backpressure_and_epochs_are_deterministic() {
 }
 
 #[test]
-fn create_and_unlock_share_the_password_kdf_deadline_cap() {
+fn password_kdf_and_lock_share_the_transition_deadline_cap() {
     let connection = connection(ClientRole::Desktop);
     for (request_id, operation, idempotency_key) in [
         (1, OperationCode::CreateVault, Some([0x31; 16])),
         (2, OperationCode::UnlockMasterPassword, None),
+        (3, OperationCode::Lock, None),
     ] {
         let request = RequestEnvelope::new(
             operation,
@@ -505,7 +506,7 @@ fn create_and_unlock_share_the_password_kdf_deadline_cap() {
         );
         let permit = connection
             .begin_request(&header, &request, 9)
-            .expect("password KDF request must be admitted");
+            .expect("state-transition request must be admitted");
         assert_eq!(permit.effective_timeout_ms(), UNLOCK_TIMEOUT_MS);
         assert_eq!(connection.finish(permit), Ok(RequestCompletion::Active));
     }

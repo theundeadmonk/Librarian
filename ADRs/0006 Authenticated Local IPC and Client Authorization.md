@@ -617,12 +617,17 @@ Version 1 defaults:
 | Concurrent vault mutations | 1 |
 | Concurrent lock transitions | 1 |
 | Ordinary operation deadline | 5 seconds |
-| Password KDF operation deadline (create or unlock) | 30 seconds |
+| Password KDF or lock-transition deadline | 30 seconds |
 | Windows-mediated passkey transaction | 120 seconds |
 | Event queue per connection | 8 |
 
 All limits apply before unbounded allocation or work. The server may advertise
 lower limits. A client cannot raise them.
+
+Lock uses the transition deadline because it must cancel and synchronously
+drain an in-flight password KDF before acknowledging that key state is clear.
+It must not inherit the shorter ordinary-operation cap while waiting for work
+that was legitimately admitted with the KDF cap.
 
 Backpressure is explicit:
 
