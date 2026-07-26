@@ -44,6 +44,11 @@
     },
     {
       "platform": "windows",
+      "test": "librarian-windows-ipc::lib:librarian_windows_ipc::platform::tests::peer_observation_rejects_wrong_connection_side::test:active",
+      "rationale": "Exercises Windows-only named-pipe connection orientation so client and server identity accessors cannot silently return the observation for the wrong endpoint."
+    },
+    {
+      "platform": "windows",
       "test": "librarian-windows-ipc::lib:librarian_windows_ipc::platform::tests::completed_frames_from_exited_peers_are_rejected::test:active",
       "rationale": "Exercises retained Windows process-handle liveness after complete frame assembly so buffered requests from exited peers are not admitted."
     },
@@ -51,6 +56,11 @@
       "platform": "windows",
       "test": "librarian-windows-ipc::lib:librarian_windows_ipc::platform::tests::expired_deadlines_are_reported_before_a_wait::test:active",
       "rationale": "Exercises the expired-deadline branch used to cancel and drain pending Windows overlapped I/O before releasing its storage."
+    },
+    {
+      "platform": "windows",
+      "test": "librarian-windows-ipc::lib:librarian_windows_ipc::platform::tests::failed_impersonation_reversion_is_fatal::test:active",
+      "rationale": "Exercises the Windows-only fail-stop path required when RevertToSelf cannot restore the agent thread after named-pipe client impersonation."
     },
     {
       "platform": "windows",

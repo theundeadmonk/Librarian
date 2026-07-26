@@ -153,6 +153,21 @@ struct ImpersonationGuard {
     active: bool,
 }
 
+#[cold]
+fn terminate_after_failed_revert() -> ! {
+    #[cfg(test)]
+    panic!("RevertToSelf failed while the thread was impersonating a pipe client");
+
+    #[cfg(not(test))]
+    std::process::abort();
+}
+
+fn require_successful_revert(success: i32) {
+    if success == 0 {
+        terminate_after_failed_revert();
+    }
+}
+
 impl ImpersonationGuard {
     fn begin(pipe: HANDLE) -> Result<Self, TransportError> {
         // SAFETY: `pipe` is the connected server end of a named pipe. The
@@ -164,23 +179,22 @@ impl ImpersonationGuard {
         Ok(Self { active: true })
     }
 
-    fn revert(mut self) -> Result<(), TransportError> {
+    fn revert(mut self) {
         // SAFETY: this thread is currently impersonating the connected client.
-        if unsafe { RevertToSelf() } == 0 {
-            return Err(TransportError::Internal);
-        }
+        // Microsoft requires process termination if reversion fails because
+        // continuing would leave this worker in the client's security context.
+        require_successful_revert(unsafe { RevertToSelf() });
         self.active = false;
-        Ok(())
     }
 }
 
 impl Drop for ImpersonationGuard {
     fn drop(&mut self) {
         if self.active {
-            // SAFETY: best-effort fail-closed cleanup after an earlier error.
-            unsafe {
-                let _ = RevertToSelf();
-            }
+            // SAFETY: this is the mandatory cleanup path after an error while
+            // the thread is impersonating the connected client. Failure is
+            // process-fatal; this worker must never continue under that token.
+            require_successful_revert(unsafe { RevertToSelf() });
         }
     }
 }
@@ -914,7 +928,7 @@ fn observe_pipe_client_token(pipe: HANDLE) -> Result<TokenObservation, Transport
         return Err(TransportError::AccessDenied);
     }
     let token = OwnedHandle::new(raw_token).map_err(|_| TransportError::AccessDenied)?;
-    impersonation.revert()?;
+    impersonation.revert();
     observe_token(token.raw())
 }
 
@@ -950,15 +964,29 @@ fn observe_pipe_peer(pipe: HANDLE, side: PeerSide) -> Result<PeerHandle, Transpo
 }
 
 /// Returns the client observation retained by a server-side connection.
-#[must_use]
-pub fn observe_pipe_client(connection: &PipeConnection) -> &PeerHandle {
-    &connection.peer
+///
+/// # Errors
+///
+/// Returns `Internal` if a client-side connection is supplied. The function
+/// never silently attributes the server observation to a client.
+pub fn observe_pipe_client(connection: &PipeConnection) -> Result<&PeerHandle, TransportError> {
+    if !connection.server_side {
+        return Err(TransportError::Internal);
+    }
+    Ok(&connection.peer)
 }
 
 /// Returns the server observation retained by a client-side connection.
-#[must_use]
-pub fn observe_pipe_server(connection: &PipeConnection) -> &PeerHandle {
-    &connection.peer
+///
+/// # Errors
+///
+/// Returns `Internal` if a server-side connection is supplied. The function
+/// never silently attributes the client observation to a server.
+pub fn observe_pipe_server(connection: &PipeConnection) -> Result<&PeerHandle, TransportError> {
+    if connection.server_side {
+        return Err(TransportError::Internal);
+    }
+    Ok(&connection.peer)
 }
 
 /// One mutually authenticated named-pipe connection.
@@ -1564,6 +1592,41 @@ mod tests {
         appmodel_string(token.raw(), GetPackageFamilyNameFromToken)
             .expect("query package family name");
         appmodel_string(token.raw(), GetApplicationUserModelIdFromToken).expect("query AUMID");
+    }
+
+    #[test]
+    fn failed_impersonation_reversion_is_fatal() {
+        require_successful_revert(1);
+        assert!(
+            std::panic::catch_unwind(|| require_successful_revert(0)).is_err(),
+            "a failed RevertToSelf must terminate execution"
+        );
+    }
+
+    #[test]
+    fn peer_observation_rejects_wrong_connection_side() {
+        let test_connection = |server_side, component_role| PipeConnection {
+            // SAFETY: the unnamed event is used only as a valid owned kernel
+            // handle; peer-observation accessors do not perform pipe I/O.
+            pipe: OwnedHandle::new(unsafe { CreateEventW(ptr::null(), 1, 0, ptr::null()) })
+                .expect("test connection handle"),
+            peer: current_process_observation().expect("current process peer"),
+            server_side,
+            component_role,
+        };
+        let server_side = test_connection(true, ComponentRole::Desktop);
+        assert!(observe_pipe_client(&server_side).is_ok());
+        assert!(matches!(
+            observe_pipe_server(&server_side),
+            Err(TransportError::Internal)
+        ));
+
+        let client_side = test_connection(false, ComponentRole::Agent);
+        assert!(observe_pipe_server(&client_side).is_ok());
+        assert!(matches!(
+            observe_pipe_client(&client_side),
+            Err(TransportError::Internal)
+        ));
     }
 
     #[test]

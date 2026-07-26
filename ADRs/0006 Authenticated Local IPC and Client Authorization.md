@@ -262,7 +262,11 @@ application bytes, the agent must:
 
 1. Call `ImpersonateNamedPipeClient`, open the resulting
    SecurityIdentification thread token with query-only access, and immediately
-   `RevertToSelf`. Failure to acquire or revert the token is fatal.
+   `RevertToSelf`. Failure to acquire the token rejects the connection. Per
+   Microsoft's
+   [`RevertToSelf` contract](https://learn.microsoft.com/en-us/windows/win32/api/securitybaseapi/nf-securitybaseapi-reverttoself),
+   failure to revert terminates the agent process because continuing could
+   execute vault work in the client's security context.
 2. Query the pipe-bound token for user SID, logon SID, session, integrity,
    elevation, AppContainer state, package full name, package family, and
    application identity. This token—not a subsequently reopened PID—is the
@@ -293,6 +297,9 @@ application bytes, the agent must:
 9. Derive exactly one client role from the installed component manifest.
    Zero or multiple matches are authorization failure.
 10. Close the connection without a protocol response on any identity failure.
+    Identity-observation APIs are side-checked: a server-side connection can
+    expose only its retained client observation, and a client-side connection
+    can expose only its retained server observation.
 
 The exact package full name intentionally rejects a partially updated product
 set. A package family match alone is insufficient because it would allow an old
