@@ -39,6 +39,11 @@
     },
     {
       "platform": "windows",
+      "test": "librarian-windows-ipc::lib:librarian_windows_ipc::platform::tests::pipe_bound_client_token_rejects_a_substituted_process_identity::test:active",
+      "rationale": "Exercises Windows-only SecurityIdentification named-pipe impersonation, access-token and AppModel identity binding, and rejection of a substituted process identity that could otherwise exploit PID reuse."
+    },
+    {
+      "platform": "windows",
       "test": "librarian-windows-ipc::lib:librarian_windows_ipc::platform::tests::completed_frames_from_exited_peers_are_rejected::test:active",
       "rationale": "Exercises retained Windows process-handle liveness after complete frame assembly so buffered requests from exited peers are not admitted."
     },
