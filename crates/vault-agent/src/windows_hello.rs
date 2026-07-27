@@ -209,14 +209,14 @@ impl WindowsHelloLocalState {
     pub(crate) fn new(
         vault_id: [u8; 16],
         key_epoch: u32,
-        installation_key: [u8; INSTALLATION_KEY_BYTES],
+        installation_key: Zeroizing<[u8; INSTALLATION_KEY_BYTES]>,
         credential_id: Vec<u8>,
         prf_salt: [u8; PRF_SALT_BYTES],
         protector: Vec<u8>,
     ) -> Result<Self, WindowsHelloStateError> {
         if vault_id == [0; 16]
             || key_epoch == 0
-            || installation_key == [0; INSTALLATION_KEY_BYTES]
+            || installation_key.as_ref() == [0; INSTALLATION_KEY_BYTES]
             || credential_id.is_empty()
             || credential_id.len() > MAX_WINDOWS_HELLO_CREDENTIAL_ID_BYTES
             || prf_salt == [0; PRF_SALT_BYTES]
@@ -237,7 +237,7 @@ impl WindowsHelloLocalState {
         Ok(Self {
             vault_id,
             key_epoch,
-            installation_key: Zeroizing::new(installation_key),
+            installation_key,
             credential_id,
             prf_salt,
             protector,
@@ -253,7 +253,7 @@ impl WindowsHelloLocalState {
     }
 
     pub(crate) fn installation_key(&self) -> WindowsHelloInstallationKey {
-        WindowsHelloInstallationKey::new(*self.installation_key)
+        WindowsHelloInstallationKey::from_zeroizing(self.installation_key.clone())
     }
 
     pub(crate) fn credential_id(&self) -> &[u8] {
@@ -306,7 +306,7 @@ impl WindowsHelloLocalState {
         }
         let vault_id = fixed_bytes(&mut decoder)?;
         let key_epoch = decoder.u32().map_err(|_| WindowsHelloStateError::Invalid)?;
-        let installation_key = fixed_bytes(&mut decoder)?;
+        let installation_key = fixed_secret_bytes(&mut decoder)?;
         let credential_id = bounded_bytes(&mut decoder, 1, MAX_WINDOWS_HELLO_CREDENTIAL_ID_BYTES)?;
         let prf_salt = fixed_bytes(&mut decoder)?;
         let protector = bounded_bytes(&mut decoder, 1, MAX_WINDOWS_HELLO_PROTECTOR_BYTES)?;
@@ -337,6 +337,21 @@ fn fixed_bytes<const N: usize>(
         .map_err(|_| WindowsHelloStateError::Invalid)?
         .try_into()
         .map_err(|_| WindowsHelloStateError::Invalid)
+}
+
+#[cfg(any(windows, test))]
+fn fixed_secret_bytes<const N: usize>(
+    decoder: &mut Decoder<'_>,
+) -> Result<Zeroizing<[u8; N]>, WindowsHelloStateError> {
+    let bytes = decoder
+        .bytes()
+        .map_err(|_| WindowsHelloStateError::Invalid)?;
+    if bytes.len() != N {
+        return Err(WindowsHelloStateError::Invalid);
+    }
+    let mut value = Zeroizing::new([0_u8; N]);
+    value.copy_from_slice(bytes);
+    Ok(value)
 }
 
 #[cfg(any(windows, test))]
@@ -583,7 +598,7 @@ mod tests {
         WindowsHelloLocalState::new(
             [marker.wrapping_add(2); 16],
             1,
-            [marker.wrapping_add(6); 32],
+            Zeroizing::new([marker.wrapping_add(6); 32]),
             credential_id,
             prf_salt,
             protector,

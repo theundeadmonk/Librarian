@@ -134,6 +134,11 @@ impl WindowsHelloInstallationKey {
         Self(Zeroizing::new(value))
     }
 
+    #[must_use]
+    pub fn from_zeroizing(value: Zeroizing<[u8; KEY_BYTES]>) -> Self {
+        Self(value)
+    }
+
     fn as_bytes(&self) -> &[u8; KEY_BYTES] {
         &self.0
     }

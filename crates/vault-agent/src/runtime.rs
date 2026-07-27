@@ -915,6 +915,7 @@ impl AgentRuntime {
             OperationRequest::UnlockWindowsHello { parent_window } => self.unlock_windows_hello(
                 parent_window,
                 authenticated_process_id,
+                request_epoch,
                 registration,
                 deadline,
             ),
@@ -1209,7 +1210,7 @@ impl AgentRuntime {
                 });
             }
             vault.create_windows_hello_protector(
-                &WindowsHelloInstallationKey::new(*installation_key),
+                &WindowsHelloInstallationKey::from_zeroizing(installation_key.clone()),
                 &credential_id,
                 prf_salt,
                 prf_output,
@@ -1222,7 +1223,7 @@ impl AgentRuntime {
         let Ok(local_state) = WindowsHelloLocalState::new(
             binding.0,
             binding.1,
-            *installation_key,
+            installation_key,
             credential_id.clone(),
             prf_salt,
             protector,
@@ -1246,28 +1247,27 @@ impl AgentRuntime {
                 ExecutionOutcome::failed()
             });
         }
-        if let Some(previous) = previous.as_ref()
-            && previous.credential_id() != local_state.credential_id()
-            // Retirement precedes publication so a successful replacement
-            // never leaves the previous authenticator usable with a saved
-            // copy of its old protected state.
-            && provider.remove(previous.credential_id()).is_err()
-        {
-            drop(commit);
-            let cleanup = provider.remove(local_state.credential_id());
-            return Ok(if cleanup.is_ok() {
-                ExecutionOutcome::retryable_failure()
-            } else {
-                ExecutionOutcome::failed()
-            });
-        }
         match state_store.save(&local_state) {
-            Ok(()) => Ok(ExecutionOutcome::success(encode_empty_result()?).commit_point()),
+            Ok(()) => {}
             Err(WindowsHelloStateError::Published) => {
-                // Publication already selected the new credential. Preserve it
-                // even when verification or directory durability reports an
-                // error so the published state never points at a deleted key.
-                Ok(ExecutionOutcome::failed())
+                // Publication selected the new credential before a later
+                // verification or durability failure. Restore the previous
+                // complete record before removing the new key when possible;
+                // otherwise preserve the key referenced by published state.
+                return Ok(
+                    if previous.as_ref().is_some_and(|previous| {
+                        Self::rollback_windows_hello_enrollment(
+                            provider,
+                            state_store,
+                            previous,
+                            &local_state,
+                        )
+                    }) {
+                        ExecutionOutcome::retryable_failure()
+                    } else {
+                        ExecutionOutcome::failed()
+                    },
+                );
             }
             Err(
                 WindowsHelloStateError::NotFound
@@ -1279,13 +1279,33 @@ impl AgentRuntime {
                 let outcome = self
                     .windows_hello_terminal_abort(registration, deadline)
                     .unwrap_or_else(ExecutionOutcome::failed);
-                Ok(if cleanup.is_ok() {
+                return Ok(if cleanup.is_ok() {
                     outcome
                 } else {
                     ExecutionOutcome::failed()
-                })
+                });
             }
         }
+        // ADR 0005 requires the complete replacement record to be published
+        // before the old platform credential is retired.
+        if let Some(previous) = previous.as_ref()
+            && previous.credential_id() != local_state.credential_id()
+            && provider.remove(previous.credential_id()).is_err()
+        {
+            return Ok(
+                if Self::rollback_windows_hello_enrollment(
+                    provider,
+                    state_store,
+                    previous,
+                    &local_state,
+                ) {
+                    ExecutionOutcome::retryable_failure()
+                } else {
+                    ExecutionOutcome::failed()
+                },
+            );
+        }
+        Ok(ExecutionOutcome::success(encode_empty_result()?).commit_point())
     }
 
     #[allow(
@@ -1296,6 +1316,7 @@ impl AgentRuntime {
         &self,
         parent_window: u64,
         authenticated_process_id: u32,
+        request_epoch: u64,
         registration: &RequestRegistration,
         deadline: Instant,
     ) -> Result<ExecutionOutcome, DispatchError> {
@@ -1333,6 +1354,9 @@ impl AgentRuntime {
             let _commit = lock(&self.coordinator.commit_gate)?;
             if self.coordinator.lock_active.load(Ordering::Acquire) {
                 return Ok(ExecutionOutcome::busy());
+            }
+            if self.coordinator.epoch() != request_epoch {
+                return Ok(ExecutionOutcome::locked());
             }
             start_epoch = self.coordinator.epoch();
             if self
@@ -1542,6 +1566,17 @@ impl AgentRuntime {
         } else {
             ExecutionOutcome::failed()
         }
+    }
+
+    fn rollback_windows_hello_enrollment(
+        provider: &dyn WindowsHelloProvider,
+        state_store: &dyn WindowsHelloStateRepository,
+        previous: &WindowsHelloLocalState,
+        replacement: &WindowsHelloLocalState,
+    ) -> bool {
+        previous.credential_id() != replacement.credential_id()
+            && state_store.save(previous).is_ok()
+            && provider.remove(replacement.credential_id()).is_ok()
     }
 
     fn publish_authenticated_unlock(
@@ -2600,6 +2635,7 @@ mod tests {
     #[derive(Default)]
     struct TestWindowsHelloStateRepository {
         encoded: Mutex<Option<Zeroizing<Vec<u8>>>>,
+        save_count: AtomicUsize,
         fail_next_save_after_publication: AtomicBool,
         fail_next_remove: AtomicBool,
     }
@@ -2621,6 +2657,10 @@ mod tests {
         fn fail_next_remove(&self) {
             self.fail_next_remove.store(true, Ordering::Release);
         }
+
+        fn save_count(&self) -> usize {
+            self.save_count.load(Ordering::Acquire)
+        }
     }
 
     impl WindowsHelloStateRepository for TestWindowsHelloStateRepository {
@@ -2638,6 +2678,7 @@ mod tests {
                 .encoded
                 .lock()
                 .map_err(|_| WindowsHelloStateError::Failed)? = Some(state.encode()?);
+            self.save_count.fetch_add(1, Ordering::AcqRel);
             if self
                 .fail_next_save_after_publication
                 .swap(false, Ordering::AcqRel)
@@ -4105,6 +4146,7 @@ mod tests {
             .unlock_windows_hello(
                 0x1234,
                 17,
+                runtime.unlock_epoch(),
                 &unlock_registration,
                 Instant::now() + Duration::from_secs(10),
             )
@@ -4179,6 +4221,11 @@ mod tests {
         assert_eq!(second.retry, RetryCategory::Backoff);
         assert!(!should_cache(&second));
         assert_eq!(state.credential_id(), Some(vec![0xA0, 0]));
+        assert_eq!(
+            state.save_count(),
+            3,
+            "replacement must publish before retirement failure rolls back"
+        );
         assert_eq!(provider.removed(), vec![vec![0xA0, 1]]);
     }
 
@@ -4193,33 +4240,62 @@ mod tests {
                 .expect("runtime");
         create_test_vault(&runtime, "disposable publication failure password");
 
-        let first_registration = test_registration(&runtime, 0xD3);
-        let first = runtime
-            .enroll_windows_hello(
-                0x1234,
-                17,
-                runtime.unlock_epoch(),
-                &first_registration,
-                Instant::now() + Duration::from_secs(10),
-            )
-            .expect("first enrollment");
-        assert_eq!(first.error, None);
-        drop(first_registration);
-
         state.fail_next_save_after_publication();
-        let second_registration = test_registration(&runtime, 0xD4);
-        let second = runtime
+        let registration = test_registration(&runtime, 0xD3);
+        let outcome = runtime
             .enroll_windows_hello(
                 0x1234,
                 17,
                 runtime.unlock_epoch(),
-                &second_registration,
+                &registration,
                 Instant::now() + Duration::from_secs(10),
             )
             .expect("post-publication failure");
-        assert_eq!(second.error, Some(PublicErrorCode::OperationFailed));
-        assert_eq!(state.credential_id(), Some(vec![0xA0, 1]));
-        assert_eq!(provider.removed(), vec![vec![0xA0, 0]]);
+        assert_eq!(outcome.error, Some(PublicErrorCode::OperationFailed));
+        assert_eq!(state.credential_id(), Some(vec![0xA0, 0]));
+        assert!(provider.removed().is_empty());
+    }
+
+    #[test]
+    fn windows_hello_stale_unlock_epoch_never_starts_a_ceremony() {
+        let directory = TestDirectory::new();
+        let path = directory.vault_path();
+        let provider = Arc::new(TestWindowsHelloProvider::new());
+        let state = Arc::new(TestWindowsHelloStateRepository::default());
+        let runtime =
+            AgentRuntime::start_with_components(&path, Some(provider.clone()), Some(state))
+                .expect("runtime");
+        create_test_vault(&runtime, "disposable stale hello epoch password");
+
+        let enroll_registration = test_registration(&runtime, 0xD4);
+        let enrolled = runtime
+            .enroll_windows_hello(
+                0x1234,
+                17,
+                runtime.unlock_epoch(),
+                &enroll_registration,
+                Instant::now() + Duration::from_secs(10),
+            )
+            .expect("enrollment");
+        assert_eq!(enrolled.error, None);
+        drop(enroll_registration);
+
+        let stale_epoch = runtime.unlock_epoch();
+        complete_test_lock(&runtime);
+        assert_ne!(runtime.unlock_epoch(), stale_epoch);
+        let unlock_registration = test_registration(&runtime, 0xD5);
+        let outcome = runtime
+            .unlock_windows_hello(
+                0x1234,
+                17,
+                stale_epoch,
+                &unlock_registration,
+                Instant::now() + Duration::from_secs(10),
+            )
+            .expect("stale unlock outcome");
+        assert_eq!(outcome.error, Some(PublicErrorCode::Locked));
+        assert!(provider.evaluated().is_empty());
+        assert_eq!(runtime.state(), AgentState::Locked);
     }
 
     #[test]
