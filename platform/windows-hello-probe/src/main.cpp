@@ -61,7 +61,11 @@ namespace
         {
             if (value_ != nullptr)
             {
-                clear_secret(value_->pHmacSecret);
+                if (value_->dwVersion >=
+                    WEBAUTHN_CREDENTIAL_ATTESTATION_VERSION_7)
+                {
+                    clear_secret(value_->pHmacSecret);
+                }
                 WebAuthNFreeCredentialAttestation(value_);
                 value_ = nullptr;
             }
@@ -115,7 +119,10 @@ namespace
         {
             if (value_ != nullptr)
             {
-                clear_secret(value_->pHmacSecret);
+                if (value_->dwVersion >= WEBAUTHN_ASSERTION_VERSION_3)
+                {
+                    clear_secret(value_->pHmacSecret);
+                }
                 WebAuthNFreeAssertion(value_);
                 value_ = nullptr;
             }
@@ -237,8 +244,19 @@ namespace
             return value_;
         }
 
+        void clear() noexcept
+        {
+            SecureZeroMemory(value_.data(), value_.size());
+        }
+
     private:
         std::array<std::uint8_t, secret_bytes> value_{};
+    };
+
+    struct credential_enrollment final
+    {
+        platform_credential credential;
+        secret creation_prf;
     };
 
     [[nodiscard]] std::string hresult_name(HRESULT const result)
@@ -397,7 +415,46 @@ namespace
         return available != FALSE;
     }
 
-    [[nodiscard]] platform_credential create_credential(HWND const parent)
+    [[nodiscard]] secret validated_secret_from_attestation(
+        PWEBAUTHN_CREDENTIAL_ATTESTATION const value)
+    {
+        require(value != nullptr, "Windows returned no credential attestation.");
+        require(
+            value->dwVersion >= WEBAUTHN_CREDENTIAL_ATTESTATION_VERSION_7,
+            "Windows returned a credential attestation without creation-time WebAuthn PRF fields.");
+        require(
+            value->pbAuthenticatorData != nullptr &&
+                value->cbAuthenticatorData >= authenticator_data_minimum_bytes,
+            "Windows returned malformed WebAuthn credential authenticator data.");
+        require(
+            (value->pbAuthenticatorData[authenticator_flags_offset] &
+             authenticator_user_verified_flag) != 0,
+            "Windows created a WebAuthn credential without user verification.");
+        require(
+            value->bPrfEnabled != FALSE,
+            "The platform credential did not enable WebAuthn PRF.");
+        require(
+            value->pHmacSecret != nullptr &&
+                value->pHmacSecret->cbFirst == secret_bytes &&
+                value->pHmacSecret->pbFirst != nullptr &&
+                value->pHmacSecret->cbSecond == 0 &&
+                value->pHmacSecret->pbSecond == nullptr,
+            "Windows returned no valid 32-byte creation-time WebAuthn PRF result.");
+        require(
+            value->dwUsedTransport == WEBAUTHN_CTAP_TRANSPORT_INTERNAL,
+            "Windows created the disposable credential on a non-platform authenticator.");
+
+        secret released;
+        std::memcpy(
+            released.writable().data(),
+            value->pHmacSecret->pbFirst,
+            secret_bytes);
+        return released;
+    }
+
+    [[nodiscard]] credential_enrollment create_credential(
+        HWND const parent,
+        std::span<std::uint8_t const, secret_bytes> const creation_salt)
     {
         std::array<std::uint8_t, 32> user_identifier{};
         random_bytes(user_identifier);
@@ -428,9 +485,13 @@ namespace
         std::string const json =
             R"({"type":"webauthn.create","challenge":"LibrarianDisposableProbeCreate","origin":"https://librarian.local","crossOrigin":false})";
         WEBAUTHN_CLIENT_DATA const data = client_data(json);
+        WEBAUTHN_HMAC_SECRET_SALT requested_prf{
+            .cbFirst = static_cast<DWORD>(creation_salt.size()),
+            .pbFirst = const_cast<PBYTE>(creation_salt.data()),
+        };
         WEBAUTHN_AUTHENTICATOR_MAKE_CREDENTIAL_OPTIONS options{
             .dwVersion =
-                WEBAUTHN_AUTHENTICATOR_MAKE_CREDENTIAL_OPTIONS_VERSION_6,
+                WEBAUTHN_AUTHENTICATOR_MAKE_CREDENTIAL_OPTIONS_VERSION_8,
             .dwTimeoutMilliseconds = probe_timeout_ms,
             .dwAuthenticatorAttachment =
                 WEBAUTHN_AUTHENTICATOR_ATTACHMENT_PLATFORM,
@@ -440,6 +501,7 @@ namespace
             .dwAttestationConveyancePreference =
                 WEBAUTHN_ATTESTATION_CONVEYANCE_PREFERENCE_NONE,
             .bEnablePrf = TRUE,
+            .pPRFGlobalEval = &requested_prf,
         };
 
         credential_attestation attestation;
@@ -480,14 +542,11 @@ namespace
 
         try
         {
-            require(
-                value->dwVersion >=
-                        WEBAUTHN_CREDENTIAL_ATTESTATION_VERSION_5 &&
-                    value->bPrfEnabled != FALSE,
-                "The platform credential did not enable WebAuthn PRF.");
-            require(
-                value->dwUsedTransport == WEBAUTHN_CTAP_TRANSPORT_INTERNAL,
-                "Windows created the disposable credential on a non-platform authenticator.");
+            secret creation_prf = validated_secret_from_attestation(value);
+            return {
+                .credential = std::move(credential),
+                .creation_prf = std::move(creation_prf),
+            };
         }
         catch (...)
         {
@@ -495,7 +554,6 @@ namespace
                 credential,
                 std::current_exception());
         }
-        return credential;
     }
 
     [[nodiscard]] secret validated_secret_from_assertion(
@@ -529,7 +587,9 @@ namespace
         require(
             value->pHmacSecret != nullptr &&
                 value->pHmacSecret->cbFirst == secret_bytes &&
-                value->pHmacSecret->pbFirst != nullptr,
+                value->pHmacSecret->pbFirst != nullptr &&
+                value->pHmacSecret->cbSecond == 0 &&
+                value->pHmacSecret->pbSecond == nullptr,
             "Windows returned no valid 32-byte WebAuthn PRF result.");
 
         secret released;
@@ -601,21 +661,27 @@ namespace
     };
 
     [[nodiscard]] prf_comparison compare_prf_results(
-        std::span<std::uint8_t const, secret_bytes> const first,
+        std::span<std::uint8_t const, secret_bytes> const creation,
+        std::span<std::uint8_t const, secret_bytes> const first_assertion,
         std::span<std::uint8_t const, secret_bytes> const repeated,
         std::span<std::uint8_t const, secret_bytes> const independent) noexcept
     {
         return {
             .stable_for_same_salt =
                 std::equal(
-                    first.begin(),
-                    first.end(),
+                    creation.begin(),
+                    creation.end(),
+                    first_assertion.begin(),
+                    first_assertion.end()) &&
+                std::equal(
+                    first_assertion.begin(),
+                    first_assertion.end(),
                     repeated.begin(),
                     repeated.end()),
             .changes_for_different_salt =
                 !std::equal(
-                    first.begin(),
-                    first.end(),
+                    creation.begin(),
+                    creation.end(),
                     independent.begin(),
                     independent.end()),
         };
@@ -677,6 +743,109 @@ namespace
         WEBAUTHN_HMAC_SECRET_SALT prf{};
         WEBAUTHN_ASSERTION value{};
     };
+
+    struct synthetic_attestation_fixture final
+    {
+        synthetic_attestation_fixture()
+        {
+            authenticator_data[authenticator_flags_offset] =
+                authenticator_user_verified_flag;
+            prf_bytes.fill(0x5A);
+            prf.cbFirst = static_cast<DWORD>(prf_bytes.size());
+            prf.pbFirst = prf_bytes.data();
+
+            value.dwVersion = WEBAUTHN_CREDENTIAL_ATTESTATION_VERSION_7;
+            value.cbAuthenticatorData =
+                static_cast<DWORD>(authenticator_data.size());
+            value.pbAuthenticatorData = authenticator_data.data();
+            value.dwUsedTransport = WEBAUTHN_CTAP_TRANSPORT_INTERNAL;
+            value.bPrfEnabled = TRUE;
+            value.pHmacSecret = &prf;
+        }
+
+        std::array<std::uint8_t, authenticator_data_minimum_bytes>
+            authenticator_data{};
+        std::array<std::uint8_t, secret_bytes> prf_bytes{};
+        WEBAUTHN_HMAC_SECRET_SALT prf{};
+        WEBAUTHN_CREDENTIAL_ATTESTATION value{};
+    };
+
+    void attestation_validation_self_test()
+    {
+        {
+            synthetic_attestation_fixture fixture;
+            secret const accepted =
+                validated_secret_from_attestation(&fixture.value);
+            require(
+                std::equal(
+                    accepted.value().begin(),
+                    accepted.value().end(),
+                    fixture.prf_bytes.begin(),
+                    fixture.prf_bytes.end()),
+                "A valid synthetic credential attestation returned the wrong PRF result.");
+        }
+        {
+            synthetic_attestation_fixture fixture;
+            fixture.value.dwVersion =
+                WEBAUTHN_CREDENTIAL_ATTESTATION_VERSION_6;
+            require_failure(
+                [&fixture]()
+                {
+                    (void)validated_secret_from_attestation(&fixture.value);
+                },
+                "without creation-time WebAuthn PRF fields");
+        }
+        {
+            synthetic_attestation_fixture fixture;
+            fixture.authenticator_data[authenticator_flags_offset] = 0;
+            require_failure(
+                [&fixture]()
+                {
+                    (void)validated_secret_from_attestation(&fixture.value);
+                },
+                "without user verification");
+        }
+        {
+            synthetic_attestation_fixture fixture;
+            fixture.value.bPrfEnabled = FALSE;
+            require_failure(
+                [&fixture]()
+                {
+                    (void)validated_secret_from_attestation(&fixture.value);
+                },
+                "did not enable WebAuthn PRF");
+        }
+        {
+            synthetic_attestation_fixture fixture;
+            fixture.value.pHmacSecret = nullptr;
+            require_failure(
+                [&fixture]()
+                {
+                    (void)validated_secret_from_attestation(&fixture.value);
+                },
+                "no valid 32-byte creation-time WebAuthn PRF result");
+        }
+        {
+            synthetic_attestation_fixture fixture;
+            --fixture.prf.cbFirst;
+            require_failure(
+                [&fixture]()
+                {
+                    (void)validated_secret_from_attestation(&fixture.value);
+                },
+                "no valid 32-byte creation-time WebAuthn PRF result");
+        }
+        {
+            synthetic_attestation_fixture fixture;
+            fixture.value.dwUsedTransport = WEBAUTHN_CTAP_TRANSPORT_USB;
+            require_failure(
+                [&fixture]()
+                {
+                    (void)validated_secret_from_attestation(&fixture.value);
+                },
+                "non-platform authenticator");
+        }
+    }
 
     void assertion_validation_self_test()
     {
@@ -745,6 +914,20 @@ namespace
         {
             synthetic_assertion_fixture fixture;
             --fixture.prf.cbFirst;
+            require_failure(
+                [&fixture]()
+                {
+                    (void)validated_secret_from_assertion(
+                        &fixture.value,
+                        fixture.credential_identifier);
+                },
+                "no valid 32-byte WebAuthn PRF result");
+        }
+        {
+            synthetic_assertion_fixture fixture;
+            fixture.prf.cbSecond =
+                static_cast<DWORD>(fixture.prf_bytes.size());
+            fixture.prf.pbSecond = fixture.prf_bytes.data();
             require_failure(
                 [&fixture]()
                 {
@@ -846,23 +1029,33 @@ namespace
 
     void prf_comparison_self_test()
     {
+        std::array<std::uint8_t, secret_bytes> creation{};
         std::array<std::uint8_t, secret_bytes> first{};
         std::array<std::uint8_t, secret_bytes> repeated{};
         std::array<std::uint8_t, secret_bytes> independent{};
+        creation.fill(0x11);
         first.fill(0x11);
         repeated.fill(0x11);
         independent.fill(0x22);
 
         prf_comparison const valid =
-            compare_prf_results(first, repeated, independent);
+            compare_prf_results(creation, first, repeated, independent);
         require(
             valid.stable_for_same_salt &&
                 valid.changes_for_different_salt,
             "Valid synthetic PRF behavior was rejected.");
 
+        first.fill(0x33);
+        prf_comparison const ceremony_inconsistent =
+            compare_prf_results(creation, first, repeated, independent);
+        require(
+            !ceremony_inconsistent.stable_for_same_salt,
+            "Creation and assertion PRF disagreement was accepted.");
+
+        first.fill(0x11);
         independent.fill(0x11);
         prf_comparison const salt_independent =
-            compare_prf_results(first, repeated, independent);
+            compare_prf_results(creation, first, repeated, independent);
         require(
             !salt_independent.changes_for_different_salt,
             "Salt-independent synthetic PRF output was accepted.");
@@ -873,21 +1066,23 @@ namespace
         DWORD const version = WebAuthNGetApiVersionNumber();
         require(version != 0, "Windows WebAuthn API is unavailable.");
         bool const available = platform_authenticator_available();
+        attestation_validation_self_test();
         assertion_validation_self_test();
         failure_propagation_self_test();
         prf_comparison_self_test();
 
         std::cout << "[PASS] Windows WebAuthn API version " << version << '\n';
-        std::cout << "[PASS] PRF request structures require API version 6; "
-                  << (version >= WEBAUTHN_API_VERSION_6 ? "supported" : "unsupported")
+        std::cout << "[PASS] creation-time PRF evaluation requires API version 8; "
+                  << (version >= WEBAUTHN_API_VERSION_8 ? "supported" : "unsupported")
                   << '\n';
         std::cout << "[PASS] user-verifying platform authenticator: "
                   << (available ? "available" : "not available (fail closed)")
                   << '\n'
+                  << "[PASS] malformed, missing-UV, missing-PRF, and wrong-transport attestations rejected\n"
                   << "[PASS] malformed, wrong-credential, missing-UV, and missing-PRF assertions rejected\n"
                   << "[PASS] cancellation and credential-cleanup failures surfaced\n"
-                  << "[PASS] same-salt stability and different-salt independence enforced\n"
-                  << "6 passed; 0 failed\n";
+                  << "[PASS] creation/assertion stability and different-salt independence enforced\n"
+                  << "7 passed; 0 failed\n";
         return 0;
     }
 
@@ -895,8 +1090,8 @@ namespace
     {
         DWORD const version = WebAuthNGetApiVersionNumber();
         require(
-            version >= WEBAUTHN_API_VERSION_6,
-            "Windows WebAuthn API version 6 or later is required.");
+            version >= WEBAUTHN_API_VERSION_8,
+            "Windows WebAuthn API version 8 or later is required.");
         require(
             platform_authenticator_available(),
             "No user-verifying platform authenticator is available. Configure Windows Hello first.");
@@ -917,30 +1112,33 @@ namespace
             second_salt.begin(),
             second_salt.end()));
 
-        platform_credential credential = create_credential(parent);
+        credential_enrollment enrollment =
+            create_credential(parent, first_salt);
         prf_comparison comparison{};
         try
         {
             {
                 secret const first = release_secret(
                     parent,
-                    credential,
+                    enrollment.credential,
                     first_salt,
                     "LibrarianDisposableProbeFirst");
                 secret const repeated = release_secret(
                     parent,
-                    credential,
+                    enrollment.credential,
                     first_salt,
                     "LibrarianDisposableProbeRepeated");
                 secret const independent = release_secret(
                     parent,
-                    credential,
+                    enrollment.credential,
                     second_salt,
                     "LibrarianDisposableProbeIndependent");
                 comparison = compare_prf_results(
+                    enrollment.creation_prf.value(),
                     first.value(),
                     repeated.value(),
                     independent.value());
+                enrollment.creation_prf.clear();
             }
 
             require(
@@ -955,21 +1153,21 @@ namespace
             SecureZeroMemory(first_salt.data(), first_salt.size());
             SecureZeroMemory(second_salt.data(), second_salt.size());
             rethrow_after_credential_cleanup(
-                credential,
+                enrollment.credential,
                 std::current_exception());
         }
         SecureZeroMemory(first_salt.data(), first_salt.size());
         SecureZeroMemory(second_salt.data(), second_salt.size());
 
-        HRESULT const removal = credential.remove();
+        HRESULT const removal = enrollment.credential.remove();
         if (FAILED(removal))
         {
             throw_hresult("WebAuthNDeletePlatformCredential", removal);
         }
 
         std::cout
-            << "[PASS] disposable platform credential enabled WebAuthn PRF\n"
-            << "[PASS] two same-salt user-verified releases returned the same 32-byte result\n"
+            << "[PASS] disposable platform credential returned a creation-time WebAuthn PRF result\n"
+            << "[PASS] creation and two same-salt assertions returned the same 32-byte result\n"
             << "[PASS] a different salt returned a different 32-byte result\n"
             << "[PASS] copied PRF results were zeroed immediately after comparison\n"
             << "[PASS] disposable platform credential was removed\n"

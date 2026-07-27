@@ -34,14 +34,16 @@ Only run the following with disposable development state:
 .\artifacts\bin\x64\Release\Librarian.WindowsHelloProbe.exe --manual-test
 ```
 
-Manual mode requires WebAuthn API version 6 or later, an enrolled Windows Hello
+Manual mode requires WebAuthn API version 8 or later, an enrolled Windows Hello
 platform authenticator, an interactive console window, and explicit approval
 of four Windows-owned prompts. It uses the relying-party identifier
 `librarian.local`, requests the platform authenticator with user verification
-required, verifies the returned authenticator-data user-verification flag,
-enables the PRF extension, checks two releases against the same random salt,
-and requires a third release against an independent salt to differ. Copied PRF
-bytes are zeroed immediately after comparison and are never printed.
+required, supplies a creation-time PRF evaluation through the API v8
+`pPRFGlobalEval` field, and verifies the returned authenticator-data
+user-verification flag. It requires the creation-time result and two assertions
+against the same random salt to match, and requires a third assertion against an
+independent salt to differ. Copied PRF bytes are zeroed immediately after
+comparison and are never printed.
 
 Cancellation, missing enrollment, unsupported PRF, a malformed result, or
 credential removal failure returns a nonzero exit status. No fallback is
