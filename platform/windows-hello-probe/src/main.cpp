@@ -31,6 +31,13 @@ namespace
     constexpr std::size_t relying_party_id_hash_bytes = 32;
     constexpr std::size_t authenticator_flags_offset = 32;
     constexpr std::uint8_t authenticator_user_verified_flag = 0x04;
+    constexpr std::array<std::uint8_t, relying_party_id_hash_bytes>
+        known_relying_party_id_hash{
+            0x5A, 0x65, 0xA3, 0xD9, 0x88, 0x6C, 0x0D, 0x8D,
+            0x08, 0xE6, 0xC1, 0x2D, 0x96, 0xF5, 0x3B, 0x01,
+            0x9E, 0x3F, 0x72, 0x13, 0xDD, 0xAE, 0x98, 0x68,
+            0x27, 0xC8, 0xB6, 0xA2, 0xA4, 0x51, 0xCB, 0x85,
+        };
 
     static_assert(secret_bytes == 32);
     static_assert(relying_party_id_hash_bytes == authenticator_flags_offset);
@@ -867,6 +874,9 @@ namespace
 
     void attestation_validation_self_test()
     {
+        require(
+            relying_party_id_hash() == known_relying_party_id_hash,
+            "The relying-party identifier hash failed its SHA-256 known-answer test.");
         {
             synthetic_attestation_fixture fixture;
             secret const accepted =
@@ -889,6 +899,27 @@ namespace
                     (void)validated_secret_from_attestation(&fixture.value);
                 },
                 "without creation-time WebAuthn PRF fields");
+        }
+        {
+            synthetic_attestation_fixture fixture;
+            fixture.value.pbAuthenticatorData = nullptr;
+            require_failure(
+                [&fixture]()
+                {
+                    (void)validated_secret_from_attestation(&fixture.value);
+                },
+                "malformed WebAuthn credential authenticator data");
+        }
+        {
+            synthetic_attestation_fixture fixture;
+            fixture.value.cbAuthenticatorData =
+                static_cast<DWORD>(authenticator_flags_offset);
+            require_failure(
+                [&fixture]()
+                {
+                    (void)validated_secret_from_attestation(&fixture.value);
+                },
+                "malformed WebAuthn credential authenticator data");
         }
         {
             synthetic_attestation_fixture fixture;
@@ -1217,20 +1248,20 @@ namespace
             parent != nullptr,
             "Manual mode requires an interactive console window.");
 
-        std::array<std::uint8_t, secret_bytes> first_salt{};
-        std::array<std::uint8_t, secret_bytes> second_salt{};
-        random_bytes(first_salt);
+        secret first_salt;
+        secret second_salt;
+        random_bytes(first_salt.writable());
         do
         {
-            random_bytes(second_salt);
+            random_bytes(second_salt.writable());
         } while (std::equal(
-            first_salt.begin(),
-            first_salt.end(),
-            second_salt.begin(),
-            second_salt.end()));
+            first_salt.value().begin(),
+            first_salt.value().end(),
+            second_salt.value().begin(),
+            second_salt.value().end()));
 
         credential_enrollment enrollment =
-            create_credential(parent, first_salt);
+            create_credential(parent, first_salt.value());
         prf_comparison comparison{};
         try
         {
@@ -1238,17 +1269,17 @@ namespace
                 secret const first = release_secret(
                     parent,
                     enrollment.credential,
-                    first_salt,
+                    first_salt.value(),
                     "LibrarianDisposableProbeFirst");
                 secret const repeated = release_secret(
                     parent,
                     enrollment.credential,
-                    first_salt,
+                    first_salt.value(),
                     "LibrarianDisposableProbeRepeated");
                 secret const independent = release_secret(
                     parent,
                     enrollment.credential,
-                    second_salt,
+                    second_salt.value(),
                     "LibrarianDisposableProbeIndependent");
                 comparison = compare_prf_results(
                     enrollment.creation_prf.value(),
@@ -1267,14 +1298,14 @@ namespace
         }
         catch (...)
         {
-            SecureZeroMemory(first_salt.data(), first_salt.size());
-            SecureZeroMemory(second_salt.data(), second_salt.size());
+            first_salt.clear();
+            second_salt.clear();
             rethrow_after_credential_cleanup(
                 enrollment.credential,
                 std::current_exception());
         }
-        SecureZeroMemory(first_salt.data(), first_salt.size());
-        SecureZeroMemory(second_salt.data(), second_salt.size());
+        first_salt.clear();
+        second_salt.clear();
 
         HRESULT const removal = enrollment.credential.remove();
         if (FAILED(removal))
