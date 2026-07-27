@@ -2456,10 +2456,13 @@ mod tests {
     impl WindowsHelloProvider for TestWindowsHelloProvider {
         fn enroll(
             &self,
-            _parent_window: u64,
-            _authenticated_process_id: u32,
-            _operation_id: [u8; 16],
+            parent_window: u64,
+            authenticated_process_id: u32,
+            operation_id: [u8; 16],
         ) -> Result<WindowsHelloEnrollment, WindowsHelloProviderError> {
+            if parent_window == 0 || authenticated_process_id == 0 || operation_id == [0; 16] {
+                return Err(WindowsHelloProviderError::InvalidRequest);
+            }
             let ordinal = self.next_credential.fetch_add(1, Ordering::AcqRel);
             let marker = u8::try_from(ordinal).map_err(|_| WindowsHelloProviderError::Failed)?;
             Ok(WindowsHelloEnrollment {
@@ -2473,11 +2476,19 @@ mod tests {
             &self,
             parent_window: u64,
             authenticated_process_id: u32,
-            _operation_id: [u8; 16],
+            operation_id: [u8; 16],
             credential_id: &[u8],
             prf_salt: &[u8; 32],
         ) -> Result<crate::WindowsHelloPrfOutput, WindowsHelloProviderError> {
-            if prf_salt != &TEST_HELLO_SALT {
+            if parent_window == 0
+                || authenticated_process_id == 0
+                || operation_id == [0; 16]
+                || credential_id.is_empty()
+                || prf_salt != &TEST_HELLO_SALT
+            {
+                return Err(WindowsHelloProviderError::InvalidRequest);
+            }
+            if credential_id.first() != Some(&0xA0) {
                 return Err(WindowsHelloProviderError::Failed);
             }
             self.evaluated

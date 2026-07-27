@@ -487,6 +487,19 @@ pub fn restrict_user_file(path: &Path) -> Result<(), ProtectedStateError> {
     let descriptor = descriptor_from_sddl(&sddl)?;
     validate_restricted_descriptor(descriptor.0, &user_sid)?;
 
+    let mut owner: PSID = ptr::null_mut();
+    let mut owner_defaulted = 0;
+    // SAFETY: the descriptor is live and both outputs point to writable
+    // storage. The owner remains owned by `descriptor`.
+    if unsafe { GetSecurityDescriptorOwner(descriptor.0, &raw mut owner, &raw mut owner_defaulted) }
+        == 0
+        || owner.is_null()
+        || unsafe { IsValidSid(owner) } == 0
+        || owner_defaulted != 0
+    {
+        return Err(ProtectedStateError::PlatformFailure);
+    }
+
     let mut present = 0;
     let mut defaulted = 0;
     let mut dacl: *mut ACL = ptr::null_mut();
@@ -508,14 +521,16 @@ pub fn restrict_user_file(path: &Path) -> Result<(), ProtectedStateError> {
     }
 
     let mut wide = wide_path(path)?;
-    // SAFETY: the path is a live terminated UTF-16 string and the DACL
-    // remains owned by `descriptor` for the duration of this call.
+    // SAFETY: the path is a live terminated UTF-16 string and both the owner
+    // and DACL remain owned by `descriptor` for the duration of this call.
     let status = unsafe {
         SetNamedSecurityInfoW(
             wide.as_mut_ptr(),
             SE_FILE_OBJECT,
-            DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
-            ptr::null_mut(),
+            OWNER_SECURITY_INFORMATION
+                | DACL_SECURITY_INFORMATION
+                | PROTECTED_DACL_SECURITY_INFORMATION,
+            owner,
             ptr::null_mut(),
             dacl,
             ptr::null(),

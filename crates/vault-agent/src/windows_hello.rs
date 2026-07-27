@@ -1,3 +1,4 @@
+#[cfg(windows)]
 use std::{
     fmt::Write as _,
     io::{Read, Seek, SeekFrom, Write},
@@ -8,6 +9,7 @@ use librarian_vault_core::{WindowsHelloInstallationKey, WindowsHelloPrfOutput};
 use librarian_vault_format::{
     MAX_WINDOWS_HELLO_CREDENTIAL_ID_BYTES, MAX_WINDOWS_HELLO_PROTECTOR_BYTES, WindowsHelloProtector,
 };
+#[cfg(any(windows, test))]
 use minicbor::{Decoder, Encoder};
 use zeroize::Zeroizing;
 
@@ -20,15 +22,26 @@ use crate::filesystem::{
     sync_parent_directory_with_ancestor_guards,
 };
 
+#[cfg(any(windows, test))]
 const LOCAL_STATE_MAGIC: &str = "LBR-HLO";
+#[cfg(any(windows, test))]
 const LOCAL_STATE_VERSION: u32 = 1;
+#[cfg(any(windows, test))]
 const LOCAL_STATE_FIELDS: u64 = 8;
 const INSTALLATION_KEY_BYTES: usize = 32;
 const PRF_SALT_BYTES: usize = 32;
+#[cfg(any(windows, test))]
 const MAXIMUM_LOCAL_STATE_BYTES: usize = 4 * 1_024;
 #[cfg(windows)]
 const MAXIMUM_PROTECTED_STATE_BYTES: u64 = 16 * 1_024;
 
+#[cfg_attr(
+    not(any(windows, test)),
+    allow(
+        dead_code,
+        reason = "the portable runtime matches errors constructed by Windows and test repositories"
+    )
+)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum WindowsHelloStateError {
     NotFound,
@@ -36,6 +49,13 @@ pub(crate) enum WindowsHelloStateError {
     Failed,
 }
 
+#[cfg_attr(
+    not(any(windows, test)),
+    allow(
+        dead_code,
+        reason = "the portable runtime maps errors constructed by Windows and test providers"
+    )
+)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum WindowsHelloProviderError {
     InvalidRequest,
@@ -245,6 +265,7 @@ impl WindowsHelloLocalState {
         &self.protector
     }
 
+    #[cfg(any(windows, test))]
     pub(crate) fn encode(&self) -> Result<Zeroizing<Vec<u8>>, WindowsHelloStateError> {
         let mut encoder = Encoder::new(Vec::with_capacity(MAXIMUM_LOCAL_STATE_BYTES));
         encoder
@@ -265,6 +286,7 @@ impl WindowsHelloLocalState {
         Ok(bytes)
     }
 
+    #[cfg(any(windows, test))]
     pub(crate) fn decode(bytes: &[u8]) -> Result<Self, WindowsHelloStateError> {
         if bytes.is_empty() || bytes.len() > MAXIMUM_LOCAL_STATE_BYTES {
             return Err(WindowsHelloStateError::Invalid);
@@ -303,6 +325,7 @@ impl WindowsHelloLocalState {
     }
 }
 
+#[cfg(any(windows, test))]
 fn fixed_bytes<const N: usize>(
     decoder: &mut Decoder<'_>,
 ) -> Result<[u8; N], WindowsHelloStateError> {
@@ -313,6 +336,7 @@ fn fixed_bytes<const N: usize>(
         .map_err(|_| WindowsHelloStateError::Invalid)
 }
 
+#[cfg(any(windows, test))]
 fn bounded_bytes(
     decoder: &mut Decoder<'_>,
     minimum: usize,
@@ -524,6 +548,7 @@ impl WindowsHelloStateRepository for WindowsHelloStateStore {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(windows)]
     use std::fs;
 
     use super::*;
