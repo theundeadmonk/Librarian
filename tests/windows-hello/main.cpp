@@ -253,6 +253,10 @@ namespace
                 Error::InvalidArgument,
             "empty cancellation identifier was accepted");
         require(
+            librarian::windows_hello::Cancel(operation_id) ==
+                Error::PlatformFailure,
+            "inactive agent operation was treated as a registered cancellation");
+        require(
             librarian::windows_hello::Remove({}) ==
                 Error::InvalidArgument,
             "empty credential removal was accepted");

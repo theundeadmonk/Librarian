@@ -1390,7 +1390,7 @@ impl AgentRuntime {
                         &local_state,
                     )
                 } else {
-                    Ok(ExecutionOutcome::failed())
+                    Ok(ExecutionOutcome::retryable_failure())
                 };
             }
             Err(
@@ -4908,8 +4908,25 @@ mod tests {
             )
             .expect("post-publication failure");
         assert_eq!(outcome.error, Some(PublicErrorCode::OperationFailed));
+        assert_eq!(outcome.retry, RetryCategory::Backoff);
+        assert!(!should_cache(&outcome));
         assert_eq!(state.credential_id(), Some(vec![0xA0, 0]));
         assert!(provider.removed().is_empty());
+        drop(registration);
+
+        let retry_registration = test_registration(&runtime, 0xD4);
+        let retry = runtime
+            .enroll_windows_hello(
+                0x1234,
+                17,
+                runtime.unlock_epoch(),
+                &retry_registration,
+                Instant::now() + Duration::from_secs(10),
+            )
+            .expect("published enrollment reconciliation");
+        assert_eq!(retry.error, None);
+        assert_eq!(state.credential_id(), Some(vec![0xA0, 1]));
+        assert_eq!(provider.removed(), vec![vec![0xA0, 0]]);
     }
 
     #[test]

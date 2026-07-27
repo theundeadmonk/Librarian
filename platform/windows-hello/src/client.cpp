@@ -9,6 +9,9 @@
 #include <cstdint>
 #include <cstring>
 #include <exception>
+#include <map>
+#include <mutex>
+#include <optional>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -80,8 +83,6 @@ namespace librarian::windows_hello
         static_assert(
             WEBAUTHN_CTAP_ONE_HMAC_SECRET_LENGTH ==
             librarian::windows_hello::prf_bytes);
-        static_assert(sizeof(GUID) == operation_id_bytes);
-
         [[nodiscard]] bool valid_operation(
             OperationId const& operation_id) noexcept
         {
@@ -94,15 +95,14 @@ namespace librarian::windows_hello
                 });
         }
 
-        [[nodiscard]] GUID operation_guid(
-            OperationId const& operation_id) noexcept
+        std::mutex cancellation_mutex;
+        std::map<OperationId, GUID> cancellation_ids;
+
+        [[nodiscard]] bool same_guid(
+            GUID const& left,
+            GUID const& right) noexcept
         {
-            GUID result{};
-            std::memcpy(
-                &result,
-                operation_id.data(),
-                operation_id.size());
-            return result;
+            return std::memcmp(&left, &right, sizeof(GUID)) == 0;
         }
 
         class failure final : public std::exception
@@ -151,6 +151,86 @@ namespace librarian::windows_hello
                     is_cancellation(result)
                         ? Error::Cancelled
                         : Error::PlatformFailure);
+            }
+        }
+
+        class cancellation_registration final
+        {
+        public:
+            explicit cancellation_registration(
+                OperationId const& operation_id) :
+                operation_id_(operation_id)
+            {
+                require_hresult(
+                    WebAuthNGetCancellationId(&cancellation_id_));
+                std::lock_guard const lock(cancellation_mutex);
+                auto const [position, inserted] =
+                    cancellation_ids.emplace(
+                        operation_id_,
+                        cancellation_id_);
+                static_cast<void>(position);
+                require(inserted, Error::InvalidArgument);
+                registered_ = true;
+            }
+
+            ~cancellation_registration() noexcept
+            {
+                if (!registered_)
+                {
+                    return;
+                }
+                try
+                {
+                    std::lock_guard const lock(cancellation_mutex);
+                    auto const position =
+                        cancellation_ids.find(operation_id_);
+                    if (
+                        position != cancellation_ids.end() &&
+                        same_guid(
+                            position->second,
+                            cancellation_id_))
+                    {
+                        cancellation_ids.erase(position);
+                    }
+                }
+                catch (...)
+                {
+                }
+            }
+
+            cancellation_registration(
+                cancellation_registration const&) = delete;
+            cancellation_registration& operator=(
+                cancellation_registration const&) = delete;
+
+            [[nodiscard]] GUID* id() noexcept
+            {
+                return &cancellation_id_;
+            }
+
+        private:
+            OperationId operation_id_;
+            GUID cancellation_id_{};
+            bool registered_{false};
+        };
+
+        [[nodiscard]] std::optional<GUID> cancellation_id_for(
+            OperationId const& operation_id) noexcept
+        {
+            try
+            {
+                std::lock_guard const lock(cancellation_mutex);
+                auto const position =
+                    cancellation_ids.find(operation_id);
+                if (position == cancellation_ids.end())
+                {
+                    return std::nullopt;
+                }
+                return position->second;
+            }
+            catch (...)
+            {
+                return std::nullopt;
             }
         }
 
@@ -501,7 +581,7 @@ namespace librarian::windows_hello
                 .cbFirst = static_cast<DWORD>(salt.size()),
                 .pbFirst = salt.data(),
             };
-            GUID cancellation_id = operation_guid(operation_id);
+            cancellation_registration cancellation(operation_id);
             WEBAUTHN_AUTHENTICATOR_MAKE_CREDENTIAL_OPTIONS options{
                 .dwVersion =
                     WEBAUTHN_AUTHENTICATOR_MAKE_CREDENTIAL_OPTIONS_VERSION_8,
@@ -513,7 +593,7 @@ namespace librarian::windows_hello
                     WEBAUTHN_USER_VERIFICATION_REQUIREMENT_REQUIRED,
                 .dwAttestationConveyancePreference =
                     WEBAUTHN_ATTESTATION_CONVEYANCE_PREFERENCE_NONE,
-                .pCancellationId = &cancellation_id,
+                .pCancellationId = cancellation.id(),
                 .bEnablePrf = TRUE,
                 .pPRFGlobalEval = &requested_prf,
             };
@@ -619,7 +699,7 @@ namespace librarian::windows_hello
                 random_challenge() +
                 R"(","origin":"https://librarian.local","crossOrigin":false})";
             WEBAUTHN_CLIENT_DATA const data = client_data(json);
-            GUID cancellation_id = operation_guid(operation_id);
+            cancellation_registration cancellation(operation_id);
             WEBAUTHN_AUTHENTICATOR_GET_ASSERTION_OPTIONS options{
                 .dwVersion =
                     WEBAUTHN_AUTHENTICATOR_GET_ASSERTION_OPTIONS_VERSION_6,
@@ -629,7 +709,7 @@ namespace librarian::windows_hello
                     WEBAUTHN_AUTHENTICATOR_ATTACHMENT_PLATFORM,
                 .dwUserVerificationRequirement =
                     WEBAUTHN_USER_VERIFICATION_REQUIREMENT_REQUIRED,
-                .pCancellationId = &cancellation_id,
+                .pCancellationId = cancellation.id(),
                 .pHmacSecretSaltValues = &requested_values,
             };
 
@@ -742,9 +822,14 @@ namespace librarian::windows_hello
         {
             return Error::InvalidArgument;
         }
-        GUID const cancellation_id = operation_guid(operation_id);
+        std::optional<GUID> const cancellation_id =
+            cancellation_id_for(operation_id);
+        if (!cancellation_id.has_value())
+        {
+            return Error::PlatformFailure;
+        }
         HRESULT const result =
-            WebAuthNCancelCurrentOperation(&cancellation_id);
+            WebAuthNCancelCurrentOperation(&*cancellation_id);
         if (SUCCEEDED(result))
         {
             return Error::None;
