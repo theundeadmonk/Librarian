@@ -310,15 +310,21 @@ try
         "usage: Librarian.WindowsHelloTests --self-test");
     validation_tests();
     public_contract_tests();
-    bool const available =
+    auto const availability =
         librarian::windows_hello::IsAvailable();
+    require(
+        availability.error ==
+            librarian::windows_hello::Error::None,
+        "platform-authenticator capability query failed");
     std::cout
         << "[PASS] WebAuthn attestation and assertion validation\n"
         << "[PASS] wrong RP, credential, type, transport, UV, and PRF shape fail closed\n"
         << "[PASS] public invalid-argument paths require no prompt\n"
         << "[PASS] PRF output uses move-only zeroizing storage\n"
         << "[PASS] API v8 platform authenticator: "
-        << (available ? "available" : "unavailable (fail closed)")
+        << (availability.available
+            ? "available"
+            : "unavailable (fail closed)")
         << '\n'
         << "5 passed; 0 failed\n";
     return 0;
