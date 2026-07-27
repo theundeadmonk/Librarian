@@ -267,6 +267,19 @@ Invoke-CheckedProcess `
     -Arguments @("--self-test") `
     -WorkingDirectory $repoRoot
 
+$helloProbe = Join-Path $repoRoot (
+    "artifacts\bin\$Platform\$Configuration\Librarian.WindowsHelloProbe.exe"
+)
+if (-not (Test-Path $helloProbe)) {
+    throw "The Windows Hello PRF probe was not built at '$helloProbe'."
+}
+
+Invoke-CheckedProcess `
+    -Label "Windows Hello PRF security self-test" `
+    -FilePath $helloProbe `
+    -Arguments @("--self-test") `
+    -WorkingDirectory $repoRoot
+
 $windowsShellTests = Join-Path $repoRoot (
     "artifacts\bin\$Platform\$Configuration\Librarian.WindowsShellTests.exe"
 )
