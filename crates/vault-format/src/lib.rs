@@ -30,6 +30,7 @@ pub const ARGON2_MEMORY_KIB: u32 = 65_536;
 pub const ARGON2_TIME_COST: u32 = 3;
 pub const ARGON2_PARALLELISM: u32 = 4;
 pub const RECOVERY_WRAPPER_VERSION: u32 = 1;
+pub const WINDOWS_HELLO_PROTECTOR_VERSION: u32 = 1;
 pub const MANIFEST_ENVELOPE_VERSION: u32 = 1;
 pub const MANIFEST_SCHEMA: u32 = 1;
 pub const VAULT_SCHEMA: u32 = 1;
@@ -39,8 +40,11 @@ pub const MAX_MANIFEST_ENVELOPE_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_RECORDS: usize = 100_000;
 pub const MAX_RECORD_ENVELOPE_BYTES: usize = 1024 * 1024;
 pub const MAX_DATABASE_BYTES: u64 = 512 * 1024 * 1024;
+pub const MAX_WINDOWS_HELLO_CREDENTIAL_ID_BYTES: usize = 1_024;
+pub const MAX_WINDOWS_HELLO_PROTECTOR_BYTES: usize = 2 * 1_024;
 
 const VAULT_MAGIC: &str = "LBR-VLT";
+const WINDOWS_HELLO_MAGIC: &str = "LBR-HLO";
 const MASTER_WRAPPER_TYPE: u32 = 1;
 const RECOVERY_WRAPPER_TYPE: u32 = 2;
 const TAG_BYTES: usize = 16;
@@ -137,6 +141,164 @@ impl RecoveryWrapper {
     #[must_use]
     pub const fn wrapped_vrk(&self) -> &[u8; 48] {
         &self.wrapped_vrk
+    }
+}
+
+/// Canonical device-local metadata for a Windows Hello protected VRK.
+///
+/// This record is not part of the portable vault or backup. It contains only
+/// public binding metadata and an authenticated ciphertext; the PRF output and
+/// plaintext VRK are never serialized here.
+#[derive(Clone, Eq, PartialEq)]
+pub struct WindowsHelloProtector {
+    vault_id: [u8; 16],
+    key_epoch: u32,
+    installation_id: [u8; 32],
+    credential_id: Vec<u8>,
+    prf_salt: [u8; 32],
+    nonce: [u8; 24],
+    wrapped_vrk: [u8; 48],
+}
+
+impl WindowsHelloProtector {
+    /// Constructs a bounded version-1 protector.
+    ///
+    /// # Errors
+    ///
+    /// Rejects an empty installation binding, an empty or oversized
+    /// credential identifier, or a zero key epoch.
+    pub fn new(
+        vault_id: [u8; 16],
+        key_epoch: u32,
+        installation_id: [u8; 32],
+        credential_id: Vec<u8>,
+        prf_salt: [u8; 32],
+        nonce: [u8; 24],
+        wrapped_vrk: [u8; 48],
+    ) -> Result<Self, FormatError> {
+        if key_epoch == 0
+            || installation_id.iter().all(|byte| *byte == 0)
+            || credential_id.is_empty()
+        {
+            return Err(FormatError::InvariantViolation);
+        }
+        if credential_id.len() > MAX_WINDOWS_HELLO_CREDENTIAL_ID_BYTES {
+            return Err(FormatError::TooLarge);
+        }
+        Ok(Self {
+            vault_id,
+            key_epoch,
+            installation_id,
+            credential_id,
+            prf_salt,
+            nonce,
+            wrapped_vrk,
+        })
+    }
+
+    #[must_use]
+    pub const fn vault_id(&self) -> &[u8; 16] {
+        &self.vault_id
+    }
+
+    #[must_use]
+    pub const fn key_epoch(&self) -> u32 {
+        self.key_epoch
+    }
+
+    #[must_use]
+    pub const fn installation_id(&self) -> &[u8; 32] {
+        &self.installation_id
+    }
+
+    #[must_use]
+    pub fn credential_id(&self) -> &[u8] {
+        &self.credential_id
+    }
+
+    #[must_use]
+    pub const fn prf_salt(&self) -> &[u8; 32] {
+        &self.prf_salt
+    }
+
+    #[must_use]
+    pub const fn nonce(&self) -> &[u8; 24] {
+        &self.nonce
+    }
+
+    #[must_use]
+    pub const fn wrapped_vrk(&self) -> &[u8; 48] {
+        &self.wrapped_vrk
+    }
+
+    /// Encodes the device-local record canonically.
+    ///
+    /// # Errors
+    ///
+    /// Returns a size or invariant error for an invalid record.
+    pub fn encode(&self) -> Result<Vec<u8>, FormatError> {
+        Self::new(
+            self.vault_id,
+            self.key_epoch,
+            self.installation_id,
+            self.credential_id.clone(),
+            self.prf_salt,
+            self.nonce,
+            self.wrapped_vrk,
+        )?;
+        let mut encoder = Encoder::new(Vec::new());
+        encode_windows_hello_protector_into(&mut encoder, self);
+        let bytes = encoder.into_writer();
+        if bytes.len() > MAX_WINDOWS_HELLO_PROTECTOR_BYTES {
+            return Err(FormatError::TooLarge);
+        }
+        Ok(bytes)
+    }
+
+    /// Decodes and byte-for-byte canonicalizes device-local protector bytes.
+    ///
+    /// # Errors
+    ///
+    /// Rejects oversized, malformed, unsupported, noncanonical, or internally
+    /// inconsistent records.
+    pub fn decode(bytes: &[u8]) -> Result<Self, FormatError> {
+        if bytes.len() > MAX_WINDOWS_HELLO_PROTECTOR_BYTES {
+            return Err(FormatError::TooLarge);
+        }
+        let mut decoder = Decoder::new(bytes);
+        expect_array(&mut decoder, 15)?;
+        if decode_str(&mut decoder)? != WINDOWS_HELLO_MAGIC {
+            return Err(FormatError::Malformed);
+        }
+        expect_u32(&mut decoder, WINDOWS_HELLO_PROTECTOR_VERSION)?;
+        expect_u32(&mut decoder, CONTAINER_VERSION)?;
+        expect_u32(&mut decoder, MINIMUM_READER_VERSION)?;
+        expect_u32(&mut decoder, KEY_SCHEDULE)?;
+        expect_u32(&mut decoder, AEAD_SUITE)?;
+        expect_u32(&mut decoder, ENCODING)?;
+        expect_u32(&mut decoder, DIGEST_SUITE)?;
+        let vault_id = decode_fixed_bytes(&mut decoder)?;
+        let key_epoch = decode_u32(&mut decoder)?;
+        let installation_id = decode_fixed_bytes(&mut decoder)?;
+        let credential_id =
+            decode_bounded_bytes(&mut decoder, MAX_WINDOWS_HELLO_CREDENTIAL_ID_BYTES)?;
+        let prf_salt = decode_fixed_bytes(&mut decoder)?;
+        let nonce = decode_fixed_bytes(&mut decoder)?;
+        let wrapped_vrk = decode_fixed_bytes(&mut decoder)?;
+        require_end(&decoder, bytes)?;
+        let protector = Self::new(
+            vault_id,
+            key_epoch,
+            installation_id,
+            credential_id,
+            prf_salt,
+            nonce,
+            wrapped_vrk,
+        )?;
+        if protector.encode()?.as_slice() != bytes {
+            return Err(FormatError::NonCanonical);
+        }
+        Ok(protector)
     }
 }
 
@@ -556,6 +718,16 @@ pub fn encode_recovery_wrapper_aad(vault_id: &[u8; 16], key_epoch: u32) -> Vec<u
     encoder.into_writer()
 }
 
+/// Canonical associated data for the device-local Windows Hello VRK wrapper.
+#[must_use]
+pub fn encode_windows_hello_wrapper_aad(protector: &WindowsHelloProtector) -> Vec<u8> {
+    let mut encoder = Encoder::new(Vec::new());
+    encode_array(&mut encoder, 14);
+    encode_windows_hello_binding_into(&mut encoder, protector);
+    encode_bytes(&mut encoder, protector.nonce());
+    encoder.into_writer()
+}
+
 /// Canonical associated data binding the manifest to the complete clear header.
 #[must_use]
 pub fn encode_manifest_aad(header: &VaultHeader, nonce: &[u8; 24]) -> Vec<u8> {
@@ -613,6 +785,35 @@ fn encode_header_into(encoder: &mut Encoder<Vec<u8>>, header: &VaultHeader) {
     encode_u32(encoder, RECOVERY_WRAPPER_VERSION);
     encode_bytes(encoder, &header.recovery_wrapper.nonce);
     encode_bytes(encoder, &header.recovery_wrapper.wrapped_vrk);
+}
+
+fn encode_windows_hello_binding_into(
+    encoder: &mut Encoder<Vec<u8>>,
+    protector: &WindowsHelloProtector,
+) {
+    encode_str(encoder, WINDOWS_HELLO_MAGIC);
+    encode_u32(encoder, WINDOWS_HELLO_PROTECTOR_VERSION);
+    encode_u32(encoder, CONTAINER_VERSION);
+    encode_u32(encoder, MINIMUM_READER_VERSION);
+    encode_u32(encoder, KEY_SCHEDULE);
+    encode_u32(encoder, AEAD_SUITE);
+    encode_u32(encoder, ENCODING);
+    encode_u32(encoder, DIGEST_SUITE);
+    encode_bytes(encoder, protector.vault_id());
+    encode_u32(encoder, protector.key_epoch());
+    encode_bytes(encoder, protector.installation_id());
+    encode_bytes(encoder, protector.credential_id());
+    encode_bytes(encoder, protector.prf_salt());
+}
+
+fn encode_windows_hello_protector_into(
+    encoder: &mut Encoder<Vec<u8>>,
+    protector: &WindowsHelloProtector,
+) {
+    encode_array(encoder, 15);
+    encode_windows_hello_binding_into(encoder, protector);
+    encode_bytes(encoder, protector.nonce());
+    encode_bytes(encoder, protector.wrapped_vrk());
 }
 
 fn decode_header_from(decoder: &mut Decoder<'_>) -> Result<VaultHeader, FormatError> {
@@ -752,8 +953,9 @@ fn require_end(decoder: &Decoder<'_>, original: &[u8]) -> Result<(), FormatError
 #[cfg(test)]
 mod tests {
     use super::{
-        FormatError, FormatReadiness, Manifest, ManifestEntry, ManifestEnvelope, MasterWrapper,
-        RecoveryWrapper, VaultHeader, readiness,
+        FormatError, FormatReadiness, MAX_WINDOWS_HELLO_CREDENTIAL_ID_BYTES, Manifest,
+        ManifestEntry, ManifestEnvelope, MasterWrapper, RecoveryWrapper, VaultHeader,
+        WindowsHelloProtector, encode_windows_hello_wrapper_aad, readiness,
     };
 
     fn example_header() -> VaultHeader {
@@ -843,5 +1045,95 @@ mod tests {
             committed.next_generation(created_at_ms, Vec::new()),
             Err(FormatError::InvariantViolation)
         ));
+    }
+
+    fn example_windows_hello_protector() -> WindowsHelloProtector {
+        WindowsHelloProtector::new(
+            [0x11; 16],
+            1,
+            [0x22; 32],
+            vec![0x33; 64],
+            [0x44; 32],
+            [0x55; 24],
+            [0x66; 48],
+        )
+        .expect("example protector")
+    }
+
+    #[test]
+    fn windows_hello_protector_round_trips_canonically() {
+        let protector = example_windows_hello_protector();
+        let encoded = protector.encode().expect("protector encodes");
+        let decoded = WindowsHelloProtector::decode(&encoded).expect("protector decodes");
+        assert!(decoded == protector);
+        assert_eq!(decoded.encode().expect("protector re-encodes"), encoded);
+        assert_eq!(
+            encode_windows_hello_wrapper_aad(&decoded),
+            encode_windows_hello_wrapper_aad(&protector)
+        );
+    }
+
+    #[test]
+    fn windows_hello_protector_rejects_unbound_or_oversized_metadata() {
+        assert!(matches!(
+            WindowsHelloProtector::new(
+                [0x11; 16],
+                1,
+                [0; 32],
+                vec![0x33],
+                [0x44; 32],
+                [0x55; 24],
+                [0x66; 48],
+            ),
+            Err(FormatError::InvariantViolation)
+        ));
+        assert!(matches!(
+            WindowsHelloProtector::new(
+                [0x11; 16],
+                1,
+                [0x22; 32],
+                Vec::new(),
+                [0x44; 32],
+                [0x55; 24],
+                [0x66; 48],
+            ),
+            Err(FormatError::InvariantViolation)
+        ));
+        assert!(matches!(
+            WindowsHelloProtector::new(
+                [0x11; 16],
+                1,
+                [0x22; 32],
+                vec![0x33; MAX_WINDOWS_HELLO_CREDENTIAL_ID_BYTES + 1],
+                [0x44; 32],
+                [0x55; 24],
+                [0x66; 48],
+            ),
+            Err(FormatError::TooLarge)
+        ));
+    }
+
+    #[test]
+    fn windows_hello_protector_rejects_truncation_and_binding_changes() {
+        let protector = example_windows_hello_protector();
+        let encoded = protector.encode().expect("protector encodes");
+        for length in 0..encoded.len() {
+            assert!(WindowsHelloProtector::decode(&encoded[..length]).is_err());
+        }
+
+        let different_installation = WindowsHelloProtector::new(
+            *protector.vault_id(),
+            protector.key_epoch(),
+            [0x23; 32],
+            protector.credential_id().to_vec(),
+            *protector.prf_salt(),
+            *protector.nonce(),
+            *protector.wrapped_vrk(),
+        )
+        .expect("second protector");
+        assert_ne!(
+            encode_windows_hello_wrapper_aad(&protector),
+            encode_windows_hello_wrapper_aad(&different_installation)
+        );
     }
 }
