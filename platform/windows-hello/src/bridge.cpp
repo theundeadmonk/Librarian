@@ -80,7 +80,12 @@ std::uint32_t librarian_windows_hello_is_available(
         return librarian_windows_hello_invalid_argument;
     }
     *available = 0;
-    if (librarian::windows_hello::IsAvailable())
+    auto const result = librarian::windows_hello::IsAvailable();
+    if (result.error != Error::None)
+    {
+        return status(result.error);
+    }
+    if (result.available)
     {
         *available = 1;
     }

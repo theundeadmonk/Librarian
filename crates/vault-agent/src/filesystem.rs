@@ -22,6 +22,10 @@ const FILE_SHARE_READ: u32 = 0x0000_0001;
 const FILE_SHARE_WRITE: u32 = 0x0000_0002;
 #[cfg(windows)]
 const FILE_SHARE_DELETE: u32 = 0x0000_0004;
+#[cfg(windows)]
+const DELETE_ACCESS: u32 = 0x0001_0000;
+#[cfg(windows)]
+const GENERIC_READ_ACCESS: u32 = 0x8000_0000;
 
 #[cfg(windows)]
 pub(crate) fn sync_parent_directory(path: &Path) -> io::Result<()> {
@@ -154,6 +158,28 @@ pub(crate) fn open_regular_file_guard_with_ancestor_guards(
         share_writes,
         share_deletes,
     )?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() || is_reparse_point(&metadata) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "non-regular or redirected file rejected",
+        ));
+    }
+    Ok(file)
+}
+
+#[cfg(windows)]
+pub(crate) fn open_regular_file_guard_for_delete_with_ancestor_guards(
+    _ancestor_guards: &AncestorGuards,
+    path: &Path,
+) -> io::Result<File> {
+    use std::os::windows::fs::OpenOptionsExt;
+
+    let file = OpenOptions::new()
+        .access_mode(GENERIC_READ_ACCESS | DELETE_ACCESS)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_DELETE)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)?;
     let metadata = file.metadata()?;
     if !metadata.is_file() || is_reparse_point(&metadata) {
         return Err(io::Error::new(

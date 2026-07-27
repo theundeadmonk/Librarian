@@ -18,6 +18,7 @@ use crate::filesystem::{
     acquire_ancestor_guards, create_staging_reservation,
     guarded_file_matches_path_with_ancestor_guards, guarded_file_size, guarded_files_match,
     hard_link_with_ancestor_guards, open_optional_regular_file_guard_with_ancestor_guards,
+    open_regular_file_guard_for_delete_with_ancestor_guards,
     open_regular_file_guard_with_ancestor_guards, remove_file_with_ancestor_guards,
     sync_parent_directory_with_ancestor_guards,
 };
@@ -524,17 +525,25 @@ impl WindowsHelloStateStore {
     pub(crate) fn remove(&self) -> Result<(), WindowsHelloStateError> {
         let ancestors =
             acquire_ancestor_guards(&self.path).map_err(|_| WindowsHelloStateError::Failed)?;
-        let existing = open_optional_regular_file_guard_with_ancestor_guards(
-            &ancestors, &self.path, false, true,
-        )
-        .map_err(|_| WindowsHelloStateError::Failed)?
-        .ok_or(WindowsHelloStateError::NotFound)?;
+        let existing =
+            match open_regular_file_guard_for_delete_with_ancestor_guards(&ancestors, &self.path) {
+                Ok(existing) => existing,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    return Err(WindowsHelloStateError::NotFound);
+                }
+                Err(_) => return Err(WindowsHelloStateError::Failed),
+            };
         librarian_windows_hello_agent::verify_user_file_restriction(&self.path)
             .map_err(|_| WindowsHelloStateError::Failed)?;
         guarded_file_matches_path_with_ancestor_guards(&existing, &self.path, &ancestors)
             .map_err(|_| WindowsHelloStateError::Failed)?;
-        remove_file_with_ancestor_guards(&ancestors, &self.path)
+        librarian_windows_hello_agent::delete_user_file_by_handle(&existing)
             .map_err(|_| WindowsHelloStateError::Failed)?;
+        drop(existing);
+        match std::fs::symlink_metadata(&self.path) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Ok(_) | Err(_) => return Err(WindowsHelloStateError::Failed),
+        }
         sync_parent_directory_with_ancestor_guards(&self.path, &ancestors)
             .map_err(|_| WindowsHelloStateError::Failed)
     }

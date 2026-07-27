@@ -82,9 +82,15 @@ namespace librarian::windows_hello
         std::optional<PrfOutput> output;
     };
 
+    struct AvailabilityResult final
+    {
+        Error error{Error::PlatformFailure};
+        bool available{false};
+    };
+
     // This is a capability check only. Enrollment still validates the API
     // version and the credential's returned PRF capability before success.
-    [[nodiscard]] bool IsAvailable() noexcept;
+    [[nodiscard]] AvailabilityResult IsAvailable() noexcept;
 
     // Displays a Windows-owned user-verification prompt and creates one
     // platform credential for Librarian. On every failure after credential

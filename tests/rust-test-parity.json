@@ -19,6 +19,11 @@
     },
     {
       "platform": "windows",
+      "test": "librarian-windows-hello-agent::lib:librarian_windows_hello_agent::windows::tests::handle_deletion_never_targets_a_replacement_path::test:active",
+      "rationale": "Exercises Windows handle-based local-state deletion and proves a verified file can be removed without deleting a pathname replacement."
+    },
+    {
+      "platform": "windows",
       "test": "librarian-windows-hello-agent::lib:librarian_windows_hello_agent::windows::tests::local_state_acl_is_protected_and_exact::test:active",
       "rationale": "Validates Windows security descriptors for exact current-user ownership and a protected current-user-only DACL."
     },

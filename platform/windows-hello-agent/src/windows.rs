@@ -1,6 +1,11 @@
 use std::{
-    ffi::c_void, mem::size_of, num::NonZeroUsize, os::windows::ffi::OsStrExt, path::Path, ptr,
-    slice,
+    ffi::c_void,
+    fs::File,
+    mem::size_of,
+    num::NonZeroUsize,
+    os::windows::{ffi::OsStrExt, io::AsRawHandle},
+    path::Path,
+    ptr, slice,
 };
 
 use librarian_vault_core::WindowsHelloPrfOutput;
@@ -25,7 +30,10 @@ use windows_sys::{
             PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, SE_DACL_PROTECTED,
             TOKEN_QUERY, TOKEN_USER, TokenUser,
         },
-        Storage::FileSystem::{FILE_ALL_ACCESS, ReplaceFileW},
+        Storage::FileSystem::{
+            FILE_ALL_ACCESS, FILE_DISPOSITION_INFO, FileDispositionInfo, ReplaceFileW,
+            SetFileInformationByHandle,
+        },
         System::{
             SystemServices::ACCESS_ALLOWED_ACE_TYPE,
             Threading::{GetCurrentProcess, OpenProcessToken},
@@ -374,6 +382,32 @@ pub fn remove(credential_id: &[u8]) -> Result<(), BridgeError> {
         )
     };
     map_status(status)
+}
+
+/// Marks exactly the file represented by `file` for deletion.
+///
+/// # Errors
+///
+/// Returns a detail-free platform failure when the handle lacks delete access
+/// or Windows cannot apply the disposition.
+pub fn delete_user_file_by_handle(file: &File) -> Result<(), ProtectedStateError> {
+    let disposition = FILE_DISPOSITION_INFO { DeleteFile: true };
+    let size = u32::try_from(size_of::<FILE_DISPOSITION_INFO>())
+        .map_err(|_| ProtectedStateError::PlatformFailure)?;
+    // SAFETY: `file` remains live for the call and must have been opened with
+    // DELETE access. The fixed disposition structure is initialized and live.
+    if unsafe {
+        SetFileInformationByHandle(
+            file.as_raw_handle(),
+            FileDispositionInfo,
+            (&raw const disposition).cast(),
+            size,
+        )
+    } == 0
+    {
+        return Err(ProtectedStateError::PlatformFailure);
+    }
+    Ok(())
 }
 
 /// Protects one bounded local-state record for the current Windows user.
@@ -920,18 +954,25 @@ fn map_status(status: u32) -> Result<(), BridgeError> {
 #[cfg(test)]
 mod tests {
     use std::{
-        fs,
+        fs::{self, OpenOptions},
+        os::windows::fs::OpenOptionsExt,
         sync::atomic::{AtomicU64, Ordering},
     };
 
     use zeroize::Zeroizing;
 
     use super::{
-        BridgeError, OperationId, ParentWindow, ProtectedStateError, is_available,
-        protect_user_state, restrict_user_file, unprotect_user_state, verify_user_file_restriction,
+        BridgeError, OperationId, ParentWindow, ProtectedStateError, delete_user_file_by_handle,
+        is_available, protect_user_state, restrict_user_file, unprotect_user_state,
+        verify_user_file_restriction,
     };
 
     static TEST_FILE_COUNTER: AtomicU64 = AtomicU64::new(1);
+    const DELETE_ACCESS: u32 = 0x0001_0000;
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    const FILE_SHARE_DELETE: u32 = 0x0000_0004;
+    const FILE_SHARE_READ: u32 = 0x0000_0001;
+    const GENERIC_READ_ACCESS: u32 = 0x8000_0000;
 
     #[test]
     fn operation_identifiers_and_parent_windows_reject_zero() {
@@ -990,5 +1031,37 @@ mod tests {
         restrict_user_file(&path).expect("restrict test file");
         verify_user_file_restriction(&path).expect("verify restricted test file");
         fs::remove_file(path).expect("remove test file");
+    }
+
+    #[test]
+    fn handle_deletion_never_targets_a_replacement_path() {
+        let sequence = TEST_FILE_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!(
+            "librarian-hello-handle-delete-{}-{sequence}",
+            std::process::id()
+        ));
+        fs::create_dir(&root).expect("test directory");
+        let path = root.join("windows-hello.dat");
+        let moved = root.join("verified-original.dat");
+        fs::write(&path, b"verified original").expect("original file");
+        let original = OpenOptions::new()
+            .access_mode(GENERIC_READ_ACCESS | DELETE_ACCESS)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_DELETE)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(&path)
+            .expect("delete-capable original handle");
+
+        fs::rename(&path, &moved).expect("move original pathname");
+        fs::write(&path, b"replacement").expect("replacement file");
+        delete_user_file_by_handle(&original).expect("handle deletion");
+        drop(original);
+
+        assert!(!moved.exists());
+        assert_eq!(
+            fs::read(&path).expect("replacement survives"),
+            b"replacement"
+        );
+        fs::remove_file(path).expect("replacement cleanup");
+        fs::remove_dir(root).expect("test directory cleanup");
     }
 }

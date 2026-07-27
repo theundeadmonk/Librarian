@@ -663,18 +663,29 @@ namespace librarian::windows_hello
         }
     }
 
-    bool IsAvailable() noexcept
+    AvailabilityResult IsAvailable() noexcept
     {
         if (WebAuthNGetApiVersionNumber() < WEBAUTHN_API_VERSION_8)
         {
-            return false;
+            return {
+                .error = Error::None,
+                .available = false,
+            };
         }
         BOOL available = FALSE;
-        return
-            SUCCEEDED(
-                WebAuthNIsUserVerifyingPlatformAuthenticatorAvailable(
-                    &available)) &&
-            available != FALSE;
+        if (FAILED(
+            WebAuthNIsUserVerifyingPlatformAuthenticatorAvailable(
+                &available)))
+        {
+            return {
+                .error = Error::PlatformFailure,
+                .available = false,
+            };
+        }
+        return {
+            .error = Error::None,
+            .available = available != FALSE,
+        };
     }
 
     EnrollmentResult Enroll(
