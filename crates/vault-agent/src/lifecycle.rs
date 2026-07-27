@@ -6,7 +6,8 @@ use std::{
 };
 
 use librarian_vault_core::{
-    CancellationFlag, MasterPassword, RecoveryKey, UnlockedVault, create_vault, unlock_vault,
+    CancellationFlag, MasterPassword, RecoveryKey, UnlockedVault, WindowsHelloInstallationKey,
+    WindowsHelloPrfOutput, create_vault, unlock_vault, unlock_vault_with_windows_hello,
 };
 
 use crate::{
@@ -159,6 +160,27 @@ impl VaultAgent {
         self.session.as_ref().map(|session| *session.vault_id())
     }
 
+    /// Creates an opaque, installation-bound Windows Hello protector from the
+    /// currently unlocked vault root key.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same detail-free failure used by unlock when the agent is
+    /// locked or protector construction fails.
+    pub fn create_windows_hello_protector(
+        &self,
+        installation_key: &WindowsHelloInstallationKey,
+        credential_id: &[u8],
+        prf_salt: [u8; 32],
+        prf_output: WindowsHelloPrfOutput,
+    ) -> Result<Vec<u8>, UnlockError> {
+        self.session
+            .as_ref()
+            .ok_or(UnlockError::Failed)?
+            .create_windows_hello_protector(installation_key, credential_id, prf_salt, prf_output)
+            .map_err(|_| UnlockError::Failed)
+    }
+
     #[cfg(test)]
     pub(crate) fn bound_path(&self) -> Option<&Path> {
         self.path.as_deref()
@@ -185,14 +207,84 @@ impl VaultAgent {
         cancellation: &CancellationFlag,
         before_publish: impl FnOnce(),
     ) -> Result<(), UnlockError> {
+        self.unlock_with_core(
+            cancellation,
+            before_publish,
+            |header, manifest, records, cancellation| {
+                unlock_vault(password, header, manifest, records, cancellation)
+            },
+        )
+    }
+
+    /// Unlocks through a caller-verified Windows Hello PRF result and a
+    /// canonical device-local protector.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same uniform public failures as master-password unlock.
+    pub fn unlock_with_windows_hello(
+        &mut self,
+        prf_output: WindowsHelloPrfOutput,
+        installation_key: &WindowsHelloInstallationKey,
+        credential_id: &[u8],
+        protector: &[u8],
+        cancellation: &CancellationFlag,
+    ) -> Result<(), UnlockError> {
+        self.unlock_with_windows_hello_before_publish(
+            prf_output,
+            installation_key,
+            credential_id,
+            protector,
+            cancellation,
+            || {},
+        )
+    }
+
+    pub(crate) fn unlock_with_windows_hello_before_publish(
+        &mut self,
+        prf_output: WindowsHelloPrfOutput,
+        installation_key: &WindowsHelloInstallationKey,
+        credential_id: &[u8],
+        protector: &[u8],
+        cancellation: &CancellationFlag,
+        before_publish: impl FnOnce(),
+    ) -> Result<(), UnlockError> {
+        self.unlock_with_core(
+            cancellation,
+            before_publish,
+            |header, manifest, records, cancellation| {
+                unlock_vault_with_windows_hello(
+                    prf_output,
+                    installation_key,
+                    credential_id,
+                    protector,
+                    header,
+                    manifest,
+                    records,
+                    cancellation,
+                )
+            },
+        )
+    }
+
+    fn unlock_with_core(
+        &mut self,
+        cancellation: &CancellationFlag,
+        before_publish: impl FnOnce(),
+        unlock: impl FnOnce(
+            &[u8],
+            &[u8],
+            &[librarian_vault_core::EncryptedRecord],
+            &CancellationFlag,
+        ) -> Result<UnlockedVault, librarian_vault_core::UnlockError>,
+    ) -> Result<(), UnlockError> {
         self.lock();
         if cancellation.is_cancelled() {
             return Err(UnlockError::Cancelled);
         }
         let path = self.path.clone().ok_or(UnlockError::Failed)?;
         let mut snapshot = read_guarded_vault(&path).map_err(|_| UnlockError::Failed)?;
-        let session = match unlock_vault(
-            password,
+        let session = match unlock(
             &snapshot.header,
             &snapshot.manifest,
             &snapshot.records,

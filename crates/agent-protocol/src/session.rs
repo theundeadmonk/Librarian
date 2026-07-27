@@ -430,9 +430,10 @@ impl Connection {
 
 fn effective_timeout(operation: OperationCode, requested: u32) -> u32 {
     let maximum = match operation {
-        OperationCode::CreateVault | OperationCode::UnlockMasterPassword | OperationCode::Lock => {
-            UNLOCK_TIMEOUT_MS
-        }
+        OperationCode::CreateVault
+        | OperationCode::UnlockMasterPassword
+        | OperationCode::UnlockWindowsHello
+        | OperationCode::Lock => UNLOCK_TIMEOUT_MS,
         OperationCode::MakePasskey
         | OperationCode::GetPasskeyAssertion
         | OperationCode::DeletePasskey => PASSKEY_TIMEOUT_MS,

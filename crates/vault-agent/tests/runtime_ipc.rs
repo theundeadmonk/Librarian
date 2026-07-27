@@ -15,7 +15,9 @@ use librarian_agent_protocol::{
     ConnectionLimits, FrameHeader, MessageKind, OperationCode, OperationRequest, PublicErrorCode,
     RequestEnvelope, ResponseEnvelope,
 };
-use librarian_vault_agent::{AgentRuntime, DispatchError, RuntimeStartError};
+use librarian_vault_agent::{
+    AgentRuntime, DispatchError, RuntimeStartError, WindowsHelloInstallationKey,
+};
 use minicbor::Decoder;
 use zeroize::Zeroizing;
 
@@ -202,6 +204,14 @@ fn decode_account_id(body: &[u8]) -> [u8; 16] {
         .expect("16-byte record ID")
 }
 
+fn decode_windows_hello_protector(body: &[u8]) -> Vec<u8> {
+    let mut decoder = Decoder::new(body);
+    assert_eq!(decoder.array().expect("array"), Some(1));
+    let protector = decoder.bytes().expect("Windows Hello protector").to_vec();
+    assert_eq!(decoder.position(), body.len());
+    protector
+}
+
 #[test]
 fn desktop_protocol_crud_is_typed_paged_idempotent_and_lock_bound() {
     let directory = TestDirectory::new();
@@ -298,6 +308,85 @@ fn desktop_protocol_crud_is_typed_paged_idempotent_and_lock_bound() {
         !format!("{retrieved:?}").contains("RUNTIME-PASSWORD-CANARY-CA1C88"),
         "response debug output must redact plaintext"
     );
+}
+
+#[test]
+fn windows_hello_unlock_survives_agent_restart_and_keeps_password_fallback() {
+    let directory = TestDirectory::new();
+    let path = directory.vault_path();
+    let installation_key = [0x61; 32];
+    let credential_id = vec![0x62; 64];
+    let prf_salt = [0x63; 32];
+    let prf_output = [0x64; 32];
+    let runtime = AgentRuntime::start_with_windows_hello_key(
+        &path,
+        WindowsHelloInstallationKey::new(installation_key),
+    )
+    .expect("runtime starts with protected installation key");
+    let client = connection(ClientRole::Desktop, &runtime, 0x65);
+    dispatch_success(
+        &runtime,
+        &client,
+        1,
+        &create("Windows Hello fallback password"),
+        Some([0x66; 16]),
+    );
+    let enrollment = dispatch_success(
+        &runtime,
+        &client,
+        2,
+        &OperationRequest::EnrollWindowsHello {
+            credential_id: credential_id.clone(),
+            prf_salt,
+            prf_output: Zeroizing::new(prf_output),
+        },
+        Some([0x67; 16]),
+    );
+    let protector = decode_windows_hello_protector(enrollment.body());
+    dispatch_success(&runtime, &client, 3, &OperationRequest::Lock, None);
+    assert_eq!(runtime.state(), AgentState::Locked);
+    drop(runtime);
+
+    let restarted = AgentRuntime::start_with_windows_hello_key(
+        &path,
+        WindowsHelloInstallationKey::new(installation_key),
+    )
+    .expect("runtime restarts with the same protected installation key");
+    let restarted_client = connection(ClientRole::Desktop, &restarted, 0x68);
+    dispatch_success(
+        &restarted,
+        &restarted_client,
+        1,
+        &OperationRequest::UnlockWindowsHello {
+            credential_id,
+            protector,
+            prf_output: Zeroizing::new(prf_output),
+        },
+        None,
+    );
+    assert_eq!(restarted.state(), AgentState::Unlocked);
+    dispatch_success(
+        &restarted,
+        &restarted_client,
+        2,
+        &OperationRequest::RemoveWindowsHello,
+        Some([0x69; 16]),
+    );
+    dispatch_success(
+        &restarted,
+        &restarted_client,
+        3,
+        &OperationRequest::Lock,
+        None,
+    );
+    dispatch_success(
+        &restarted,
+        &restarted_client,
+        4,
+        &unlock("Windows Hello fallback password"),
+        None,
+    );
+    assert_eq!(restarted.state(), AgentState::Unlocked);
 }
 
 #[test]

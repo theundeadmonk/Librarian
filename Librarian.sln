@@ -8,7 +8,9 @@ Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "Librarian.WindowsPasskey", 
 EndProject
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "Librarian.WindowsIpcProbe", "platform\windows-ipc-probe\Librarian.WindowsIpcProbe.vcxproj", "{7BD3B71A-7B53-4B3D-912F-6BBA1F9CD84E}"
 EndProject
-Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "Librarian.WindowsHelloProbe", "platform\windows-hello-probe\Librarian.WindowsHelloProbe.vcxproj", "{90817646-D6D0-4A76-8F46-49C4FE74B00C}"
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "Librarian.WindowsHello", "platform\windows-hello\Librarian.WindowsHello.vcxproj", "{90817646-D6D0-4A76-8F46-49C4FE74B00C}"
+EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "Librarian.WindowsHelloTests", "tests\windows-hello\Librarian.WindowsHelloTests.vcxproj", "{4C3DF205-B3FC-42D1-892E-158AE69FB8AB}"
 EndProject
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "Librarian.WindowsShellTests", "tests\windows-shell\Librarian.WindowsShellTests.vcxproj", "{7F950E11-12A6-4E9A-A0A9-211011A5B419}"
 EndProject
@@ -36,6 +38,10 @@ Global
 		{90817646-D6D0-4A76-8F46-49C4FE74B00C}.Debug|x64.Build.0 = Debug|x64
 		{90817646-D6D0-4A76-8F46-49C4FE74B00C}.Release|x64.ActiveCfg = Release|x64
 		{90817646-D6D0-4A76-8F46-49C4FE74B00C}.Release|x64.Build.0 = Release|x64
+		{4C3DF205-B3FC-42D1-892E-158AE69FB8AB}.Debug|x64.ActiveCfg = Debug|x64
+		{4C3DF205-B3FC-42D1-892E-158AE69FB8AB}.Debug|x64.Build.0 = Debug|x64
+		{4C3DF205-B3FC-42D1-892E-158AE69FB8AB}.Release|x64.ActiveCfg = Release|x64
+		{4C3DF205-B3FC-42D1-892E-158AE69FB8AB}.Release|x64.Build.0 = Release|x64
 		{7F950E11-12A6-4E9A-A0A9-211011A5B419}.Debug|x64.ActiveCfg = Debug|x64
 		{7F950E11-12A6-4E9A-A0A9-211011A5B419}.Debug|x64.Build.0 = Debug|x64
 		{7F950E11-12A6-4E9A-A0A9-211011A5B419}.Release|x64.ActiveCfg = Release|x64

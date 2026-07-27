@@ -64,6 +64,17 @@ get-account-body = [record-id: bytes .size 16]
 add-account-body = [account-fields]
 update-account-body = [record-id: bytes .size 16, account-fields]
 delete-account-body = [record-id: bytes .size 16]
+enroll-windows-hello-body = [
+  credential-id: bytes .size (1..1024),
+  prf-salt: bytes .size 32,
+  prf-output: bytes .size 32
+]
+remove-windows-hello-body = []
+unlock-windows-hello-body = [
+  credential-id: bytes .size (1..1024),
+  protector: bytes .size (1..2048),
+  prf-output: bytes .size 32
+]
 
 account-fields = (
   service-name: text .size (0..256),
@@ -75,6 +86,7 @@ account-fields = (
 status-result = [agent-state: 1..7, unlock-epoch: uint]
 empty-result = []
 account-id-result = [record-id: bytes .size 16]
+windows-hello-protector-result = [protector: bytes .size (1..2048)]
 account-result = [
   record-id: bytes .size 16,
   revision: uint,

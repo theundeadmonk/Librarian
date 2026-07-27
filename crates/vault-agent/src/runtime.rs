@@ -15,9 +15,11 @@ use librarian_agent_protocol::{
     FrameHeader, MAX_IN_FLIGHT_GLOBAL, OperationCode, OperationRequest, ProtocolError,
     PublicErrorCode, RequestCompletion, RequestEnvelope, RequestPermit, ResponseEnvelope,
     RetryCategory, encode_account, encode_account_id, encode_account_summaries,
-    encode_empty_result, encode_status,
+    encode_empty_result, encode_status, encode_windows_hello_protector,
 };
-use librarian_vault_core::{CancellationFlag, MasterPassword};
+use librarian_vault_core::{
+    CancellationFlag, MasterPassword, WindowsHelloInstallationKey, WindowsHelloPrfOutput,
+};
 use sha2::Sha256;
 use zeroize::Zeroizing;
 
@@ -84,7 +86,7 @@ impl IdempotencyState {
 struct Coordinator {
     epoch: AtomicU64,
     global_in_flight: AtomicUsize,
-    kdf_active: AtomicBool,
+    unlock_active: AtomicBool,
     mutation_active: AtomicBool,
     lock_active: AtomicBool,
     creation_gate: Mutex<()>,
@@ -97,7 +99,7 @@ impl Coordinator {
         Self {
             epoch: AtomicU64::new(1),
             global_in_flight: AtomicUsize::new(0),
-            kdf_active: AtomicBool::new(false),
+            unlock_active: AtomicBool::new(false),
             mutation_active: AtomicBool::new(false),
             lock_active: AtomicBool::new(false),
             creation_gate: Mutex::new(()),
@@ -352,6 +354,7 @@ pub struct AgentRuntime {
     coordinator: Arc<Coordinator>,
     idempotency: Mutex<IdempotencyState>,
     idempotency_fingerprint_key: Zeroizing<[u8; 32]>,
+    windows_hello_installation_key: Option<WindowsHelloInstallationKey>,
     ownership: OwnershipLease,
 }
 
@@ -361,9 +364,30 @@ impl AgentRuntime {
     /// # Errors
     ///
     /// Rejects relative paths, duplicate ownership, and path inspection
-    /// failures. It does not open or decrypt the vault.
+    /// failures. It does not open or decrypt the vault, and Windows Hello
+    /// operations remain unavailable until a protected installation key is
+    /// supplied.
     pub fn start(vault_path: impl AsRef<Path>) -> Result<Self, RuntimeStartError> {
-        let vault_path = vault_path.as_ref();
+        Self::start_inner(vault_path.as_ref(), None)
+    }
+
+    /// Binds a runtime with an installation key loaded by the platform from an
+    /// OS-protected store.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same path and ownership failures as [`Self::start`].
+    pub fn start_with_windows_hello_key(
+        vault_path: impl AsRef<Path>,
+        installation_key: WindowsHelloInstallationKey,
+    ) -> Result<Self, RuntimeStartError> {
+        Self::start_inner(vault_path.as_ref(), Some(installation_key))
+    }
+
+    fn start_inner(
+        vault_path: &Path,
+        windows_hello_installation_key: Option<WindowsHelloInstallationKey>,
+    ) -> Result<Self, RuntimeStartError> {
         if !vault_path.is_absolute() {
             return Err(RuntimeStartError::InvalidVaultPath);
         }
@@ -403,6 +427,7 @@ impl AgentRuntime {
             coordinator: Arc::new(Coordinator::new()),
             idempotency: Mutex::new(IdempotencyState::new()),
             idempotency_fingerprint_key,
+            windows_hello_installation_key,
             ownership: OwnershipLease {
                 token: ownership_token,
             },
@@ -801,7 +826,9 @@ impl AgentRuntime {
     ) -> bool {
         match permit.operation() {
             OperationCode::Status | OperationCode::Lock => outcome.error.is_none(),
-            OperationCode::CreateVault | OperationCode::UnlockMasterPassword => {
+            OperationCode::CreateVault
+            | OperationCode::UnlockMasterPassword
+            | OperationCode::UnlockWindowsHello => {
                 !self.coordinator.lock_active.load(Ordering::Acquire)
                     && self.state() == AgentState::Unlocked
             }
@@ -851,6 +878,32 @@ impl AgentRuntime {
             OperationRequest::DeleteAccount { id } => {
                 self.delete_account(id, request_epoch, registration, deadline)
             }
+            OperationRequest::EnrollWindowsHello {
+                credential_id,
+                prf_salt,
+                prf_output,
+            } => self.enroll_windows_hello(
+                &credential_id,
+                prf_salt,
+                &prf_output,
+                request_epoch,
+                registration,
+                deadline,
+            ),
+            OperationRequest::RemoveWindowsHello => {
+                self.remove_windows_hello(request_epoch, registration, deadline)
+            }
+            OperationRequest::UnlockWindowsHello {
+                credential_id,
+                protector,
+                prf_output,
+            } => self.unlock_vault_with_windows_hello(
+                &credential_id,
+                &protector,
+                &prf_output,
+                registration,
+                deadline,
+            ),
         }
     }
 
@@ -974,7 +1027,7 @@ impl AgentRuntime {
                 RetryCategory::Never,
             ));
         }
-        let Some(_kdf) = FlagPermit::acquire(&self.coordinator.kdf_active) else {
+        let Some(_unlock) = FlagPermit::acquire(&self.coordinator.unlock_active) else {
             return Ok(ExecutionOutcome::busy());
         };
         let Ok(password) = MasterPassword::new(password) else {
@@ -1014,6 +1067,101 @@ impl AgentRuntime {
             } else {
                 None
             };
+            (result, authenticated_vault_id)
+        };
+        if registration.cancellation.is_cancelled() {
+            lock(&self.vault)?.lock();
+            self.set_locked_unless_shutting_down();
+            return Ok(ExecutionOutcome::cancelled());
+        }
+        if Instant::now() >= deadline {
+            lock(&self.vault)?.lock();
+            self.set_locked_unless_shutting_down();
+            return Ok(ExecutionOutcome::deadline());
+        }
+        match result {
+            Ok(()) => {
+                let authenticated_vault_id =
+                    authenticated_vault_id.ok_or(DispatchError::Internal)?;
+                self.publish_authenticated_unlock(
+                    authenticated_ownership,
+                    authenticated_vault_id,
+                    registration,
+                    deadline,
+                )
+            }
+            Err(UnlockError::Cancelled) => {
+                self.set_locked_unless_shutting_down();
+                Ok(ExecutionOutcome::cancelled())
+            }
+            Err(UnlockError::Failed) => {
+                self.set_locked_unless_shutting_down();
+                Ok(ExecutionOutcome::failed())
+            }
+        }
+    }
+
+    fn unlock_vault_with_windows_hello(
+        &self,
+        credential_id: &[u8],
+        protector: &[u8],
+        prf_output: &[u8; 32],
+        registration: &RequestRegistration,
+        deadline: Instant,
+    ) -> Result<ExecutionOutcome, DispatchError> {
+        if self.state() == AgentState::Unlocking {
+            return Ok(ExecutionOutcome::busy());
+        }
+        if self.state() != AgentState::Locked {
+            return Ok(ExecutionOutcome::failure(
+                PublicErrorCode::Conflict,
+                RetryCategory::Never,
+            ));
+        }
+        let Some(_unlock) = FlagPermit::acquire(&self.coordinator.unlock_active) else {
+            return Ok(ExecutionOutcome::busy());
+        };
+        let Some(installation_key) = self.windows_hello_installation_key.as_ref() else {
+            return Ok(ExecutionOutcome::failed());
+        };
+        {
+            let _commit = lock(&self.coordinator.commit_gate)?;
+            if self.coordinator.lock_active.load(Ordering::Acquire) {
+                return Ok(ExecutionOutcome::busy());
+            }
+            if self
+                .state
+                .compare_exchange(
+                    AgentState::Locked as u8,
+                    AgentState::Unlocking as u8,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                )
+                .is_err()
+            {
+                return Ok(ExecutionOutcome::failure(
+                    PublicErrorCode::Conflict,
+                    RetryCategory::Never,
+                ));
+            }
+        }
+        let mut authenticated_ownership = None;
+        let (result, authenticated_vault_id) = {
+            let mut vault = lock(&self.vault)?;
+            let result = vault.unlock_with_windows_hello_before_publish(
+                WindowsHelloPrfOutput::new(*prf_output),
+                installation_key,
+                credential_id,
+                protector,
+                &registration.cancellation,
+                || {
+                    authenticated_ownership = ownership_record(&self.vault_path).ok();
+                },
+            );
+            let authenticated_vault_id = result
+                .is_ok()
+                .then(|| vault.authenticated_vault_id())
+                .flatten();
             (result, authenticated_vault_id)
         };
         if registration.cancellation.is_cancelled() {
@@ -1139,6 +1287,79 @@ impl AgentRuntime {
         let outcome = ExecutionOutcome::success(encode_empty_result()?).hold_lock_transition();
         lock_transition.handoff();
         Ok(outcome)
+    }
+
+    fn enroll_windows_hello(
+        &self,
+        credential_id: &[u8],
+        prf_salt: [u8; 32],
+        prf_output: &[u8; 32],
+        request_epoch: u64,
+        registration: &RequestRegistration,
+        deadline: Instant,
+    ) -> Result<ExecutionOutcome, DispatchError> {
+        let Some(_mutation) = FlagPermit::acquire(&self.coordinator.mutation_active) else {
+            return Ok(ExecutionOutcome::busy());
+        };
+        if let Some(outcome) = self.pre_secret_operation(request_epoch, registration, deadline) {
+            return Ok(outcome);
+        }
+        let Some(installation_key) = self.windows_hello_installation_key.as_ref() else {
+            return Ok(ExecutionOutcome::failed());
+        };
+        let mut vault = lock(&self.vault)?;
+        if let Some(outcome) = self.pre_secret_operation(request_epoch, registration, deadline) {
+            return Ok(outcome);
+        }
+        let Ok(protector) = vault.create_windows_hello_protector(
+            installation_key,
+            credential_id,
+            prf_salt,
+            WindowsHelloPrfOutput::new(*prf_output),
+        ) else {
+            vault.lock();
+            drop(vault);
+            let _commit = lock(&self.coordinator.commit_gate)?;
+            self.set_locked_unless_shutting_down();
+            self.coordinator.advance_epoch()?;
+            return Ok(ExecutionOutcome::failed());
+        };
+        if let Some(outcome) =
+            self.post_secret_operation(&mut vault, request_epoch, registration, deadline)
+        {
+            return Ok(outcome);
+        }
+        Ok(ExecutionOutcome::success(encode_windows_hello_protector(
+            &protector,
+        )?))
+    }
+
+    fn remove_windows_hello(
+        &self,
+        request_epoch: u64,
+        registration: &RequestRegistration,
+        deadline: Instant,
+    ) -> Result<ExecutionOutcome, DispatchError> {
+        let Some(_mutation) = FlagPermit::acquire(&self.coordinator.mutation_active) else {
+            return Ok(ExecutionOutcome::busy());
+        };
+        if let Some(outcome) = self.pre_secret_operation(request_epoch, registration, deadline) {
+            return Ok(outcome);
+        }
+        let mut vault = lock(&self.vault)?;
+        if let Some(outcome) = self.pre_secret_operation(request_epoch, registration, deadline) {
+            return Ok(outcome);
+        }
+        // The opaque protector, credential ID, and PRF salt are device-local
+        // desktop metadata. This operation is the unlocked authorization gate
+        // for deleting them; it never modifies the portable vault or password
+        // wrapper.
+        if let Some(outcome) =
+            self.post_secret_operation(&mut vault, request_epoch, registration, deadline)
+        {
+            return Ok(outcome);
+        }
+        Ok(ExecutionOutcome::success(encode_empty_result()?))
     }
 
     fn set_locked_unless_shutting_down(&self) {

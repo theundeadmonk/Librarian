@@ -110,11 +110,13 @@ production authenticated IPC, native messaging, Windows Hello, and production
 passkey storage remain disabled until their security gates and implementation
 issues are complete. The Windows local-IPC probe validates operating-system
 assumptions with disposable marker bytes; it is not the issue #13 production
-transport. The Windows Hello PRF probe performs a non-interactive capability
-and synthetic security-negative-path check during the build; its explicit
-manual mode uses only a disposable local platform credential and never opens a
-vault. Tests use uniquely identifiable disposable values; do not use the
-current build with real credentials.
+transport. The Windows Hello native component owns platform-credential
+enrollment, PRF evaluation, strict authenticator-response validation, and
+credential removal. Its build-time test executable uses synthetic responses
+and invalid-argument paths only; it never displays a prompt or creates a
+credential. The WinUI-to-agent enrollment and unlock path remains disabled
+until issue #15 completes. Tests use uniquely identifiable disposable values;
+do not use the current build with real credentials.
 
 ## Dependency updates
 

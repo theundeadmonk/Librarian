@@ -4,9 +4,9 @@ use zeroize::Zeroizing;
 use crate::{
     AgentState, MAX_PAYLOAD_BYTES, OperationCode, ProtocolError,
     cbor::{
-        SecretWriter, decode_bounded_text, decode_fixed_bytes, decode_u16, decode_u32,
-        encode_array, encode_bytes, encode_null, encode_text, encode_u8, encode_u16, encode_u32,
-        encode_u64, expect_array, require_end,
+        SecretWriter, decode_bounded_bytes, decode_bounded_text, decode_fixed_bytes, decode_u16,
+        decode_u32, encode_array, encode_bytes, encode_null, encode_text, encode_u8, encode_u16,
+        encode_u32, encode_u64, expect_array, require_end,
     },
 };
 
@@ -16,6 +16,9 @@ const MAX_ORIGIN_BYTES: usize = 2_048;
 const MAX_USERNAME_BYTES: usize = 1_024;
 const MAX_PASSWORD_BYTES: usize = 16 * 1_024;
 const MAX_LIST_PAGE_SIZE: u16 = 100;
+const WINDOWS_HELLO_SECRET_BYTES: usize = 32;
+const MAX_WINDOWS_HELLO_CREDENTIAL_ID_BYTES: usize = 1_024;
+const MAX_WINDOWS_HELLO_PROTECTOR_BYTES: usize = 2 * 1_024;
 const MAX_REQUEST_BODY_BYTES: usize = MAX_PAYLOAD_BYTES - 128;
 const MAX_RESPONSE_BODY_BYTES: usize = MAX_PAYLOAD_BYTES - 96;
 
@@ -82,14 +85,41 @@ impl AccountFields {
 /// adds a complete schema.
 pub enum OperationRequest {
     Status,
-    CreateVault { master_password: Zeroizing<String> },
-    UnlockMasterPassword { master_password: Zeroizing<String> },
+    CreateVault {
+        master_password: Zeroizing<String>,
+    },
+    UnlockMasterPassword {
+        master_password: Zeroizing<String>,
+    },
     Lock,
-    ListAccountSummaries { offset: u32, limit: u16 },
-    GetAccount { id: [u8; 16] },
-    AddAccount { fields: AccountFields },
-    UpdateAccount { id: [u8; 16], fields: AccountFields },
-    DeleteAccount { id: [u8; 16] },
+    ListAccountSummaries {
+        offset: u32,
+        limit: u16,
+    },
+    GetAccount {
+        id: [u8; 16],
+    },
+    AddAccount {
+        fields: AccountFields,
+    },
+    UpdateAccount {
+        id: [u8; 16],
+        fields: AccountFields,
+    },
+    DeleteAccount {
+        id: [u8; 16],
+    },
+    EnrollWindowsHello {
+        credential_id: Vec<u8>,
+        prf_salt: [u8; 32],
+        prf_output: Zeroizing<[u8; WINDOWS_HELLO_SECRET_BYTES]>,
+    },
+    RemoveWindowsHello,
+    UnlockWindowsHello {
+        credential_id: Vec<u8>,
+        protector: Vec<u8>,
+        prf_output: Zeroizing<[u8; WINDOWS_HELLO_SECRET_BYTES]>,
+    },
 }
 
 impl OperationRequest {
@@ -105,6 +135,9 @@ impl OperationRequest {
             Self::AddAccount { .. } => OperationCode::AddAccount,
             Self::UpdateAccount { .. } => OperationCode::UpdateAccount,
             Self::DeleteAccount { .. } => OperationCode::DeleteAccount,
+            Self::EnrollWindowsHello { .. } => OperationCode::EnrollWindowsHello,
+            Self::RemoveWindowsHello => OperationCode::RemoveWindowsHello,
+            Self::UnlockWindowsHello { .. } => OperationCode::UnlockWindowsHello,
         }
     }
 
@@ -139,6 +172,30 @@ impl OperationRequest {
     pub const fn account_fields(&self) -> Option<&AccountFields> {
         match self {
             Self::AddAccount { fields } | Self::UpdateAccount { fields, .. } => Some(fields),
+            _ => None,
+        }
+    }
+
+    #[must_use]
+    pub fn windows_hello_enrollment(&self) -> Option<(&[u8], &[u8; 32], &[u8; 32])> {
+        match self {
+            Self::EnrollWindowsHello {
+                credential_id,
+                prf_salt,
+                prf_output,
+            } => Some((credential_id, prf_salt, prf_output)),
+            _ => None,
+        }
+    }
+
+    #[must_use]
+    pub fn windows_hello_unlock(&self) -> Option<(&[u8], &[u8], &[u8; 32])> {
+        match self {
+            Self::UnlockWindowsHello {
+                credential_id,
+                protector,
+                prf_output,
+            } => Some((credential_id, protector, prf_output)),
             _ => None,
         }
     }
@@ -210,9 +267,13 @@ impl OperationRequest {
                     id: decode_fixed_bytes(&mut decoder)?,
                 }
             }
-            OperationCode::EnrollWindowsHello
-            | OperationCode::RemoveWindowsHello
-            | OperationCode::ExactOriginMatches
+            OperationCode::EnrollWindowsHello => decode_windows_hello_enrollment(&mut decoder)?,
+            OperationCode::RemoveWindowsHello => {
+                expect_array(&mut decoder, 0)?;
+                Self::RemoveWindowsHello
+            }
+            OperationCode::UnlockWindowsHello => decode_windows_hello_unlock(&mut decoder)?,
+            OperationCode::ExactOriginMatches
             | OperationCode::GetSelectedCredential
             | OperationCode::CaptureCredential
             | OperationCode::UpdateCredential
@@ -246,9 +307,29 @@ impl OperationRequest {
         {
             return Err(ProtocolError::InvariantViolation);
         }
+        if let Some((credential_id, _, _)) = self.windows_hello_enrollment() {
+            if credential_id.is_empty() {
+                return Err(ProtocolError::InvariantViolation);
+            }
+            if credential_id.len() > MAX_WINDOWS_HELLO_CREDENTIAL_ID_BYTES {
+                return Err(ProtocolError::TooLarge);
+            }
+        }
+        if let Some((credential_id, protector, _)) = self.windows_hello_unlock() {
+            if credential_id.is_empty() || protector.is_empty() {
+                return Err(ProtocolError::InvariantViolation);
+            }
+            if credential_id.len() > MAX_WINDOWS_HELLO_CREDENTIAL_ID_BYTES
+                || protector.len() > MAX_WINDOWS_HELLO_PROTECTOR_BYTES
+            {
+                return Err(ProtocolError::TooLarge);
+            }
+        }
         let mut encoder = Encoder::new(SecretWriter::with_capacity(MAX_PAYLOAD_BYTES));
         match self {
-            Self::Status | Self::Lock => encode_array(&mut encoder, 0),
+            Self::Status | Self::Lock | Self::RemoveWindowsHello => {
+                encode_array(&mut encoder, 0);
+            }
             Self::CreateVault { master_password }
             | Self::UnlockMasterPassword { master_password } => {
                 encode_array(&mut encoder, 1);
@@ -272,9 +353,63 @@ impl OperationRequest {
                 encode_bytes(&mut encoder, id);
                 encode_account_fields(&mut encoder, fields);
             }
+            Self::EnrollWindowsHello {
+                credential_id,
+                prf_salt,
+                prf_output,
+            } => {
+                encode_array(&mut encoder, 3);
+                encode_bytes(&mut encoder, credential_id);
+                encode_bytes(&mut encoder, prf_salt);
+                encode_bytes(&mut encoder, prf_output.as_slice());
+            }
+            Self::UnlockWindowsHello {
+                credential_id,
+                protector,
+                prf_output,
+            } => {
+                encode_array(&mut encoder, 3);
+                encode_bytes(&mut encoder, credential_id);
+                encode_bytes(&mut encoder, protector);
+                encode_bytes(&mut encoder, prf_output.as_slice());
+            }
         }
         checked_request_body(encoder.into_writer().into_bytes())
     }
+}
+
+fn decode_windows_hello_enrollment(
+    decoder: &mut Decoder<'_>,
+) -> Result<OperationRequest, ProtocolError> {
+    expect_array(decoder, 3)?;
+    let credential_id = decode_bounded_bytes(decoder, MAX_WINDOWS_HELLO_CREDENTIAL_ID_BYTES)?;
+    if credential_id.is_empty() {
+        return Err(ProtocolError::InvariantViolation);
+    }
+    let prf_salt = decode_fixed_bytes(decoder)?;
+    let prf_output = Zeroizing::new(decode_fixed_bytes(decoder)?);
+    Ok(OperationRequest::EnrollWindowsHello {
+        credential_id,
+        prf_salt,
+        prf_output,
+    })
+}
+
+fn decode_windows_hello_unlock(
+    decoder: &mut Decoder<'_>,
+) -> Result<OperationRequest, ProtocolError> {
+    expect_array(decoder, 3)?;
+    let credential_id = decode_bounded_bytes(decoder, MAX_WINDOWS_HELLO_CREDENTIAL_ID_BYTES)?;
+    let protector = decode_bounded_bytes(decoder, MAX_WINDOWS_HELLO_PROTECTOR_BYTES)?;
+    if credential_id.is_empty() || protector.is_empty() {
+        return Err(ProtocolError::InvariantViolation);
+    }
+    let prf_output = Zeroizing::new(decode_fixed_bytes(decoder)?);
+    Ok(OperationRequest::UnlockWindowsHello {
+        credential_id,
+        protector,
+        prf_output,
+    })
 }
 
 fn decode_secret_text(
@@ -328,6 +463,26 @@ pub struct AccountView<'a> {
 pub fn encode_empty_result() -> Result<Zeroizing<Vec<u8>>, ProtocolError> {
     let mut encoder = Encoder::new(SecretWriter::with_capacity(MAX_PAYLOAD_BYTES));
     encode_array(&mut encoder, 0);
+    checked_response_body(encoder.into_writer().into_bytes())
+}
+
+/// Encodes one opaque, bounded device-local Windows Hello protector.
+///
+/// # Errors
+///
+/// Rejects empty or oversized protector bytes.
+pub fn encode_windows_hello_protector(
+    protector: &[u8],
+) -> Result<Zeroizing<Vec<u8>>, ProtocolError> {
+    if protector.is_empty() {
+        return Err(ProtocolError::InvariantViolation);
+    }
+    if protector.len() > MAX_WINDOWS_HELLO_PROTECTOR_BYTES {
+        return Err(ProtocolError::TooLarge);
+    }
+    let mut encoder = Encoder::new(SecretWriter::with_capacity(MAX_RESPONSE_BODY_BYTES));
+    encode_array(&mut encoder, 1);
+    encode_bytes(&mut encoder, protector);
     checked_response_body(encoder.into_writer().into_bytes())
 }
 

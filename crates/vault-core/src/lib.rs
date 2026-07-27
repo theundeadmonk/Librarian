@@ -20,10 +20,10 @@ use hkdf::Hkdf;
 pub use librarian_vault_format::FormatReadiness;
 use librarian_vault_format::{
     ARGON2_MEMORY_KIB, ARGON2_PARALLELISM, ARGON2_TIME_COST, Manifest, ManifestEnvelope,
-    MasterWrapper, RecoveryWrapper, VaultHeader, encode_manifest_aad, encode_master_wrapper_aad,
-    encode_recovery_wrapper_aad,
+    MasterWrapper, RecoveryWrapper, VaultHeader, WindowsHelloProtector, encode_manifest_aad,
+    encode_master_wrapper_aad, encode_recovery_wrapper_aad, encode_windows_hello_wrapper_aad,
 };
-use sha2::Sha256;
+use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
 mod records;
@@ -39,6 +39,9 @@ const INITIAL_KEY_EPOCH: u32 = 1;
 const MAX_MASTER_PASSWORD_BYTES: usize = 1024;
 const MASTER_WRAP_LABEL: &[u8] = b"librarian/vault/v1/master-wrap";
 const RECOVERY_WRAP_LABEL: &[u8] = b"librarian/vault/v1/recovery-wrap";
+const WINDOWS_HELLO_WRAP_LABEL: &[u8] = b"librarian/vault/v1/windows-hello-wrap";
+const WINDOWS_HELLO_INSTALLATION_ID_LABEL: &[u8] =
+    b"librarian/vault/v1/windows-hello-installation-id";
 const MANIFEST_LABEL_PREFIX: &[u8] = b"librarian/vault/v1/manifest/";
 
 /// Reports whether this revision may store production credentials.
@@ -101,6 +104,40 @@ pub struct RecoveryKey(
     )]
     Zeroizing<[u8; KEY_BYTES]>,
 );
+
+/// One transient 32-byte `WebAuthn` PRF result released after Windows-owned user
+/// verification. The allocation is move-only, unformattable, and zeroized on
+/// drop.
+pub struct WindowsHelloPrfOutput(Zeroizing<[u8; KEY_BYTES]>);
+
+impl WindowsHelloPrfOutput {
+    #[must_use]
+    pub fn new(value: [u8; KEY_BYTES]) -> Self {
+        Self(Zeroizing::new(value))
+    }
+
+    fn as_bytes(&self) -> &[u8; KEY_BYTES] {
+        &self.0
+    }
+}
+
+/// Agent-owned installation secret used to make a Windows Hello protector
+/// unusable when copied to another Librarian installation.
+///
+/// This value must be persisted by the trusted agent using an OS-protected
+/// store. It is move-only, unformattable, and zeroized on drop.
+pub struct WindowsHelloInstallationKey(Zeroizing<[u8; KEY_BYTES]>);
+
+impl WindowsHelloInstallationKey {
+    #[must_use]
+    pub fn new(value: [u8; KEY_BYTES]) -> Self {
+        Self(Zeroizing::new(value))
+    }
+
+    fn as_bytes(&self) -> &[u8; KEY_BYTES] {
+        &self.0
+    }
+}
 
 /// A cancellation signal checked before and after expensive unlock work.
 #[derive(Default)]
@@ -210,6 +247,59 @@ impl UnlockedVault {
         self.manifest.generation()
     }
 
+    /// Wraps this session's VRK for one installation-bound Windows Hello
+    /// credential. The returned canonical bytes contain no PRF output or
+    /// plaintext key and are not part of the portable vault or backup.
+    ///
+    /// # Errors
+    ///
+    /// Returns a non-secret format, randomness, or cryptographic failure.
+    pub fn create_windows_hello_protector(
+        &self,
+        installation_key: &WindowsHelloInstallationKey,
+        credential_id: &[u8],
+        prf_salt: [u8; 32],
+        prf_output: WindowsHelloPrfOutput,
+    ) -> Result<Vec<u8>, CreateVaultError> {
+        let mut entropy = SystemEntropy;
+        let nonce = random_array(&mut entropy)?;
+        let installation_id = windows_hello_installation_id(installation_key.as_bytes());
+        let template = WindowsHelloProtector::new(
+            *self.vault_id(),
+            self.key_epoch(),
+            installation_id,
+            credential_id.to_vec(),
+            prf_salt,
+            nonce,
+            [0; WRAPPED_KEY_BYTES],
+        )
+        .map_err(|_| CreateVaultError::FormatFailure)?;
+        let wrapping_key = derive_windows_hello_wrapping_key(
+            prf_output.as_bytes(),
+            installation_key.as_bytes(),
+            self.vault_id(),
+        )
+        .map_err(|()| CreateVaultError::CryptographicFailure)?;
+        drop(prf_output);
+        let wrapped_vrk = encrypt_fixed_key(
+            &wrapping_key,
+            template.nonce(),
+            self.root_key(),
+            &encode_windows_hello_wrapper_aad(&template),
+        )?;
+        WindowsHelloProtector::new(
+            *template.vault_id(),
+            template.key_epoch(),
+            *template.installation_id(),
+            template.credential_id().to_vec(),
+            *template.prf_salt(),
+            *template.nonce(),
+            wrapped_vrk,
+        )
+        .and_then(|protector| protector.encode())
+        .map_err(|_| CreateVaultError::FormatFailure)
+    }
+
     /// A private proof that the key allocation is retained by this session.
     fn root_key(&self) -> &[u8; KEY_BYTES] {
         &self.vault_root_key
@@ -275,7 +365,74 @@ pub fn unlock_vault(
         &master_aad,
     )
     .map_err(|()| UnlockError::Failed)?;
+    authenticate_vault_root_key(vault_root_key, header, &envelope, records, cancellation)
+}
 
+/// Authenticates a vault through an installation-bound Windows Hello
+/// protector. Every parse, binding, corruption, credential mismatch, and
+/// cryptographic failure collapses to `UnlockError::Failed`.
+///
+/// # Errors
+///
+/// Returns `Cancelled` when cancellation wins and `Failed` for every other
+/// unsuccessful unlock condition.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the explicit trust-boundary inputs must not be bundled into a cloneable request value"
+)]
+pub fn unlock_vault_with_windows_hello(
+    prf_output: WindowsHelloPrfOutput,
+    installation_key: &WindowsHelloInstallationKey,
+    credential_id: &[u8],
+    protector_bytes: &[u8],
+    header_bytes: &[u8],
+    manifest_envelope_bytes: &[u8],
+    records: &[EncryptedRecord],
+    cancellation: &CancellationFlag,
+) -> Result<UnlockedVault, UnlockError> {
+    if cancellation.is_cancelled() {
+        return Err(UnlockError::Cancelled);
+    }
+    let header = VaultHeader::decode(header_bytes).map_err(|_| UnlockError::Failed)?;
+    let envelope =
+        ManifestEnvelope::decode(manifest_envelope_bytes).map_err(|_| UnlockError::Failed)?;
+    let protector =
+        WindowsHelloProtector::decode(protector_bytes).map_err(|_| UnlockError::Failed)?;
+    let installation_id = windows_hello_installation_id(installation_key.as_bytes());
+    if protector.vault_id() != header.vault_id()
+        || protector.key_epoch() != header.key_epoch()
+        || protector.installation_id() != &installation_id
+        || protector.credential_id() != credential_id
+    {
+        return Err(UnlockError::Failed);
+    }
+    let wrapping_key = derive_windows_hello_wrapping_key(
+        prf_output.as_bytes(),
+        installation_key.as_bytes(),
+        header.vault_id(),
+    )
+    .map_err(|()| UnlockError::Failed)?;
+    drop(prf_output);
+    if cancellation.is_cancelled() {
+        return Err(UnlockError::Cancelled);
+    }
+    let vault_root_key = decrypt_fixed_key(
+        &wrapping_key,
+        protector.nonce(),
+        protector.wrapped_vrk(),
+        &encode_windows_hello_wrapper_aad(&protector),
+    )
+    .map_err(|()| UnlockError::Failed)?;
+    authenticate_vault_root_key(vault_root_key, header, &envelope, records, cancellation)
+}
+
+fn authenticate_vault_root_key(
+    vault_root_key: Zeroizing<[u8; KEY_BYTES]>,
+    header: VaultHeader,
+    envelope: &ManifestEnvelope,
+    records: &[EncryptedRecord],
+    cancellation: &CancellationFlag,
+) -> Result<UnlockedVault, UnlockError> {
     let manifest_key =
         derive_manifest_key(&vault_root_key[..], header.vault_id(), header.key_epoch())
             .map_err(|()| UnlockError::Failed)?;
@@ -466,6 +623,24 @@ fn derive_key(
     Ok(output)
 }
 
+fn windows_hello_installation_id(installation_key: &[u8; KEY_BYTES]) -> [u8; KEY_BYTES] {
+    let mut hasher = Sha256::new();
+    hasher.update(WINDOWS_HELLO_INSTALLATION_ID_LABEL);
+    hasher.update(installation_key);
+    hasher.finalize().into()
+}
+
+fn derive_windows_hello_wrapping_key(
+    prf_output: &[u8; KEY_BYTES],
+    installation_key: &[u8; KEY_BYTES],
+    vault_id: &[u8; 16],
+) -> Result<Zeroizing<[u8; KEY_BYTES]>, ()> {
+    let mut input_key = Zeroizing::new([0_u8; KEY_BYTES * 2]);
+    input_key[..KEY_BYTES].copy_from_slice(prf_output);
+    input_key[KEY_BYTES..].copy_from_slice(installation_key);
+    derive_key(&input_key[..], vault_id, WINDOWS_HELLO_WRAP_LABEL)
+}
+
 fn derive_manifest_key(
     vault_root_key: &[u8],
     vault_id: &[u8; 16],
@@ -553,7 +728,8 @@ mod tests {
 
     use super::{
         CancellationFlag, CreateVaultError, EntropySource, MasterPassword, UnlockError,
-        create_vault_with_entropy, unlock_empty_vault,
+        WindowsHelloInstallationKey, WindowsHelloPrfOutput, create_vault_with_entropy,
+        unlock_empty_vault, unlock_vault_with_windows_hello,
     };
 
     struct DeterministicEntropy(u8);
@@ -627,6 +803,115 @@ mod tests {
             Sha256::digest(recovered_root.as_slice()),
             Sha256::digest(initial_session.root_key())
         );
+    }
+
+    #[test]
+    fn windows_hello_protector_releases_the_same_vault_root_key() {
+        let created = deterministic_vault("hello password");
+        let (header, manifest, _recovery, initial_session) = created.into_parts();
+        let installation_key = [0x71; 32];
+        let credential_id = [0x72; 64];
+        let prf_salt = [0x73; 32];
+        let prf = [0x74; 32];
+        let protector = initial_session
+            .create_windows_hello_protector(
+                &WindowsHelloInstallationKey::new(installation_key),
+                &credential_id,
+                prf_salt,
+                WindowsHelloPrfOutput::new(prf),
+            )
+            .expect("Hello protector");
+
+        let unlocked = unlock_vault_with_windows_hello(
+            WindowsHelloPrfOutput::new(prf),
+            &WindowsHelloInstallationKey::new(installation_key),
+            &credential_id,
+            &protector,
+            &header,
+            &manifest,
+            &[],
+            &CancellationFlag::new(),
+        )
+        .expect("Hello unlock");
+        assert_eq!(unlocked.vault_id(), initial_session.vault_id());
+        assert_eq!(unlocked.key_epoch(), initial_session.key_epoch());
+        assert_eq!(unlocked.generation(), initial_session.generation());
+
+        let password_unlocked = unlock_empty_vault(
+            MasterPassword::new("hello password").expect("password"),
+            &header,
+            &manifest,
+            &CancellationFlag::new(),
+        )
+        .expect("master wrapper remains independent");
+        assert_eq!(password_unlocked.vault_id(), initial_session.vault_id());
+    }
+
+    #[test]
+    fn windows_hello_binding_and_corruption_fail_uniformly() {
+        let created = deterministic_vault("Hello fallback password");
+        let (header, manifest, _recovery, session) = created.into_parts();
+        let installation_key = [0x81; 32];
+        let credential_id = [0x82; 64];
+        let prf_salt = [0x83; 32];
+        let prf = [0x84; 32];
+        let protector = session
+            .create_windows_hello_protector(
+                &WindowsHelloInstallationKey::new(installation_key),
+                &credential_id,
+                prf_salt,
+                WindowsHelloPrfOutput::new(prf),
+            )
+            .expect("Hello protector");
+
+        let wrong_prf = unlock_vault_with_windows_hello(
+            WindowsHelloPrfOutput::new([0x85; 32]),
+            &WindowsHelloInstallationKey::new(installation_key),
+            &credential_id,
+            &protector,
+            &header,
+            &manifest,
+            &[],
+            &CancellationFlag::new(),
+        );
+        let wrong_installation = unlock_vault_with_windows_hello(
+            WindowsHelloPrfOutput::new(prf),
+            &WindowsHelloInstallationKey::new([0x86; 32]),
+            &credential_id,
+            &protector,
+            &header,
+            &manifest,
+            &[],
+            &CancellationFlag::new(),
+        );
+        let wrong_credential = unlock_vault_with_windows_hello(
+            WindowsHelloPrfOutput::new(prf),
+            &WindowsHelloInstallationKey::new(installation_key),
+            &[0x87; 64],
+            &protector,
+            &header,
+            &manifest,
+            &[],
+            &CancellationFlag::new(),
+        );
+        let mut corrupted = protector;
+        let last = corrupted.last_mut().expect("protector is not empty");
+        *last ^= 1;
+        let corrupt = unlock_vault_with_windows_hello(
+            WindowsHelloPrfOutput::new(prf),
+            &WindowsHelloInstallationKey::new(installation_key),
+            &credential_id,
+            &corrupted,
+            &header,
+            &manifest,
+            &[],
+            &CancellationFlag::new(),
+        );
+
+        assert!(matches!(wrong_prf, Err(UnlockError::Failed)));
+        assert!(matches!(wrong_installation, Err(UnlockError::Failed)));
+        assert!(matches!(wrong_credential, Err(UnlockError::Failed)));
+        assert!(matches!(corrupt, Err(UnlockError::Failed)));
     }
 
     #[test]
