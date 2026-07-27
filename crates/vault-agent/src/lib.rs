@@ -15,7 +15,7 @@ mod storage;
 pub use errors::{AccountError, CreateError, UnlockError};
 pub use librarian_vault_core::{
     RecordId, WebsiteAccount, WebsiteAccountInput, WebsiteAccountInputError,
-    WindowsHelloInstallationKey,
+    WindowsHelloInstallationKey, WindowsHelloPrfOutput,
 };
 pub use lifecycle::{OperationPermit, VaultAgent};
 pub use runtime::{AgentRuntime, DispatchError, RuntimeStartError};

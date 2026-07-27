@@ -4,7 +4,9 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
-use librarian_vault_agent::{CreateError, UnlockError, VaultAgent};
+use librarian_vault_agent::{
+    CreateError, UnlockError, VaultAgent, WindowsHelloInstallationKey, WindowsHelloPrfOutput,
+};
 use librarian_vault_core::{CancellationFlag, MasterPassword};
 
 static TEST_DIRECTORY_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -67,6 +69,50 @@ fn create_lock_restart_and_unlock_uses_only_the_public_api() {
             &CancellationFlag::new(),
         )
         .expect("matching password must unlock after restart");
+    assert!(restarted.is_unlocked());
+}
+
+#[test]
+fn trusted_windows_hello_unlock_keeps_master_password_fallback() {
+    let directory = TestDirectory::new();
+    let path = directory.path("windows-hello-vault.sqlite3");
+    let installation_key = [0x61; 32];
+    let credential_id = [0x62; 64];
+    let prf_salt = [0x63; 32];
+    let prf_output = [0x64; 32];
+    let (mut created, _recovery_key) =
+        VaultAgent::create(&path, password("Windows Hello fallback password"))
+            .expect("vault must be created");
+    let protector = created
+        .create_windows_hello_protector(
+            &WindowsHelloInstallationKey::new(installation_key),
+            &credential_id,
+            prf_salt,
+            WindowsHelloPrfOutput::new(prf_output),
+        )
+        .expect("trusted agent must create a device-local protector");
+    created.lock();
+    drop(created);
+
+    let mut restarted = VaultAgent::open_locked(&path);
+    restarted
+        .unlock_with_windows_hello(
+            WindowsHelloPrfOutput::new(prf_output),
+            &WindowsHelloInstallationKey::new(installation_key),
+            &credential_id,
+            &protector,
+            &CancellationFlag::new(),
+        )
+        .expect("matching trusted Windows Hello material must unlock after restart");
+    assert!(restarted.is_unlocked());
+
+    restarted.lock();
+    restarted
+        .unlock(
+            password("Windows Hello fallback password"),
+            &CancellationFlag::new(),
+        )
+        .expect("master-password fallback must remain available");
     assert!(restarted.is_unlocked());
 }
 

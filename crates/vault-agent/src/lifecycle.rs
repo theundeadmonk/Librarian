@@ -216,8 +216,11 @@ impl VaultAgent {
         )
     }
 
-    /// Unlocks through a caller-verified Windows Hello PRF result and a
-    /// canonical device-local protector.
+    /// Unlocks through a Windows Hello PRF result produced inside the trusted
+    /// agent process and a canonical device-local protector.
+    ///
+    /// This is a platform-provider boundary, not an IPC operation. Callers
+    /// must not deserialize the PRF result from a desktop-controlled request.
     ///
     /// # Errors
     ///

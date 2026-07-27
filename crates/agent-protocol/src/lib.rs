@@ -21,7 +21,7 @@ pub use message::{
 };
 pub use operations::{
     AccountFields, AccountView, OperationRequest, encode_account, encode_account_id,
-    encode_account_summaries, encode_empty_result, encode_status, encode_windows_hello_protector,
+    encode_account_summaries, encode_empty_result, encode_status,
 };
 pub use session::{
     BeginRequestError, Connection, ConnectionError, ConnectionLimits, RequestCompletion,

@@ -115,8 +115,9 @@ enrollment, PRF evaluation, strict authenticator-response validation, and
 credential removal. Its build-time test executable uses synthetic responses
 and invalid-argument paths only; it never displays a prompt or creates a
 credential. The WinUI-to-agent enrollment and unlock path remains disabled
-until issue #15 completes. Tests use uniquely identifiable disposable values;
-do not use the current build with real credentials.
+until the native ceremony runs inside the trusted agent; raw PRF results must
+never cross desktop-controlled IPC. Tests use uniquely identifiable disposable
+values; do not use the current build with real credentials.
 
 ## Dependency updates
 

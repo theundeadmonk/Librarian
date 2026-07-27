@@ -219,18 +219,20 @@ namespace librarian::windows_hello
         {
         public:
             explicit created_credential(
-                std::span<std::uint8_t const> const identifier) :
-                identifier_(identifier.begin(), identifier.end())
+                PBYTE const identifier,
+                DWORD const size) noexcept :
+                identifier_(identifier),
+                size_(size)
             {
             }
 
             ~created_credential()
             {
-                if (owned_ && !identifier_.empty())
+                if (owned_ && identifier_ != nullptr && size_ != 0)
                 {
                     (void)WebAuthNDeletePlatformCredential(
-                        static_cast<DWORD>(identifier_.size()),
-                        identifier_.data());
+                        size_,
+                        identifier_);
                 }
             }
 
@@ -239,21 +241,24 @@ namespace librarian::windows_hello
             created_credential(created_credential&&) = delete;
             created_credential& operator=(created_credential&&) = delete;
 
-            [[nodiscard]] std::vector<std::uint8_t> release() noexcept
+            [[nodiscard]] std::vector<std::uint8_t> release()
             {
+                std::vector<std::uint8_t> result(
+                    identifier_,
+                    identifier_ + size_);
                 owned_ = false;
-                return std::move(identifier_);
+                return result;
             }
 
             [[nodiscard]] HRESULT remove() noexcept
             {
-                if (!owned_ || identifier_.empty())
+                if (!owned_ || identifier_ == nullptr || size_ == 0)
                 {
                     return S_OK;
                 }
                 HRESULT const result = WebAuthNDeletePlatformCredential(
-                    static_cast<DWORD>(identifier_.size()),
-                    identifier_.data());
+                    size_,
+                    identifier_);
                 if (SUCCEEDED(result))
                 {
                     owned_ = false;
@@ -262,7 +267,8 @@ namespace librarian::windows_hello
             }
 
         private:
-            std::vector<std::uint8_t> identifier_;
+            PBYTE identifier_{nullptr};
+            DWORD size_{0};
             bool owned_{true};
         };
 
@@ -500,15 +506,16 @@ namespace librarian::windows_hello
             require(
                 value != nullptr &&
                 value->cbCredentialId != 0 &&
-                value->cbCredentialId <= maximum_credential_id_bytes &&
                 value->pbCredentialId != nullptr);
 
-            created_credential credential({
+            created_credential credential(
                 value->pbCredentialId,
-                static_cast<std::size_t>(value->cbCredentialId),
-            });
+                value->cbCredentialId);
             try
             {
+                require(
+                    value->cbCredentialId <=
+                    maximum_credential_id_bytes);
                 PrfOutput output = validated_output(
                     detail::ValidateAttestation(
                         {

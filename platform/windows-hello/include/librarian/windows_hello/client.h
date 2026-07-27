@@ -26,9 +26,10 @@ namespace librarian::windows_hello
         CredentialRemovalFailed,
     };
 
-    // A transient WebAuthn PRF result. The allocation is move-only and cleared
-    // on destruction. It must be handed directly to the authenticated vault
-    // agent and must never be logged or persisted.
+    // A transient WebAuthn PRF result. This component belongs inside the
+    // trusted vault-agent boundary: the PRF result must never cross
+    // desktop-controlled IPC, be logged, or be persisted. The allocation is
+    // move-only and cleared on destruction.
     class PrfOutput final
     {
     public:

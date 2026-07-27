@@ -305,33 +305,10 @@ fn implemented_operation_bodies_are_canonical_bounded_and_strict() {
         OperationRequest::decode(OperationCode::AddAccount, &trailing),
         Err(ProtocolError::Malformed)
     ));
-    let enroll = OperationRequest::EnrollWindowsHello {
-        credential_id: vec![0x42; 64],
-        prf_salt: [0x43; 32],
-        prf_output: Zeroizing::new([0x44; 32]),
-    };
-    let encoded_enroll = enroll.encode().expect("Hello enrollment encodes");
-    let decoded_enroll =
-        OperationRequest::decode(OperationCode::EnrollWindowsHello, &encoded_enroll)
-            .expect("Hello enrollment decodes");
     assert_eq!(
-        decoded_enroll.operation(),
-        OperationCode::EnrollWindowsHello
+        OperationRequest::decode(OperationCode::EnrollWindowsHello, &[0x80]).map(|_| ()),
+        Err(ProtocolError::Unsupported)
     );
-    let (credential, salt, output) = decoded_enroll
-        .windows_hello_enrollment()
-        .expect("Hello enrollment fields");
-    assert_eq!(credential, &[0x42; 64]);
-    assert_eq!(salt, &[0x43; 32]);
-    assert_eq!(output, &[0x44; 32]);
-
-    let unlock = OperationRequest::UnlockWindowsHello {
-        credential_id: vec![0x52; 64],
-        protector: vec![0x53; 128],
-        prf_output: Zeroizing::new([0x54; 32]),
-    };
-    let encoded_unlock = unlock.encode().expect("Hello unlock encodes");
-    assert!(OperationRequest::decode(OperationCode::UnlockWindowsHello, &encoded_unlock,).is_ok());
 
     for limit in [0, 101] {
         assert!(matches!(
