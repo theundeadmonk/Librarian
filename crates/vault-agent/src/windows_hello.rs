@@ -26,9 +26,9 @@ use crate::filesystem::{
 #[cfg(any(windows, test))]
 const LOCAL_STATE_MAGIC: &str = "LBR-HLO";
 #[cfg(any(windows, test))]
-const LOCAL_STATE_VERSION: u32 = 1;
+const LOCAL_STATE_VERSION: u32 = 2;
 #[cfg(any(windows, test))]
-const LOCAL_STATE_FIELDS: u64 = 8;
+const LOCAL_STATE_FIELDS: u64 = 9;
 const INSTALLATION_KEY_BYTES: usize = 32;
 const PRF_SALT_BYTES: usize = 32;
 #[cfg(any(windows, test))]
@@ -202,6 +202,7 @@ pub(crate) struct WindowsHelloLocalState {
     key_epoch: u32,
     installation_key: Zeroizing<[u8; INSTALLATION_KEY_BYTES]>,
     credential_id: Vec<u8>,
+    pending_removal_credential_id: Option<Vec<u8>>,
     prf_salt: [u8; PRF_SALT_BYTES],
     protector: Vec<u8>,
 }
@@ -240,6 +241,7 @@ impl WindowsHelloLocalState {
             key_epoch,
             installation_key,
             credential_id,
+            pending_removal_credential_id: None,
             prf_salt,
             protector,
         })
@@ -261,6 +263,28 @@ impl WindowsHelloLocalState {
         &self.credential_id
     }
 
+    pub(crate) fn pending_removal_credential_id(&self) -> Option<&[u8]> {
+        self.pending_removal_credential_id.as_deref()
+    }
+
+    pub(crate) fn set_pending_removal_credential_id(
+        &mut self,
+        credential_id: &[u8],
+    ) -> Result<(), WindowsHelloStateError> {
+        if credential_id.is_empty()
+            || credential_id.len() > MAX_WINDOWS_HELLO_CREDENTIAL_ID_BYTES
+            || credential_id == self.credential_id
+        {
+            return Err(WindowsHelloStateError::Invalid);
+        }
+        self.pending_removal_credential_id = Some(credential_id.to_vec());
+        Ok(())
+    }
+
+    pub(crate) fn clear_pending_removal_credential_id(&mut self) {
+        self.pending_removal_credential_id = None;
+    }
+
     pub(crate) const fn prf_salt(&self) -> &[u8; PRF_SALT_BYTES] {
         &self.prf_salt
     }
@@ -280,7 +304,14 @@ impl WindowsHelloLocalState {
             .and_then(|value| value.u32(self.key_epoch))
             .and_then(|value| value.bytes(self.installation_key.as_slice()))
             .and_then(|value| value.bytes(&self.credential_id))
-            .and_then(|value| value.bytes(&self.prf_salt))
+            .map_err(|_| WindowsHelloStateError::Failed)?;
+        match self.pending_removal_credential_id.as_deref() {
+            Some(credential_id) => encoder.bytes(credential_id),
+            None => encoder.bytes(&[]),
+        }
+        .map_err(|_| WindowsHelloStateError::Failed)?;
+        encoder
+            .bytes(&self.prf_salt)
             .and_then(|value| value.bytes(&self.protector))
             .map_err(|_| WindowsHelloStateError::Failed)?;
         let bytes = Zeroizing::new(encoder.into_writer());
@@ -309,12 +340,14 @@ impl WindowsHelloLocalState {
         let key_epoch = decoder.u32().map_err(|_| WindowsHelloStateError::Invalid)?;
         let installation_key = fixed_secret_bytes(&mut decoder)?;
         let credential_id = bounded_bytes(&mut decoder, 1, MAX_WINDOWS_HELLO_CREDENTIAL_ID_BYTES)?;
+        let pending_removal_credential_id =
+            bounded_bytes(&mut decoder, 0, MAX_WINDOWS_HELLO_CREDENTIAL_ID_BYTES)?;
         let prf_salt = fixed_bytes(&mut decoder)?;
         let protector = bounded_bytes(&mut decoder, 1, MAX_WINDOWS_HELLO_PROTECTOR_BYTES)?;
         if decoder.position() != bytes.len() {
             return Err(WindowsHelloStateError::Invalid);
         }
-        let state = Self::new(
+        let mut state = Self::new(
             vault_id,
             key_epoch,
             installation_key,
@@ -322,6 +355,9 @@ impl WindowsHelloLocalState {
             prf_salt,
             protector,
         )?;
+        if !pending_removal_credential_id.is_empty() {
+            state.set_pending_removal_credential_id(&pending_removal_credential_id)?;
+        }
         if state.encode()?.as_slice() != bytes {
             return Err(WindowsHelloStateError::Invalid);
         }
@@ -504,6 +540,7 @@ impl WindowsHelloStateStore {
                     .map_err(|_| WindowsHelloStateError::Failed)?;
                 guarded_file_matches_path_with_ancestor_guards(&published, &self.path, &ancestors)
                     .map_err(|_| WindowsHelloStateError::Failed)?;
+                drop(published);
                 remove_file_with_ancestor_guards(&ancestors, &staging_path)
                     .map_err(|_| WindowsHelloStateError::Failed)?;
             }
@@ -617,12 +654,19 @@ mod tests {
 
     #[test]
     fn local_state_is_canonical_and_binding_checked() {
-        let state = state(0x31);
+        let mut state = state(0x31);
+        state
+            .set_pending_removal_credential_id(&[0x72; 64])
+            .expect("pending retirement");
         let encoded = state.encode().expect("encoded local state");
         let decoded = WindowsHelloLocalState::decode(&encoded).expect("decoded local state");
         assert_eq!(decoded.vault_id(), state.vault_id());
         assert_eq!(decoded.key_epoch(), state.key_epoch());
         assert_eq!(decoded.credential_id(), state.credential_id());
+        assert_eq!(
+            decoded.pending_removal_credential_id(),
+            state.pending_removal_credential_id()
+        );
         assert_eq!(decoded.prf_salt(), state.prf_salt());
         assert_eq!(decoded.protector(), state.protector());
 
