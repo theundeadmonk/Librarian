@@ -479,6 +479,34 @@ fn legacy_protocol_versions_cannot_use_windows_hello() {
 }
 
 #[test]
+fn legacy_protocol_versions_can_require_other_supported_features() {
+    let legacy_feature = 4;
+    let version_one = ClientHello::new(
+        CLIENT_NONCE,
+        Version::new(1, 0),
+        Version::new(1, 0),
+        ClientRole::Desktop,
+        BUILD_ID,
+        vec![legacy_feature],
+    )
+    .expect("well-formed version 1.0 hello");
+    let (connection, _response) = Connection::negotiate(
+        ClientRole::Desktop,
+        17,
+        BUILD_ID,
+        &version_one,
+        &[legacy_feature],
+        SERVER_NONCE,
+        CONNECTION_ID,
+        AgentState::Locked,
+        1,
+        ConnectionLimits::default(),
+    )
+    .expect("supported legacy feature must remain compatible");
+    assert_eq!(connection.version(), Version::new(1, 0));
+}
+
+#[test]
 fn restarted_connections_reject_old_frames() {
     let old_connection = connection(ClientRole::Desktop);
     let old_request = request(OperationCode::Status, 0, None);

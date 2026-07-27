@@ -4,7 +4,7 @@ use std::{
 };
 
 use crate::{
-    AgentState, CURRENT_VERSION, ClientHello, ClientRole, FrameHeader,
+    AgentState, CURRENT_VERSION, ClientHello, ClientRole, FEATURE_WINDOWS_HELLO, FrameHeader,
     MAX_IN_FLIGHT_PER_CONNECTION, MAX_PAYLOAD_BYTES, MIN_NEGOTIATED_PAYLOAD_BYTES, MINIMUM_VERSION,
     MessageKind, OperationCode, PASSKEY_TIMEOUT_MS, RequestEnvelope, ResponseEnvelope, ServerHello,
     UNLOCK_TIMEOUT_MS, Version, WINDOWS_HELLO_VERSION,
@@ -204,7 +204,12 @@ impl Connection {
         {
             return Err(ConnectionError::UnsupportedFeature);
         }
-        if !hello.required_features().is_empty() && selected_version < WINDOWS_HELLO_VERSION {
+        if hello
+            .required_features()
+            .binary_search(&FEATURE_WINDOWS_HELLO)
+            .is_ok()
+            && selected_version < WINDOWS_HELLO_VERSION
+        {
             return Err(ConnectionError::UnsupportedFeature);
         }
         if authenticated_process_id == 0 || server_nonce == [0; 32] || connection_id == [0; 16] {

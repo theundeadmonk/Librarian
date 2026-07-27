@@ -47,6 +47,9 @@ pub(crate) enum WindowsHelloStateError {
     NotFound,
     Invalid,
     Failed,
+    // Atomic publication completed, but a later verification or durability
+    // barrier failed. The selected credential must remain available.
+    Published,
 }
 
 #[cfg_attr(
@@ -418,6 +421,7 @@ impl WindowsHelloStateStore {
         let staging_path = self.staging_path()?;
         let mut staging = create_staging_reservation(&ancestors, &staging_path)
             .map_err(|_| WindowsHelloStateError::Failed)?;
+        let mut published = false;
         let result = (|| {
             staging
                 .write_all(&protected)
@@ -452,6 +456,7 @@ impl WindowsHelloStateStore {
                 drop(staging_guard);
                 librarian_windows_hello_agent::replace_file_atomically(&self.path, &staging_path)
                     .map_err(|_| WindowsHelloStateError::Failed)?;
+                published = true;
                 let mut published = open_regular_file_guard_with_ancestor_guards(
                     &ancestors, &self.path, false, false,
                 )
@@ -472,6 +477,7 @@ impl WindowsHelloStateStore {
             } else {
                 hard_link_with_ancestor_guards(&ancestors, &staging_path, &self.path)
                     .map_err(|_| WindowsHelloStateError::Failed)?;
+                published = true;
                 let published = open_regular_file_guard_with_ancestor_guards(
                     &ancestors, &self.path, false, false,
                 )
@@ -491,7 +497,13 @@ impl WindowsHelloStateStore {
         if result.is_err() {
             let _ = remove_file_with_ancestor_guards(&ancestors, &staging_path);
         }
-        result
+        result.map_err(|_| {
+            if published {
+                WindowsHelloStateError::Published
+            } else {
+                WindowsHelloStateError::Failed
+            }
+        })
     }
 
     pub(crate) fn remove(&self) -> Result<(), WindowsHelloStateError> {
