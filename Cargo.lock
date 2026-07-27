@@ -435,6 +435,7 @@ dependencies = [
  "librarian-agent-protocol",
  "librarian-vault-core",
  "librarian-vault-format",
+ "librarian-windows-hello-agent",
  "minicbor",
  "rusqlite",
  "rustix",
@@ -462,6 +463,16 @@ name = "librarian-vault-format"
 version = "0.1.0"
 dependencies = [
  "minicbor",
+ "zeroize",
+]
+
+[[package]]
+name = "librarian-windows-hello-agent"
+version = "0.1.0"
+dependencies = [
+ "cc",
+ "librarian-vault-core",
+ "windows-sys",
  "zeroize",
 ]
 

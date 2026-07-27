@@ -80,6 +80,31 @@ namespace librarian::windows_hello
         static_assert(
             WEBAUTHN_CTAP_ONE_HMAC_SECRET_LENGTH ==
             librarian::windows_hello::prf_bytes);
+        static_assert(sizeof(GUID) == operation_id_bytes);
+
+        [[nodiscard]] bool valid_operation(
+            OperationId const& operation_id) noexcept
+        {
+            return std::any_of(
+                operation_id.begin(),
+                operation_id.end(),
+                [](std::uint8_t const byte)
+                {
+                    return byte != 0;
+                });
+        }
+
+        [[nodiscard]] GUID operation_guid(
+            OperationId const& operation_id) noexcept
+        {
+            GUID result{};
+            std::memcpy(
+                &result,
+                operation_id.data(),
+                operation_id.size());
+            return result;
+        }
+
         class failure final : public std::exception
         {
         public:
@@ -419,9 +444,13 @@ namespace librarian::windows_hello
             return std::move(*result.output);
         }
 
-        [[nodiscard]] Enrollment enroll(HWND const parent)
+        [[nodiscard]] Enrollment enroll(
+            HWND const parent,
+            OperationId const& operation_id)
         {
-            require(parent != nullptr, Error::InvalidArgument);
+            require(
+                parent != nullptr && valid_operation(operation_id),
+                Error::InvalidArgument);
             require(
                 WebAuthNGetApiVersionNumber() >= WEBAUTHN_API_VERSION_8,
                 Error::Unsupported);
@@ -472,6 +501,7 @@ namespace librarian::windows_hello
                 .cbFirst = static_cast<DWORD>(salt.size()),
                 .pbFirst = salt.data(),
             };
+            GUID cancellation_id = operation_guid(operation_id);
             WEBAUTHN_AUTHENTICATOR_MAKE_CREDENTIAL_OPTIONS options{
                 .dwVersion =
                     WEBAUTHN_AUTHENTICATOR_MAKE_CREDENTIAL_OPTIONS_VERSION_8,
@@ -483,6 +513,7 @@ namespace librarian::windows_hello
                     WEBAUTHN_USER_VERIFICATION_REQUIREMENT_REQUIRED,
                 .dwAttestationConveyancePreference =
                     WEBAUTHN_ATTESTATION_CONVEYANCE_PREFERENCE_NONE,
+                .pCancellationId = &cancellation_id,
                 .bEnablePrf = TRUE,
                 .pPRFGlobalEval = &requested_prf,
             };
@@ -551,12 +582,14 @@ namespace librarian::windows_hello
         [[nodiscard]] PrfOutput evaluate(
             HWND const parent,
             std::span<std::uint8_t const> const credential_id,
-            std::span<std::uint8_t const, prf_bytes> const salt)
+            std::span<std::uint8_t const, prf_bytes> const salt,
+            OperationId const& operation_id)
         {
             require(
                 parent != nullptr &&
                 !credential_id.empty() &&
-                credential_id.size() <= maximum_credential_id_bytes,
+                credential_id.size() <= maximum_credential_id_bytes &&
+                valid_operation(operation_id),
                 Error::InvalidArgument);
             require(
                 WebAuthNGetApiVersionNumber() >= WEBAUTHN_API_VERSION_8,
@@ -586,6 +619,7 @@ namespace librarian::windows_hello
                 random_challenge() +
                 R"(","origin":"https://librarian.local","crossOrigin":false})";
             WEBAUTHN_CLIENT_DATA const data = client_data(json);
+            GUID cancellation_id = operation_guid(operation_id);
             WEBAUTHN_AUTHENTICATOR_GET_ASSERTION_OPTIONS options{
                 .dwVersion =
                     WEBAUTHN_AUTHENTICATOR_GET_ASSERTION_OPTIONS_VERSION_6,
@@ -595,6 +629,7 @@ namespace librarian::windows_hello
                     WEBAUTHN_AUTHENTICATOR_ATTACHMENT_PLATFORM,
                 .dwUserVerificationRequirement =
                     WEBAUTHN_USER_VERIFICATION_REQUIREMENT_REQUIRED,
+                .pCancellationId = &cancellation_id,
                 .pHmacSecretSaltValues = &requested_values,
             };
 
@@ -642,13 +677,15 @@ namespace librarian::windows_hello
             available != FALSE;
     }
 
-    EnrollmentResult Enroll(HWND const parent) noexcept
+    EnrollmentResult Enroll(
+        HWND const parent,
+        OperationId const& operation_id) noexcept
     {
         try
         {
             return {
                 .error = Error::None,
-                .enrollment = enroll(parent),
+                .enrollment = enroll(parent, operation_id),
             };
         }
         catch (failure const& error)
@@ -664,13 +701,18 @@ namespace librarian::windows_hello
     EvaluationResult Evaluate(
         HWND const parent,
         std::span<std::uint8_t const> const credential_id,
-        std::span<std::uint8_t const, prf_bytes> const salt) noexcept
+        std::span<std::uint8_t const, prf_bytes> const salt,
+        OperationId const& operation_id) noexcept
     {
         try
         {
             return {
                 .error = Error::None,
-                .output = evaluate(parent, credential_id, salt),
+                .output = evaluate(
+                    parent,
+                    credential_id,
+                    salt,
+                    operation_id),
             };
         }
         catch (failure const& error)
@@ -681,6 +723,25 @@ namespace librarian::windows_hello
         {
             return {.error = Error::PlatformFailure};
         }
+    }
+
+    Error Cancel(OperationId const& operation_id) noexcept
+    {
+        if (!valid_operation(operation_id))
+        {
+            return Error::InvalidArgument;
+        }
+        GUID const cancellation_id = operation_guid(operation_id);
+        HRESULT const result =
+            WebAuthNCancelCurrentOperation(&cancellation_id);
+        if (SUCCEEDED(result))
+        {
+            return Error::None;
+        }
+        return
+            is_cancellation(result)
+                ? Error::Cancelled
+                : Error::PlatformFailure;
     }
 
     Error Remove(
@@ -695,7 +756,7 @@ namespace librarian::windows_hello
         HRESULT const result = WebAuthNDeletePlatformCredential(
             static_cast<DWORD>(credential_id.size()),
             credential_id.data());
-        if (SUCCEEDED(result))
+        if (SUCCEEDED(result) || result == NTE_NOT_FOUND)
         {
             return Error::None;
         }

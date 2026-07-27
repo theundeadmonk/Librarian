@@ -12,7 +12,9 @@
 namespace librarian::windows_hello
 {
     inline constexpr std::size_t prf_bytes = 32;
+    inline constexpr std::size_t operation_id_bytes = 16;
     inline constexpr std::size_t maximum_credential_id_bytes = 1'024;
+    using OperationId = std::array<std::uint8_t, operation_id_bytes>;
 
     enum class Error
     {
@@ -87,14 +89,20 @@ namespace librarian::windows_hello
     // Displays a Windows-owned user-verification prompt and creates one
     // platform credential for Librarian. On every failure after credential
     // creation, the credential is removed before the error is returned.
-    [[nodiscard]] EnrollmentResult Enroll(HWND parent) noexcept;
+    [[nodiscard]] EnrollmentResult Enroll(
+        HWND parent,
+        OperationId const& operation_id) noexcept;
 
     // Displays a Windows-owned user-verification prompt and evaluates PRF for
     // the exact enrolled credential and salt.
     [[nodiscard]] EvaluationResult Evaluate(
         HWND parent,
         std::span<std::uint8_t const> credential_id,
-        std::span<std::uint8_t const, prf_bytes> salt) noexcept;
+        std::span<std::uint8_t const, prf_bytes> salt,
+        OperationId const& operation_id) noexcept;
+
+    // Cancels only the ceremony carrying the supplied agent-generated ID.
+    [[nodiscard]] Error Cancel(OperationId const& operation_id) noexcept;
 
     // Removes only the supplied Librarian platform credential.
     [[nodiscard]] Error Remove(

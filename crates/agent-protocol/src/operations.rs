@@ -4,7 +4,7 @@ use zeroize::Zeroizing;
 use crate::{
     AgentState, MAX_PAYLOAD_BYTES, OperationCode, ProtocolError,
     cbor::{
-        SecretWriter, decode_bounded_text, decode_fixed_bytes, decode_u16, decode_u32,
+        SecretWriter, decode_bounded_text, decode_fixed_bytes, decode_u16, decode_u32, decode_u64,
         encode_array, encode_bytes, encode_null, encode_text, encode_u8, encode_u16, encode_u32,
         encode_u64, expect_array, require_end,
     },
@@ -90,6 +90,9 @@ pub enum OperationRequest {
     AddAccount { fields: AccountFields },
     UpdateAccount { id: [u8; 16], fields: AccountFields },
     DeleteAccount { id: [u8; 16] },
+    EnrollWindowsHello { parent_window: u64 },
+    UnlockWindowsHello { parent_window: u64 },
+    RemoveWindowsHello,
 }
 
 impl OperationRequest {
@@ -105,6 +108,9 @@ impl OperationRequest {
             Self::AddAccount { .. } => OperationCode::AddAccount,
             Self::UpdateAccount { .. } => OperationCode::UpdateAccount,
             Self::DeleteAccount { .. } => OperationCode::DeleteAccount,
+            Self::EnrollWindowsHello { .. } => OperationCode::EnrollWindowsHello,
+            Self::UnlockWindowsHello { .. } => OperationCode::UnlockWindowsHello,
+            Self::RemoveWindowsHello => OperationCode::RemoveWindowsHello,
         }
     }
 
@@ -139,6 +145,15 @@ impl OperationRequest {
     pub const fn account_fields(&self) -> Option<&AccountFields> {
         match self {
             Self::AddAccount { fields } | Self::UpdateAccount { fields, .. } => Some(fields),
+            _ => None,
+        }
+    }
+
+    #[must_use]
+    pub const fn parent_window(&self) -> Option<u64> {
+        match self {
+            Self::EnrollWindowsHello { parent_window }
+            | Self::UnlockWindowsHello { parent_window } => Some(*parent_window),
             _ => None,
         }
     }
@@ -210,9 +225,27 @@ impl OperationRequest {
                     id: decode_fixed_bytes(&mut decoder)?,
                 }
             }
-            OperationCode::EnrollWindowsHello
-            | OperationCode::RemoveWindowsHello
-            | OperationCode::ExactOriginMatches
+            OperationCode::EnrollWindowsHello => {
+                expect_array(&mut decoder, 1)?;
+                let parent_window = decode_u64(&mut decoder)?;
+                if parent_window == 0 {
+                    return Err(ProtocolError::InvariantViolation);
+                }
+                Self::EnrollWindowsHello { parent_window }
+            }
+            OperationCode::UnlockWindowsHello => {
+                expect_array(&mut decoder, 1)?;
+                let parent_window = decode_u64(&mut decoder)?;
+                if parent_window == 0 {
+                    return Err(ProtocolError::InvariantViolation);
+                }
+                Self::UnlockWindowsHello { parent_window }
+            }
+            OperationCode::RemoveWindowsHello => {
+                expect_array(&mut decoder, 0)?;
+                Self::RemoveWindowsHello
+            }
+            OperationCode::ExactOriginMatches
             | OperationCode::GetSelectedCredential
             | OperationCode::CaptureCredential
             | OperationCode::UpdateCredential
@@ -248,7 +281,9 @@ impl OperationRequest {
         }
         let mut encoder = Encoder::new(SecretWriter::with_capacity(MAX_PAYLOAD_BYTES));
         match self {
-            Self::Status | Self::Lock => encode_array(&mut encoder, 0),
+            Self::Status | Self::Lock | Self::RemoveWindowsHello => {
+                encode_array(&mut encoder, 0);
+            }
             Self::CreateVault { master_password }
             | Self::UnlockMasterPassword { master_password } => {
                 encode_array(&mut encoder, 1);
@@ -271,6 +306,14 @@ impl OperationRequest {
                 encode_array(&mut encoder, 5);
                 encode_bytes(&mut encoder, id);
                 encode_account_fields(&mut encoder, fields);
+            }
+            Self::EnrollWindowsHello { parent_window }
+            | Self::UnlockWindowsHello { parent_window } => {
+                if *parent_window == 0 {
+                    return Err(ProtocolError::InvariantViolation);
+                }
+                encode_array(&mut encoder, 1);
+                encode_u64(&mut encoder, *parent_window);
             }
         }
         checked_request_body(encoder.into_writer().into_bytes())

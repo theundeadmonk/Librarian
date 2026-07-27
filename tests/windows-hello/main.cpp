@@ -1,4 +1,5 @@
 #include "librarian/windows_hello/client.h"
+#include "librarian/windows_hello/bridge.h"
 #include "validation.h"
 
 #include <webauthn.h>
@@ -232,20 +233,60 @@ namespace
     void public_contract_tests()
     {
         std::array<std::uint8_t, 32> salt{};
+        librarian::windows_hello::OperationId operation_id{};
+        operation_id[0] = 1;
         require(
-            librarian::windows_hello::Enroll(nullptr).error ==
+            librarian::windows_hello::Enroll(
+                nullptr,
+                operation_id).error ==
                 Error::InvalidArgument,
             "null enrollment parent was accepted");
         require(
             librarian::windows_hello::Evaluate(
                 nullptr,
                 {},
-                salt).error == Error::InvalidArgument,
+                salt,
+                operation_id).error == Error::InvalidArgument,
             "invalid evaluation request was accepted");
+        require(
+            librarian::windows_hello::Cancel({}) ==
+                Error::InvalidArgument,
+            "empty cancellation identifier was accepted");
         require(
             librarian::windows_hello::Remove({}) ==
                 Error::InvalidArgument,
             "empty credential removal was accepted");
+
+        std::array<std::uint8_t, 32> bridge_output{};
+        bridge_output.fill(0x7A);
+        require(
+            librarian_windows_hello_evaluate(
+                0,
+                operation_id.data(),
+                static_cast<std::uint32_t>(operation_id.size()),
+                nullptr,
+                0,
+                salt.data(),
+                static_cast<std::uint32_t>(salt.size()),
+                bridge_output.data(),
+                static_cast<std::uint32_t>(bridge_output.size())) ==
+                librarian_windows_hello_invalid_argument,
+            "bridge accepted an invalid evaluation request");
+        require(
+            std::all_of(
+                bridge_output.begin(),
+                bridge_output.end(),
+                [](std::uint8_t const byte)
+                {
+                    return byte == 0;
+                }),
+            "bridge did not clear PRF output before returning");
+        require(
+            librarian_windows_hello_cancel(
+                nullptr,
+                0) ==
+                librarian_windows_hello_invalid_argument,
+            "bridge accepted an invalid cancellation request");
 
         std::array<std::uint8_t, 32> secret{};
         secret.fill(0x7A);

@@ -589,6 +589,27 @@ Only the desktop may submit a master password. Password buffers are single-use,
 bounded, cleared immediately after the agent copies them into its secret type,
 and never echoed.
 
+Issue #15 publishes agent-owned Windows Hello operations in protocol 1.1.
+Enrollment and removal require the current unlocked epoch and an idempotency
+key. Unlock begins from the locked state and binds both admission and terminal
+publication to the epoch observed before the Windows prompt. Lock, disconnect,
+cancellation, timeout, or any intervening epoch change invalidates the
+completion.
+
+Enrollment and unlock requests contain only a nonzero parent-window value.
+Before invoking Windows, the agent requires that the window exists and that
+`GetWindowThreadProcessId` matches the already authenticated desktop peer
+process. The agent selects the stored credential, salt, protector, and
+installation key, invokes the native ceremony itself, and consumes the PRF
+result inside its process. Removal has an empty body. No Windows Hello request
+or response contains a credential ID, PRF salt, PRF output, protector,
+installation key, VRK, or other secret material.
+
+Protocol 1.0 continues to reject these operation bodies as unsupported.
+Negotiation of the Windows Hello feature requires minor version 1 and the
+corresponding explicit feature identifier. An older peer cannot infer support
+from reserved operation numbers.
+
 ### Chromium native-messaging host
 
 The native host may request:
@@ -654,11 +675,12 @@ Version 1 defaults:
 | Cached mutation idempotency outcomes in the replay window | 1,024 |
 | Peer-authentication retry delay | 25 ms exponential backoff, 1 second cap |
 | Concurrent password KDF operations | 1 |
+| Concurrent Windows Hello ceremonies | 1 |
 | Concurrent vault mutations | 1 |
 | Concurrent lock transitions | 1 |
 | Ordinary operation deadline | 5 seconds |
 | Password KDF or lock-transition deadline | 30 seconds |
-| Windows-mediated passkey transaction | 120 seconds |
+| Windows-mediated Hello or passkey transaction | 120 seconds |
 | Event queue per connection | 8 |
 
 All limits apply before unbounded allocation or work. The server may advertise

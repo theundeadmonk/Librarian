@@ -5,9 +5,9 @@ use std::{
 
 use crate::{
     AgentState, CURRENT_VERSION, ClientHello, ClientRole, FrameHeader,
-    MAX_IN_FLIGHT_PER_CONNECTION, MAX_PAYLOAD_BYTES, MIN_NEGOTIATED_PAYLOAD_BYTES, MessageKind,
-    OperationCode, PASSKEY_TIMEOUT_MS, RequestEnvelope, ResponseEnvelope, ServerHello,
-    UNLOCK_TIMEOUT_MS, Version,
+    MAX_IN_FLIGHT_PER_CONNECTION, MAX_PAYLOAD_BYTES, MIN_NEGOTIATED_PAYLOAD_BYTES, MINIMUM_VERSION,
+    MessageKind, OperationCode, PASSKEY_TIMEOUT_MS, RequestEnvelope, ResponseEnvelope, ServerHello,
+    UNLOCK_TIMEOUT_MS, Version, WINDOWS_HELLO_VERSION,
 };
 
 /// Bounded number of issued IDs retained to distinguish a completed request
@@ -144,6 +144,8 @@ enum RequestState {
 pub struct Connection {
     role: ClientRole,
     version: Version,
+    authenticated_process_id: u32,
+    granted_features: Vec<u16>,
     connection_id: [u8; 16],
     limits: ConnectionLimits,
     state: Mutex<ConnectionState>,
@@ -169,6 +171,7 @@ impl Connection {
     #[allow(clippy::too_many_arguments)]
     pub fn negotiate(
         derived_role: ClientRole,
+        authenticated_process_id: u32,
         expected_build_id: [u8; 32],
         hello: &ClientHello,
         supported_features: &[u16],
@@ -184,7 +187,11 @@ impl Connection {
         if hello.component_build_id() != &expected_build_id {
             return Err(ConnectionError::BuildMismatch);
         }
-        if hello.minimum() > CURRENT_VERSION || hello.maximum() < CURRENT_VERSION {
+        let selected_version = hello.maximum().min(CURRENT_VERSION);
+        if hello.minimum() > selected_version
+            || selected_version < MINIMUM_VERSION
+            || selected_version.major() != CURRENT_VERSION.major()
+        {
             return Err(ConnectionError::IncompatibleVersion);
         }
         if supported_features.windows(2).any(|pair| pair[0] >= pair[1]) {
@@ -197,16 +204,19 @@ impl Connection {
         {
             return Err(ConnectionError::UnsupportedFeature);
         }
-        if server_nonce == [0; 32] || connection_id == [0; 16] {
+        if !hello.required_features().is_empty() && selected_version < WINDOWS_HELLO_VERSION {
+            return Err(ConnectionError::UnsupportedFeature);
+        }
+        if authenticated_process_id == 0 || server_nonce == [0; 32] || connection_id == [0; 16] {
             return Err(ConnectionError::InvalidRandomValue);
         }
 
         let granted_features = hello.required_features().to_vec();
         let response = ServerHello::new(
             server_nonce,
-            CURRENT_VERSION,
+            selected_version,
             derived_role,
-            granted_features,
+            granted_features.clone(),
             limits.maximum_payload_bytes,
             limits.maximum_in_flight,
             agent_state,
@@ -216,7 +226,9 @@ impl Connection {
         Ok((
             Self {
                 role: derived_role,
-                version: CURRENT_VERSION,
+                version: selected_version,
+                authenticated_process_id,
+                granted_features,
                 connection_id,
                 limits,
                 state: Mutex::new(ConnectionState {
@@ -238,6 +250,11 @@ impl Connection {
     #[must_use]
     pub const fn version(&self) -> Version {
         self.version
+    }
+
+    #[must_use]
+    pub const fn authenticated_process_id(&self) -> u32 {
+        self.authenticated_process_id
     }
 
     #[must_use]
@@ -282,6 +299,13 @@ impl Connection {
         Self::record_request_id(&mut state, header.request_id())?;
 
         if !request.operation().is_authorized_for(self.role) {
+            return Err(BeginRequestError::Unauthorized);
+        }
+        if request
+            .operation()
+            .required_feature()
+            .is_some_and(|feature| self.granted_features.binary_search(&feature).is_err())
+        {
             return Err(BeginRequestError::Unauthorized);
         }
         if request.operation().requires_idempotency_key() && request.idempotency_key().is_none() {
@@ -435,7 +459,10 @@ fn effective_timeout(operation: OperationCode, requested: u32) -> u32 {
         }
         OperationCode::MakePasskey
         | OperationCode::GetPasskeyAssertion
-        | OperationCode::DeletePasskey => PASSKEY_TIMEOUT_MS,
+        | OperationCode::DeletePasskey
+        | OperationCode::EnrollWindowsHello
+        | OperationCode::UnlockWindowsHello
+        | OperationCode::RemoveWindowsHello => PASSKEY_TIMEOUT_MS,
         _ => crate::ORDINARY_TIMEOUT_MS,
     };
     requested.min(maximum)

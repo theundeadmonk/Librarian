@@ -1,11 +1,11 @@
 use librarian_agent_protocol::{
     AccountFields, AccountView, AgentEvent, AgentState, BeginRequestError, CURRENT_VERSION,
     ClientHello, ClientRole, Connection, ConnectionError, ConnectionLimits, CorrelationId,
-    EndpointDescriptor, EventQueue, Frame, FrameError, FrameHeader, MAX_EVENT_QUEUE,
-    MAX_PAYLOAD_BYTES, MIN_NEGOTIATED_PAYLOAD_BYTES, MessageKind, ORDINARY_TIMEOUT_MS,
-    OperationCode, OperationRequest, ProtocolError, PublicErrorCode, RequestCompletion,
-    RequestEnvelope, ResponseEnvelope, RetryCategory, UNLOCK_TIMEOUT_MS, Version, encode_account,
-    encode_account_summaries,
+    EndpointDescriptor, EventQueue, FEATURE_WINDOWS_HELLO, Frame, FrameError, FrameHeader,
+    MAX_EVENT_QUEUE, MAX_PAYLOAD_BYTES, MIN_NEGOTIATED_PAYLOAD_BYTES, MessageKind,
+    ORDINARY_TIMEOUT_MS, OperationCode, OperationRequest, ProtocolError, PublicErrorCode,
+    RequestCompletion, RequestEnvelope, ResponseEnvelope, RetryCategory, UNLOCK_TIMEOUT_MS,
+    Version, encode_account, encode_account_summaries,
 };
 use zeroize::Zeroizing;
 
@@ -29,6 +29,7 @@ fn hello(role: ClientRole) -> ClientHello {
 fn connection(role: ClientRole) -> Connection {
     Connection::negotiate(
         role,
+        17,
         BUILD_ID,
         &hello(role),
         &[1, 4, 7],
@@ -143,6 +144,7 @@ fn handshake_and_discovery_encodings_are_canonical() {
 
     let (_, server) = Connection::negotiate(
         ClientRole::Desktop,
+        17,
         BUILD_ID,
         &client,
         &[1, 4],
@@ -305,9 +307,35 @@ fn implemented_operation_bodies_are_canonical_bounded_and_strict() {
         OperationRequest::decode(OperationCode::AddAccount, &trailing),
         Err(ProtocolError::Malformed)
     ));
+    for operation in [
+        OperationRequest::EnrollWindowsHello {
+            parent_window: 0x1234,
+        },
+        OperationRequest::UnlockWindowsHello {
+            parent_window: 0x5678,
+        },
+    ] {
+        let encoded = operation.encode().expect("Hello body");
+        let decoded = OperationRequest::decode(operation.operation(), &encoded)
+            .expect("canonical Hello body");
+        assert_eq!(decoded.operation(), operation.operation());
+        assert_eq!(decoded.parent_window(), operation.parent_window());
+    }
+    let removal = OperationRequest::RemoveWindowsHello;
+    let encoded = removal.encode().expect("removal body");
+    assert_eq!(
+        OperationRequest::decode(OperationCode::RemoveWindowsHello, &encoded)
+            .expect("canonical removal")
+            .operation(),
+        OperationCode::RemoveWindowsHello
+    );
+    assert!(matches!(
+        OperationRequest::EnrollWindowsHello { parent_window: 0 }.encode(),
+        Err(ProtocolError::InvariantViolation)
+    ));
     assert_eq!(
         OperationRequest::decode(OperationCode::EnrollWindowsHello, &[0x80]).map(|_| ()),
-        Err(ProtocolError::Unsupported)
+        Err(ProtocolError::Malformed)
     );
 
     for limit in [0, 101] {
@@ -323,6 +351,7 @@ fn handshake_claims_never_grant_authority() {
     assert!(matches!(
         Connection::negotiate(
             ClientRole::NativeHost,
+            17,
             BUILD_ID,
             &hello(ClientRole::Desktop),
             &[1, 4],
@@ -338,6 +367,7 @@ fn handshake_claims_never_grant_authority() {
     assert!(matches!(
         Connection::negotiate(
             ClientRole::Desktop,
+            17,
             [0xFF; 32],
             &hello(ClientRole::Desktop),
             &[1, 4],
@@ -352,7 +382,7 @@ fn handshake_claims_never_grant_authority() {
 }
 
 #[test]
-fn incompatible_versions_features_and_restart_connections_fail_closed() {
+fn incompatible_versions_fail_closed() {
     let old = ClientHello::new(
         CLIENT_NONCE,
         Version::new(2, 0),
@@ -365,6 +395,7 @@ fn incompatible_versions_features_and_restart_connections_fail_closed() {
     assert!(matches!(
         Connection::negotiate(
             ClientRole::Desktop,
+            17,
             BUILD_ID,
             &old,
             &[],
@@ -376,7 +407,10 @@ fn incompatible_versions_features_and_restart_connections_fail_closed() {
         ),
         Err(ConnectionError::IncompatibleVersion)
     ));
+}
 
+#[test]
+fn unknown_features_fail_closed() {
     let unknown_feature = ClientHello::new(
         CLIENT_NONCE,
         CURRENT_VERSION,
@@ -389,6 +423,7 @@ fn incompatible_versions_features_and_restart_connections_fail_closed() {
     assert!(matches!(
         Connection::negotiate(
             ClientRole::Desktop,
+            17,
             BUILD_ID,
             &unknown_feature,
             &[],
@@ -400,12 +435,57 @@ fn incompatible_versions_features_and_restart_connections_fail_closed() {
         ),
         Err(ConnectionError::UnsupportedFeature)
     ));
+}
 
+#[test]
+fn legacy_protocol_versions_cannot_use_windows_hello() {
+    let version_one = ClientHello::new(
+        CLIENT_NONCE,
+        Version::new(1, 0),
+        Version::new(1, 0),
+        ClientRole::Desktop,
+        BUILD_ID,
+        Vec::new(),
+    )
+    .expect("well-formed version 1.0 hello");
+    let old_protocol = Connection::negotiate(
+        ClientRole::Desktop,
+        17,
+        BUILD_ID,
+        &version_one,
+        &[FEATURE_WINDOWS_HELLO],
+        SERVER_NONCE,
+        CONNECTION_ID,
+        AgentState::Locked,
+        1,
+        ConnectionLimits::default(),
+    )
+    .expect("version 1.0 remains compatible")
+    .0;
+    assert_eq!(old_protocol.version(), Version::new(1, 0));
+    let hello_unlock = request(OperationCode::UnlockWindowsHello, 1, None);
+    let hello_header = FrameHeader::new(
+        MessageKind::Request,
+        Version::new(1, 0),
+        hello_unlock.encode().expect("request").len(),
+        CONNECTION_ID,
+        1,
+    )
+    .expect("version 1.0 header");
+    assert_eq!(
+        old_protocol.begin_request(&hello_header, &hello_unlock, 1),
+        Err(BeginRequestError::Unauthorized)
+    );
+}
+
+#[test]
+fn restarted_connections_reject_old_frames() {
     let old_connection = connection(ClientRole::Desktop);
     let old_request = request(OperationCode::Status, 0, None);
     let old_header = request_header(1, old_request.encode().expect("request").len());
     let restarted = Connection::negotiate(
         ClientRole::Desktop,
+        17,
         BUILD_ID,
         &hello(ClientRole::Desktop),
         &[1, 4, 7],
@@ -513,6 +593,7 @@ fn negotiated_payload_limit_bounds_every_response_envelope() {
     .expect("minimum usable limits");
     let connection = Connection::negotiate(
         ClientRole::Desktop,
+        17,
         BUILD_ID,
         &hello(ClientRole::Desktop),
         &[1, 4, 7],
