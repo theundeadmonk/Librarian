@@ -22,9 +22,10 @@ has a user-verifying platform authenticator. A missing authenticator is a
 supported fail-closed state, so the CI-safe self-test does not display Windows
 Hello UI and does not fail merely because Hello is not enrolled. It also uses
 synthetic assertions and injected API results to reject malformed
-authenticator data, missing user-verification flags, wrong credentials,
-missing or malformed PRF output, salt-independent output, cancellation, and
-credential-deletion failure without creating a real credential.
+authenticator data, wrong relying-party hashes, missing user-verification
+flags, wrong credentials, missing or malformed PRF output, salt-independent
+output, cancellation, and credential-deletion failure without creating a real
+credential.
 
 ## Explicit manual test
 

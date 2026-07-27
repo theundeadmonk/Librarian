@@ -28,10 +28,12 @@ namespace
         L"Librarian disposable local probe";
     constexpr std::size_t secret_bytes = WEBAUTHN_CTAP_ONE_HMAC_SECRET_LENGTH;
     constexpr std::size_t authenticator_data_minimum_bytes = 37;
+    constexpr std::size_t relying_party_id_hash_bytes = 32;
     constexpr std::size_t authenticator_flags_offset = 32;
     constexpr std::uint8_t authenticator_user_verified_flag = 0x04;
 
     static_assert(secret_bytes == 32);
+    static_assert(relying_party_id_hash_bytes == authenticator_flags_offset);
 
     class credential_attestation final
     {
@@ -392,6 +394,79 @@ namespace
         }
     }
 
+    [[nodiscard]] std::array<std::uint8_t, relying_party_id_hash_bytes> const&
+    relying_party_id_hash()
+    {
+        static std::array<std::uint8_t, relying_party_id_hash_bytes> const hash =
+            []()
+            {
+                constexpr int relying_party_id_characters = static_cast<int>(
+                    (sizeof(relying_party_id) /
+                     sizeof(relying_party_id[0])) -
+                    1);
+                int const utf8_bytes = WideCharToMultiByte(
+                    CP_UTF8,
+                    WC_ERR_INVALID_CHARS,
+                    relying_party_id,
+                    relying_party_id_characters,
+                    nullptr,
+                    0,
+                    nullptr,
+                    nullptr);
+                if (utf8_bytes <= 0)
+                {
+                    throw std::runtime_error(
+                        "The relying-party identifier is invalid.");
+                }
+                std::vector<std::uint8_t> utf8(
+                    static_cast<std::size_t>(utf8_bytes));
+                if (WideCharToMultiByte(
+                        CP_UTF8,
+                        WC_ERR_INVALID_CHARS,
+                        relying_party_id,
+                        relying_party_id_characters,
+                        reinterpret_cast<char*>(utf8.data()),
+                        utf8_bytes,
+                        nullptr,
+                        nullptr) != utf8_bytes)
+                {
+                    throw std::runtime_error(
+                        "The relying-party identifier is invalid.");
+                }
+
+                BCRYPT_ALG_HANDLE algorithm = nullptr;
+                NTSTATUS const open_result = BCryptOpenAlgorithmProvider(
+                    &algorithm,
+                    BCRYPT_SHA256_ALGORITHM,
+                    nullptr,
+                    0);
+                if (open_result < 0)
+                {
+                    throw std::runtime_error(
+                        "Operating-system SHA-256 is unavailable.");
+                }
+
+                std::array<std::uint8_t, relying_party_id_hash_bytes> value{};
+                NTSTATUS const hash_result = BCryptHash(
+                    algorithm,
+                    nullptr,
+                    0,
+                    utf8.data(),
+                    static_cast<ULONG>(utf8.size()),
+                    value.data(),
+                    static_cast<ULONG>(value.size()));
+                NTSTATUS const close_result =
+                    BCryptCloseAlgorithmProvider(algorithm, 0);
+                if (hash_result < 0 || close_result < 0)
+                {
+                    throw std::runtime_error(
+                        "Operating-system SHA-256 is unavailable.");
+                }
+                return value;
+            }();
+        return hash;
+    }
+
     [[nodiscard]] WEBAUTHN_CLIENT_DATA client_data(
         std::string_view const json) noexcept
     {
@@ -426,6 +501,12 @@ namespace
             value->pbAuthenticatorData != nullptr &&
                 value->cbAuthenticatorData >= authenticator_data_minimum_bytes,
             "Windows returned malformed WebAuthn credential authenticator data.");
+        require(
+            std::equal(
+                relying_party_id_hash().begin(),
+                relying_party_id_hash().end(),
+                value->pbAuthenticatorData),
+            "Windows created a WebAuthn credential for the wrong relying party.");
         require(
             (value->pbAuthenticatorData[authenticator_flags_offset] &
              authenticator_user_verified_flag) != 0,
@@ -581,6 +662,12 @@ namespace
                     authenticator_data_minimum_bytes,
             "Windows returned malformed WebAuthn authenticator data.");
         require(
+            std::equal(
+                relying_party_id_hash().begin(),
+                relying_party_id_hash().end(),
+                value->pbAuthenticatorData),
+            "Windows returned a WebAuthn assertion for the wrong relying party.");
+        require(
             (value->pbAuthenticatorData[authenticator_flags_offset] &
              authenticator_user_verified_flag) != 0,
             "Windows returned a WebAuthn assertion without user verification.");
@@ -712,6 +799,10 @@ namespace
     {
         synthetic_assertion_fixture()
         {
+            std::copy(
+                relying_party_id_hash().begin(),
+                relying_party_id_hash().end(),
+                authenticator_data.begin());
             authenticator_data[authenticator_flags_offset] =
                 authenticator_user_verified_flag;
             prf_bytes.fill(0xA5);
@@ -748,6 +839,10 @@ namespace
     {
         synthetic_attestation_fixture()
         {
+            std::copy(
+                relying_party_id_hash().begin(),
+                relying_party_id_hash().end(),
+                authenticator_data.begin());
             authenticator_data[authenticator_flags_offset] =
                 authenticator_user_verified_flag;
             prf_bytes.fill(0x5A);
@@ -794,6 +889,16 @@ namespace
                     (void)validated_secret_from_attestation(&fixture.value);
                 },
                 "without creation-time WebAuthn PRF fields");
+        }
+        {
+            synthetic_attestation_fixture fixture;
+            fixture.authenticator_data.front() ^= 0xFF;
+            require_failure(
+                [&fixture]()
+                {
+                    (void)validated_secret_from_attestation(&fixture.value);
+                },
+                "wrong relying party");
         }
         {
             synthetic_attestation_fixture fixture;
@@ -886,6 +991,18 @@ namespace
                         fixture.credential_identifier);
                 },
                 "malformed WebAuthn authenticator data");
+        }
+        {
+            synthetic_assertion_fixture fixture;
+            fixture.authenticator_data.front() ^= 0xFF;
+            require_failure(
+                [&fixture]()
+                {
+                    (void)validated_secret_from_assertion(
+                        &fixture.value,
+                        fixture.credential_identifier);
+                },
+                "wrong relying party");
         }
         {
             synthetic_assertion_fixture fixture;
@@ -1078,8 +1195,8 @@ namespace
         std::cout << "[PASS] user-verifying platform authenticator: "
                   << (available ? "available" : "not available (fail closed)")
                   << '\n'
-                  << "[PASS] malformed, missing-UV, missing-PRF, and wrong-transport attestations rejected\n"
-                  << "[PASS] malformed, wrong-credential, missing-UV, and missing-PRF assertions rejected\n"
+                  << "[PASS] malformed, wrong-RP, missing-UV, missing-PRF, and wrong-transport attestations rejected\n"
+                  << "[PASS] malformed, wrong-RP, wrong-credential, missing-UV, and missing-PRF assertions rejected\n"
                   << "[PASS] cancellation and credential-cleanup failures surfaced\n"
                   << "[PASS] creation/assertion stability and different-salt independence enforced\n"
                   << "7 passed; 0 failed\n";
