@@ -839,7 +839,7 @@ try {
         -AccountNeverExpires `
         -PasswordNeverExpires `
         -UserMayNotChangePassword `
-        -Description "Disposable Librarian issue 19 GitHub Actions user"
+        -Description "Disposable Librarian installer test user"
     $disposableUserCredential = [PSCredential]::new(
         "$env:COMPUTERNAME\$disposableUserName",
         $disposablePassword
