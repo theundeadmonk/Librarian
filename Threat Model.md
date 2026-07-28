@@ -85,7 +85,7 @@ User-controlled inputs include the master password, website account data, explic
 | P-06 | C++/WinRT passkey provider | Thin transaction client. It must never receive or persist a passkey private key or request an arbitrary vault record. | Windows passkey provider |
 | P-07 | Windows WebAuthn broker, Windows Hello, and key-protection services | Platform trust anchor for native user verification and passkey routing. Results, cancellation, and transaction fields are still validated. | Windows platform integration |
 | P-08 | OneDrive or Google Drive desktop sync client | External local process that can read and replace files in the selected synchronized folder. It receives only opaque authenticated backups. | Backup integration |
-| P-09 | MSIX/App Installer process | Privileged native code-delivery boundary. Must maintain signer, package identity, registration, version, ACL, and rollback policy. | Native packaging and release |
+| P-09 | Librarian setup, Windows Installer, and identity-package registration | Privileged native code-delivery boundary. Must maintain signer, package identity, registration, version, ACL, transactional servicing, and rollback policy. | Native packaging and release |
 | P-10 | Chrome/Edge extension updater | Separate privileged browser code-delivery boundary. Must maintain the approved extension identity, publisher, version, and compatibility policy. | Extension packaging and release |
 | P-11 | Windows eventing, diagnostics, and crash-reporting processes | Untrusted disclosure sink. Structured metadata only; secret values and raw payloads are prohibited. | Every emitting component |
 
@@ -129,7 +129,7 @@ flowchart LR
 
     subgraph Windows["Windows security and delivery"]
         Hello["P-07 Windows Hello and key protection"]
-        NativePackage["P-09 MSIX and App Installer"]
+        NativePackage["P-09 Setup, MSI, and identity MSIX"]
         BrowserUpdate["P-10 Extension updater"]
         Diag["P-11 Diagnostics and crash reporting"]
         Artifacts[("D-04 Logs, temporary files, and crash artifacts")]
@@ -177,7 +177,7 @@ flowchart LR
 | F-04 Password selection and fill | P-02 derives browser context, P-03 validates the extension message, P-04 returns minimum display metadata and then the one selected credential. | P-04 → P-03 → P-02 carries bounded A-11 metadata; P-04 → P-03 → P-02 → P-01 carries one A-05 value for one authorized operation. | Origin ambiguity, background navigation, lock, timeout, mismatched selection, or protocol failure returns no secret. |
 | F-05 Passkey create, assert, and delete | P-07 supplies a WebAuthn transaction through P-06. P-04 authorizes the operation and generates or uses A-06 without exporting the private key. | A-06 remains in P-04; only public credential material or a transaction-bound signature returns through P-06. | RP mismatch, unsupported algorithm, cancellation, replay, lock, stale transaction, or failed persistence returns no success result. |
 | F-06 Vault and backup persistence | P-04 validates, encrypts, authenticates, versions, and transactionally writes D-01 or D-02; P-08 synchronizes D-02 to D-03. | Only C: authenticated ciphertext leaves P-04. | Parse or authentication failure, rollback, interrupted write, partial synchronization, or unsafe replacement never opens a partial vault or replaces the last known-good file. |
-| F-07 Install and upgrade | P-09 installs and registers native components; P-10 independently installs P-02. Both must preserve one compatible product boundary. | No runtime secret should cross this flow; signing keys remain outside the repository and endpoints. | Unsigned, untrusted, downgraded, partially installed, or protocol-incompatible components cannot connect to an unlocked agent. |
+| F-07 Install and upgrade | P-09 installs and registers native components and selected native-browser integrations; P-10 independently installs P-02 with user consent. Both must preserve one compatible product boundary. | No runtime secret should cross this flow; signing keys remain outside the repository and endpoints. | Unsigned, untrusted, downgraded, partially installed, or protocol-incompatible components cannot connect to an unlocked agent. |
 | F-08 Diagnostics and crashes | Components emit structured operational events through P-11 into D-04 and may be terminated at any instruction boundary. | No secret-bearing crossing is permitted. | Crash, panic, exception, or dump collection locks on restart, invalidates pending operations, and never deliberately serializes raw secret state. |
 
 ### Password-fill sequence
@@ -243,7 +243,7 @@ sequenceDiagram
 | TB-07 Agent ↔ Windows Hello and key protection | Vault agent and Windows platform integration | Use a system-owned prompt and device-bound wrapper; bind completion to the current unlock epoch; never treat cancellation as success. | No enrollment, cancellation at every stage, delayed callback after lock, wrong Windows session, wrapper corruption, and restart tests in #15. |
 | TB-08 Agent ↔ vault files | Vault format and vault agent | Authenticate before interpretation, enforce format/resource limits, use transactional writes, and detect unsupported versions and rollback according to #9. | Bit flips, truncation, reordering, duplicate fields, oversized lengths, old version, rollback, interrupted write, and migration failure tests in #9 and [#10](https://github.com/theundeadmonk/Librarian/issues/10). |
 | TB-09 Agent ↔ backup/sync/cloud | Backup writer and restore validator | Write only authenticated ciphertext; use safe rotation; validate into quarantine; never replace the live vault before complete verification. | Partial sync, stale generation, replay, rename race, cloud deletion, corrupt recovery metadata, wrong key, and clean-profile restore tests in #9 and #20. |
-| TB-10 Release source ↔ installed components | Packaging and release | Verify trusted signers and identities; prevent downgrade; install compatible components and registrations atomically or leave them disconnected. | Unsigned/tampered package, wrong signer, mixed versions, stale extension, interrupted upgrade, repair, rollback, and uninstall tests in #19. |
+| TB-10 Release source ↔ installed components | Packaging and release | Verify trusted signers, identities, versions, and payload hashes; prevent downgrade; install compatible components and Librarian-owned registrations transactionally or leave them disconnected. Browser extensions remain separate user-consented store installations. | Unsigned/tampered setup, MSI, identity package, or PE; wrong signer; mixed versions; stale extension; interrupted upgrade; repair; rollback; browser opt-in/out; and uninstall tests in #19. |
 | TB-11 Process ↔ diagnostics/crash artifacts | Every component | Redact by construction; never log raw requests, records, cryptographic buffers, or secrets; invalidate state after crashes. | Seed unique disposable canary secrets, exercise errors/crashes, and scan logs, event records, temp files, and configured dumps in #20. |
 
 ### Security invariants
@@ -265,7 +265,7 @@ sequenceDiagram
 
 ### Security assumptions
 
-- Supported Windows 11 security boundaries, per-user isolation, Windows Hello, WebAuthn, DPAPI/CNG or the later selected key-protection API, MSIX signature validation, Chrome, and Edge behave according to their supported contracts.
+- Supported Windows 11 security boundaries, per-user isolation, Windows Hello, WebAuthn, DPAPI/CNG or the later selected key-protection API, Windows Installer, MSIX identity registration and signature validation, Chrome, and Edge behave according to their supported contracts.
 - The user installs Librarian through an approved signed channel and keeps Windows and the supported browser within the eventual security-support window.
 - The user can recognize a Windows-owned Hello prompt and the native Librarian app, but is not expected to understand origins, keys, protocols, or cryptographic choices.
 - The agent can obtain a verifiable client identity or a defensible authorization mechanism from the transport selected by #12. If Windows cannot provide the required property, the architecture must be revised rather than treating a weak signal as authentication.

@@ -28,7 +28,7 @@
   </Resources>
   <Applications>
     <Application
-      Id="App"
+      Id="Desktop"
       Executable="$targetnametoken$.exe"
       EntryPoint="$targetentrypoint$">
       <uap:VisualElements

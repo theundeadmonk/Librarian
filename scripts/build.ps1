@@ -254,6 +254,46 @@ Invoke-CheckedProcess `
     -Arguments $msbuildArguments `
     -WorkingDirectory $repoRoot
 
+if ($Configuration -eq "Release") {
+    $manifestTool = Join-Path $windowsSdkBin "mt.exe"
+    Invoke-CheckedProcess `
+        -Label "Release binary package-identity validation" `
+        -FilePath (Join-Path $PSHOME "powershell.exe") `
+        -Arguments @(
+            "-NoProfile"
+            "-ExecutionPolicy"
+            "Bypass"
+            "-File"
+            "scripts\test-embedded-identity.ps1"
+            "-MtPath"
+            ('"' + $manifestTool + '"')
+            "-Configuration"
+            $Configuration
+            "-Platform"
+            $Platform
+        ) `
+        -WorkingDirectory $repoRoot
+}
+
+$makeAppx = Join-Path $nugetWindowsSdkBin "MakeAppx.exe"
+if (-not (Test-Path $makeAppx)) {
+    throw "The locked MakeAppx.exe was not restored at '$makeAppx'."
+}
+
+Invoke-CheckedProcess `
+    -Label "Unsigned identity package fixture" `
+    -FilePath (Join-Path $PSHOME "powershell.exe") `
+    -Arguments @(
+        "-NoProfile"
+        "-ExecutionPolicy"
+        "Bypass"
+        "-File"
+        "scripts\build-identity-package.ps1"
+        "-MakeAppxPath"
+        ('"' + $makeAppx + '"')
+    ) `
+    -WorkingDirectory $repoRoot
+
 $ipcProbe = Join-Path $repoRoot (
     "artifacts\bin\$Platform\$Configuration\Librarian.WindowsIpcProbe.exe"
 )

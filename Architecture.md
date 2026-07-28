@@ -60,7 +60,7 @@ The **local vault agent** is the trust center. It is the only long-lived process
 | Browser extension | TypeScript, Chromium Manifest V3 | Detect sign-in fields, match the exact origin, present the in-field menu, fill selected values, and capture save/update intent. |
 | Native-messaging host | Small Rust executable | Validate and relay a bounded extension protocol to the agent. It contains no independent vault and no persistent plaintext cache. |
 | Local storage | SQLite with vault-layer authenticated encryption | Provide transactional storage for encrypted records, schema versions, and recovery metadata. The exact schema and encryption construction require a separate decision. |
-| Installer and updater | MSIX for Windows-native components | Install, register, update, and remove the app, agent, native host, and passkey provider coherently. |
+| Installer and updater | One setup executable with an MSI-owned lifecycle and identity-only MSIX | Install, register, repair, update, and remove the app, agent, native host, passkey provider, and selected browser registrations coherently. |
 
 ## Repository shape
 
@@ -142,7 +142,8 @@ Do not expose the agent as a general local API. Unknown message versions, client
 - Start from the newest stable releases verified at repository creation; do not adopt previews by default.
 - Build and test Windows-native artifacts on Windows runners.
 - Run Rust unit and property tests, protocol conformance tests, extension tests, and deterministic cryptographic test vectors on every relevant change.
-- Produce one versioned MSIX release set and test install, upgrade, rollback behavior, repair, and uninstall.
+- Produce one signed setup release set: a user-facing setup executable, its MSI-owned product payload, and an identity-only MSIX. Test install, upgrade, downgrade rejection, rollback, repair, and uninstall.
+- Keep Chrome and Edge integration optional. Install only Librarian-owned native-host registrations for selected browsers; extensions remain user-confirmed official-store installations.
 - Require end-to-end acceptance in both Chrome and Edge on supported Windows 11 builds.
 
 The initial implementation baseline is documented in [[ADRs/0004 Windows MVP Technology Baseline]].
@@ -183,6 +184,7 @@ The Rust core should expose a narrow C-compatible or generated binding surface r
 - [[ADRs/0003 Windows MVP Component Boundaries]]
 - [[ADRs/0004 Windows MVP Technology Baseline]]
 - [[ADRs/0006 Authenticated Local IPC and Client Authorization]]
+- [[ADRs/0007 Windows Setup and Package Identity]]
 
 ## Proposed decisions under review
 
