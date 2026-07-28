@@ -71,6 +71,30 @@ function Test-SamePath {
     )
 }
 
+function Get-RegisteredApplicationIds {
+    param(
+        [Parameter(Mandatory)]
+        [string]$PackageFullName
+    )
+
+    [xml]$registeredManifest = Get-AppxPackageManifest -Package $PackageFullName
+    $registeredNamespaceManager = [System.Xml.XmlNamespaceManager]::new(
+        $registeredManifest.NameTable
+    )
+    $registeredNamespaceManager.AddNamespace(
+        "foundation",
+        "http://schemas.microsoft.com/appx/manifest/foundation/windows10"
+    )
+
+    return @(
+        $registeredManifest.SelectNodes(
+            "/foundation:Package/foundation:Applications/foundation:Application",
+            $registeredNamespaceManager
+        ) |
+            ForEach-Object { [string]$_.Id }
+    )
+}
+
 try {
     try {
         $registrationMutexHeld = $registrationMutex.WaitOne(
@@ -102,6 +126,45 @@ try {
         }
         if (-not $package.IsDevelopmentMode) {
             throw "The existing package uses the development identity but is not development-mode."
+        }
+
+        try {
+            Add-AppxPackage -Register $manifestPath
+        }
+        catch {
+            throw (
+                "Unable to refresh the loose Windows shell registration. Close Librarian " +
+                "and retry. $($_.Exception.Message)"
+            )
+        }
+
+        $refreshedPackages = @(Get-AppxPackage -Name $packageName)
+        if ($refreshedPackages.Count -ne 1) {
+            throw (
+                "Expected one development package after refreshing registration; found " +
+                "$($refreshedPackages.Count)."
+            )
+        }
+        $package = $refreshedPackages[0]
+        if (
+            -not $package.IsDevelopmentMode -or
+            $package.Status -ne "Ok" -or
+            -not (Test-SamePath -First $package.InstallLocation -Second $layoutDirectory)
+        ) {
+            throw "The development package was not healthy after refreshing registration."
+        }
+
+        $registeredApplicationIds = @(
+            Get-RegisteredApplicationIds -PackageFullName $package.PackageFullName
+        )
+        if (
+            $registeredApplicationIds.Count -ne 1 -or
+            $registeredApplicationIds[0] -ne $applicationId
+        ) {
+            throw (
+                "The refreshed development package registration does not expose " +
+                "application '$applicationId'."
+            )
         }
     }
     else {

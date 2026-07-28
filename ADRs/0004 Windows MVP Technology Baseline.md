@@ -22,7 +22,7 @@ Start the repository with the following baseline. These exact stable versions we
 | Browser extension | Node.js 24.18.0 LTS, npm 11.16.0, and TypeScript 7.0.2 targeting Chromium Manifest V3. |
 | Native browser bridge | Chromium native messaging through a small Rust host. |
 | Local database | SQLite used transactionally beneath vault-layer authenticated encryption; the encryption construction is a separate security decision. |
-| Windows packaging | MSIX for the native product components and registration manifests. |
+| Windows packaging | Windows package identity and MSIX registration for the native product components. The production lifecycle is refined by [[ADRs/0007 Windows Setup and Package Identity]]. |
 
 The version evidence is the official [Windows App SDK downloads](https://learn.microsoft.com/en-us/windows/apps/windows-app-sdk/downloads), [Windows SDK downloads](https://learn.microsoft.com/en-us/windows/apps/windows-sdk/downloads), [Rust release announcement](https://blog.rust-lang.org/releases/latest/), and [Node.js release schedule](https://nodejs.org/en/about/previous-releases). Package manifests and checked-in lockfiles are the reproducibility boundary.
 
@@ -37,6 +37,6 @@ Use the latest stable patch versions available when an intentional maintenance u
 
 ## Validation and follow-up
 
-[Issue #7](https://github.com/theundeadmonk/Librarian/issues/7) must verify the exact stable versions available at scaffolding time and prove that a clean Windows developer environment can bootstrap, build, and test the Slice 1 skeleton using documented commands. Packaging, installation, upgrade, repair, and removal are validated by [issue #19](https://github.com/theundeadmonk/Librarian/issues/19).
+[Issue #7](https://github.com/theundeadmonk/Librarian/issues/7) must verify the exact stable versions available at scaffolding time and prove that a clean Windows developer environment can bootstrap, build, and test the Slice 1 skeleton using documented commands. Packaging, installation, upgrade, repair, and removal are validated by [issue #19](https://github.com/theundeadmonk/Librarian/issues/19) under [[ADRs/0007 Windows Setup and Package Identity]].
 
 If the accepted baseline cannot pass those checks, amend or supersede this ADR before dependent implementation proceeds. Acceptance records the technology direction; it does not waive implementation validation.
