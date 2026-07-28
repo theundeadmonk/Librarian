@@ -151,11 +151,14 @@ function Invoke-DisposableUserPowerShell {
 
     # CreateProcessWithLogonW limits its command line to 1,024 characters.
     # Keep the generated probe out of ArgumentList and remove it after use.
-    $probePath = Join-Path `
+    $probeBase = Join-Path `
         ([Environment]::GetFolderPath(
             [Environment+SpecialFolder]::CommonApplicationData
         )) `
-        ("LibrarianInstallerLifecycleProbe-{0}.ps1" -f [Guid]::NewGuid().ToString("N"))
+        ("LibrarianInstallerLifecycleProbe-{0}" -f [Guid]::NewGuid().ToString("N"))
+    $probePath = "$probeBase.ps1"
+    $standardOutputPath = "$probeBase.stdout.log"
+    $standardErrorPath = "$probeBase.stderr.log"
     try {
         [IO.File]::WriteAllText(
             $probePath,
@@ -180,15 +183,47 @@ function Invoke-DisposableUserPowerShell {
             -UseNewEnvironment `
             -WorkingDirectory $env:SystemRoot `
             -WindowStyle Hidden `
+            -RedirectStandardOutput $standardOutputPath `
+            -RedirectStandardError $standardErrorPath `
             -Wait `
             -PassThru
         try {
-            return $process.ExitCode
+            $standardOutput = [string](
+                Get-Content `
+                    -LiteralPath $standardOutputPath `
+                    -Raw `
+                    -ErrorAction SilentlyContinue
+            )
+            $standardError = [string](
+                Get-Content `
+                    -LiteralPath $standardErrorPath `
+                    -Raw `
+                    -ErrorAction SilentlyContinue
+            )
+            $diagnostic = @(
+                $standardError.Trim(),
+                $standardOutput.Trim()
+            ) | Where-Object { $_ }
+            $diagnostic = ($diagnostic -join [Environment]::NewLine)
+            if ($diagnostic.Length -gt 2048) {
+                $diagnostic = $diagnostic.Substring(0, 2048) + "..."
+            }
+            return [pscustomobject]@{
+                ExitCode = $process.ExitCode
+                Diagnostic = $diagnostic
+            }
         } finally {
             $process.Dispose()
         }
     } finally {
-        Remove-Item -LiteralPath $probePath -Force -ErrorAction SilentlyContinue
+        Remove-Item `
+            -LiteralPath @(
+                $probePath,
+                $standardOutputPath,
+                $standardErrorPath
+            ) `
+            -Force `
+            -ErrorAction SilentlyContinue
     }
 }
 
@@ -218,14 +253,15 @@ do {
 } while ([DateTime]::UtcNow -lt `$deadline)
 exit 1
 "@
-    $exitCode = Invoke-DisposableUserPowerShell `
+    $result = Invoke-DisposableUserPowerShell `
         -Credential $Credential `
         -Script $probe
     Assert-True (
-        $exitCode -eq 0
+        $result.ExitCode -eq 0
     ) (
         "The disposable secondary user did not receive Librarian identity " +
-        "version '$ExpectedVersion'."
+        "version '$ExpectedVersion'. Probe error: " +
+        $result.Diagnostic
     )
 }
 
@@ -245,9 +281,19 @@ function Register-DisposableUserIdentity {
         [string]$ExpectedVersion
     )
 
-    $escapedPackagePath = $PackagePath.Replace("'", "''")
-    $escapedExternalLocation = $ExternalLocation.Replace("'", "''")
-    $probe = @"
+    $stagedPackagePath = Join-Path `
+        ([Environment]::GetFolderPath(
+            [Environment+SpecialFolder]::CommonApplicationData
+        )) `
+        ("LibrarianInstallerLifecycle-{0}.msix" -f [Guid]::NewGuid().ToString("N"))
+    try {
+        Copy-Item `
+            -LiteralPath $PackagePath `
+            -Destination $stagedPackagePath `
+            -Force
+        $escapedPackagePath = $stagedPackagePath.Replace("'", "''")
+        $escapedExternalLocation = $ExternalLocation.Replace("'", "''")
+        $probe = @"
 `$ErrorActionPreference = "Stop"
 Add-AppxPackage `
     -Path '$escapedPackagePath' `
@@ -263,15 +309,22 @@ if (`$versions.Count -ne 1 -or `$versions[0] -ne "$ExpectedVersion") {
 }
 exit 0
 "@
-    $exitCode = Invoke-DisposableUserPowerShell `
-        -Credential $Credential `
-        -Script $probe
-    Assert-True (
-        $exitCode -eq 0
-    ) (
-        "The disposable secondary user could not register Librarian " +
-        "identity version '$ExpectedVersion'."
-    )
+        $result = Invoke-DisposableUserPowerShell `
+            -Credential $Credential `
+            -Script $probe
+        Assert-True (
+            $result.ExitCode -eq 0
+        ) (
+            "The disposable secondary user could not register Librarian " +
+            "identity version '$ExpectedVersion'. Probe error: " +
+            $result.Diagnostic
+        )
+    } finally {
+        Remove-Item `
+            -LiteralPath $stagedPackagePath `
+            -Force `
+            -ErrorAction SilentlyContinue
+    }
 }
 
 function Register-CurrentUserIdentity {
