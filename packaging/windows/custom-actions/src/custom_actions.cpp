@@ -914,23 +914,20 @@ namespace
         }
     }
 
-    void remove_package(
+    void remove_package_for_all_users(
         PackageManager const& manager,
-        Package const& package)
+        Package const& package,
+        std::wstring_view operation)
     {
-        winrt::hstring const family_name = package.Id().FamilyName();
-        winrt::hstring const full_name = package.Id().FullName();
-        deprovision_package_family(manager, family_name);
-
         try
         {
             DeploymentResult const removed =
                 manager
                     .RemovePackageAsync(
-                        full_name,
+                        package.Id().FullName(),
                         RemovalOptions::RemoveForAllUsers)
                     .get();
-            check_deployment_result(removed, L"Identity package removal");
+            check_deployment_result(removed, operation);
         }
         catch (winrt::hresult_error const& error)
         {
@@ -939,6 +936,18 @@ namespace
                 throw;
             }
         }
+    }
+
+    void remove_package(
+        PackageManager const& manager,
+        Package const& package)
+    {
+        winrt::hstring const family_name = package.Id().FamilyName();
+        deprovision_package_family(manager, family_name);
+        remove_package_for_all_users(
+            manager,
+            package,
+            L"Identity package removal");
     }
 
     void remove_package_for_current_user(
@@ -1207,11 +1216,34 @@ namespace
                 provisioned,
                 L"Previous identity package provisioning");
         }
-        else
+        else if (!snapshot.provisioned &&
+                 package_is_provisioned(manager, previous))
         {
             deprovision_package_family(
                 manager,
                 previous.Id().FamilyName());
+        }
+    }
+
+    void retire_superseded_packages(
+        PackageManager const& manager,
+        PackageVersion const& installed_version)
+    {
+        std::uint64_t const installed =
+            comparable_version(installed_version);
+        for (Package const& package : matching_packages(manager))
+        {
+            if (comparable_version(package.Id().Version()) < installed)
+            {
+                // The incoming package is already staged, registered for the
+                // invoking user, and provisioned for every user. Retire older
+                // registrations only in the checked commit phase, after MSI
+                // rollback can no longer be required.
+                remove_package_for_all_users(
+                    manager,
+                    package,
+                    L"Superseded identity package retirement");
+            }
         }
     }
 
@@ -1334,6 +1366,7 @@ extern "C" __declspec(dllexport) UINT __stdcall ProvisionIdentity(
         check_deployment_result(
             provisioned,
             L"Identity package provisioning");
+        retire_superseded_packages(manager, data.version);
     });
 }
 

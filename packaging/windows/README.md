@@ -104,6 +104,10 @@ installed beside the binaries. Only that manifest's SHA-256 is passed through
 the bounded deferred custom-action data. Each identity action validates the
 protected manifest path, rejects reparse points, verifies the manifest hash,
 and then verifies every identity-bound payload before changing package state.
+After an upgrade commits and provisions the incoming identity, setup retires
+superseded all-user registrations so a later repair never encounters multiple
+versions of the same package family. Users who were not running setup receive
+the already-provisioned incoming version at their next sign-in.
 
 The same disposable Windows runner then executes
 `scripts\test-installer-ci.ps1`. That entry point refuses to run anywhere
@@ -114,11 +118,12 @@ builds two signed versions, and removes both certificate-store entries in a
 
 The lifecycle suite rejects unsigned and unexpected-provider installs, launches
 a clean installation, opts into and repairs both browser registrations, rolls
-back an injected upgrade failure, upgrades in place, rejects a downgrade,
-uninstalls, reinstalls, and confirms that a disposable per-user data sentinel
-survives every repair, update, and removal. The suite may mutate Program Files,
-HKLM, package provisioning, and the test profile, so its CI guard must not be
-removed or bypassed for developer machines.
+back injected repair and upgrade failures, upgrades a disposable secondary
+Windows account's provisioned identity, rejects a downgrade, uninstalls,
+reinstalls, and confirms that a disposable per-user data sentinel survives
+every repair, update, and removal. The suite may mutate Program Files, HKLM,
+local accounts, package provisioning, and test profiles, so its CI guard must
+not be removed or bypassed for developer machines.
 
 Windows Installer Restart Manager remains enabled so repair and upgrade can
 coordinate processes that hold product files. The lifecycle suite requires a

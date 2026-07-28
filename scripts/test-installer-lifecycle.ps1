@@ -140,6 +140,64 @@ function Invoke-FailingProcess {
     ) "$Label unexpectedly succeeded."
 }
 
+function Invoke-DisposableUserIdentityProbe {
+    param(
+        [Parameter(Mandatory)]
+        [PSCredential]$Credential,
+
+        [Parameter(Mandatory)]
+        [ValidatePattern("^\d+\.\d+\.\d+\.\d+$")]
+        [string]$ExpectedVersion
+    )
+
+    $probe = @"
+`$ErrorActionPreference = "Stop"
+`$deadline = [DateTime]::UtcNow.AddSeconds(20)
+do {
+    `$versions = @(
+        Get-AppxPackage -Name "TheUndeadMonk.Librarian.Development" |
+            ForEach-Object { `$_.Version.ToString() } |
+            Sort-Object -Unique
+    )
+    if (`$versions.Count -eq 1 -and `$versions[0] -eq "$ExpectedVersion") {
+        exit 0
+    }
+    Start-Sleep -Milliseconds 500
+} while ([DateTime]::UtcNow -lt `$deadline)
+exit 1
+"@
+    $encodedProbe = [Convert]::ToBase64String(
+        [Text.Encoding]::Unicode.GetBytes($probe)
+    )
+    $process = Start-Process `
+        -FilePath (
+            "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
+        ) `
+        -ArgumentList @(
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-EncodedCommand",
+            $encodedProbe
+        ) `
+        -Credential $Credential `
+        -LoadUserProfile `
+        -WorkingDirectory $env:SystemRoot `
+        -WindowStyle Hidden `
+        -Wait `
+        -PassThru
+    try {
+        Assert-True (
+            $process.ExitCode -eq 0
+        ) (
+            "The disposable secondary user did not receive Librarian identity " +
+            "version '$ExpectedVersion'."
+        )
+    } finally {
+        $process.Dispose()
+    }
+}
+
 function Get-VisibleArpEntries {
     $entries = @()
     foreach ($root in @(
@@ -649,6 +707,9 @@ $sentinelDirectory = Join-Path $env:LOCALAPPDATA "Librarian\installer-lifecycle"
 $sentinelPath = Join-Path $sentinelDirectory "issue-19-ci-sentinel.txt"
 $sentinelValue = "disposable-issue-19-user-data"
 $msiexec = "$env:SystemRoot\System32\msiexec.exe"
+$disposableUserName = "LibrarianCiUser"
+$disposableUser = $null
+$disposableUserCredential = $null
 $failure = $null
 
 try {
@@ -660,6 +721,26 @@ try {
     Assert-True (
         -not (Test-Path -LiteralPath $sentinelPath)
     ) "The disposable user-data sentinel already exists."
+    Assert-True (
+        $null -eq (
+            Get-LocalUser -Name $disposableUserName -ErrorAction SilentlyContinue
+        )
+    ) "The disposable secondary installer-test user already exists."
+    $disposablePassword = ConvertTo-SecureString `
+        -String ("L1brarian-CI-only!" + [Guid]::NewGuid().ToString("N")) `
+        -AsPlainText `
+        -Force
+    $disposableUser = New-LocalUser `
+        -Name $disposableUserName `
+        -Password $disposablePassword `
+        -AccountNeverExpires `
+        -PasswordNeverExpires `
+        -UserMayNotChangePassword `
+        -Description "Disposable Librarian issue 19 GitHub Actions user"
+    $disposableUserCredential = [PSCredential]::new(
+        "$env:COMPUTERNAME\$disposableUserName",
+        $disposablePassword
+    )
 
     Invoke-FailingProcess `
         -Label "Reject unsigned setup" `
@@ -724,6 +805,9 @@ try {
         -ChromeRegistryPath $chromeRegistryPath `
         -EdgeRegistryPath $edgeRegistryPath `
         -ProductRegistryPath $productRegistryPath
+    Invoke-DisposableUserIdentityProbe `
+        -Credential $disposableUserCredential `
+        -ExpectedVersion $LowVersion
 
     $desktopProcess = Start-Process `
         -FilePath (Join-Path $installFolder "Librarian.Windows.exe") `
@@ -803,6 +887,28 @@ try {
     Assert-Sentinel -Path $sentinelPath -Expected $sentinelValue
 
     Invoke-FailingProcess `
+        -Label "Rollback interrupted same-version repair" `
+        -FilePath $msiexec `
+        -Arguments @(
+            "/fa",
+            $resolvedSignedLowMsi,
+            "ADDLOCAL=Core,ChromeIntegration,EdgeIntegration",
+            "WIXFAILWHENDEFERRED=1",
+            "/qn",
+            "/norestart",
+            "/l*v",
+            (Join-Path $resolvedLogDirectory "05b-interrupted-repair.log")
+        )
+    Assert-Installed `
+        -ExpectedVersion $LowVersion `
+        -BrowsersExpected $true `
+        -InstallFolder $installFolder `
+        -ChromeRegistryPath $chromeRegistryPath `
+        -EdgeRegistryPath $edgeRegistryPath `
+        -ProductRegistryPath $productRegistryPath
+    Assert-Sentinel -Path $sentinelPath -Expected $sentinelValue
+
+    Invoke-FailingProcess `
         -Label "Rollback interrupted upgrade" `
         -FilePath $msiexec `
         -Arguments @(
@@ -840,6 +946,9 @@ try {
         -ChromeRegistryPath $chromeRegistryPath `
         -EdgeRegistryPath $edgeRegistryPath `
         -ProductRegistryPath $productRegistryPath
+    Invoke-DisposableUserIdentityProbe `
+        -Credential $disposableUserCredential `
+        -ExpectedVersion $HighVersion
     Assert-Sentinel -Path $sentinelPath -Expected $sentinelValue
 
     Invoke-FailingProcess `
@@ -996,6 +1105,18 @@ try {
             Write-Warning "Lifecycle cleanup also failed: $($_.Exception.Message)"
         }
     }
+    if ($null -ne $disposableUser) {
+        $userProfile = Get-CimInstance `
+            -ClassName Win32_UserProfile `
+            -Filter "SID = '$($disposableUser.SID.Value)'" `
+            -ErrorAction SilentlyContinue
+        if ($null -ne $userProfile -and -not $userProfile.Loaded) {
+            Remove-CimInstance -InputObject $userProfile -ErrorAction Continue
+        }
+        Remove-LocalUser `
+            -Name $disposableUserName `
+            -ErrorAction Continue
+    }
     if (Test-Path -LiteralPath $sentinelPath) {
         Remove-Item -LiteralPath $sentinelPath -Force
     }
@@ -1015,5 +1136,7 @@ Write-Host "Installer lifecycle validation passed."
 Write-Host "Unsigned and unexpected-provider installs: rejected"
 Write-Host "Clean install and launch: passed"
 Write-Host "Browser opt-in and repair: passed"
-Write-Host "Interrupted upgrade rollback and downgrade rejection: passed"
+Write-Host "Interrupted repair and upgrade rollback: passed"
+Write-Host "Secondary-user identity upgrade retirement: passed"
+Write-Host "Downgrade rejection: passed"
 Write-Host "Upgrade, uninstall, reinstall, and data retention: passed"
