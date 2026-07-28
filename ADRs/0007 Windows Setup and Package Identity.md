@@ -76,13 +76,17 @@ the external production executables and installer payload remain x64-only.
 Setup separately validates the fixed executable paths and requires every
 payload component to carry the same product version.
 
-Setup stages and provisions the identity package for future profiles and also
-registers it immediately in the invoking user's impersonated Windows Installer
-context before any optional launch. Transaction rollback records the prior
-package version, provisioning state, and invoking-user registration in the
-protected installation directory. It restores that exact state after a failed
-install, repair, upgrade, or uninstall, including preserving pre-existing
-absence.
+Setup stages the identity package and registers it immediately in the invoking
+user's impersonated Windows Installer context before any optional launch.
+Provisioning for future profiles is a checked commit action, after the
+rollback-capable installation script succeeds. All-user removal is likewise a
+checked uninstall commit action, with only best-effort marker cleanup after it.
+A failed transaction therefore never removes another existing user's package
+registration. Transaction rollback records the prior package version,
+provisioning state, and invoking-user registration in the protected
+installation directory and restores that exact pre-commit state, including
+preserving pre-existing absence. Restoration does not clean-reprovision a
+package whose prior provisioning is still intact.
 
 Before staging or registering identity, both the elevated and impersonated
 custom actions hash the three identity-bearing executables and the fixed

@@ -224,6 +224,14 @@
       Return="check"
       HideTarget="yes" />
     <CustomAction
+      Id="ProvisionIdentity"
+      BinaryRef="LibrarianSetupCustomActions"
+      DllEntry="ProvisionIdentity"
+      Execute="commit"
+      Impersonate="no"
+      Return="check"
+      HideTarget="yes" />
+    <CustomAction
       Id="CleanupIdentitySnapshot"
       BinaryRef="LibrarianSetupCustomActions"
       DllEntry="CleanupIdentitySnapshot"
@@ -267,7 +275,7 @@
       Id="UnregisterIdentity"
       BinaryRef="LibrarianSetupCustomActions"
       DllEntry="UnregisterIdentity"
-      Execute="deferred"
+      Execute="commit"
       Impersonate="no"
       Return="check"
       HideTarget="yes" />
@@ -312,6 +320,12 @@
       Id="RegisterCurrentUserIdentity"
       Value="[#IdentityMsix]|[INSTALLFOLDER]|[ProductVersion]|$(var.DesktopSha256)|$(var.VaultAgentSha256)|$(var.ChromiumNativeHostSha256)|$(var.IdentityPackageSha256)"
       Before="RegisterCurrentUserIdentity"
+      Sequence="execute"
+      Condition="NOT (REMOVE~=&quot;ALL&quot;)" />
+    <SetProperty
+      Id="ProvisionIdentity"
+      Value="[#IdentityMsix]|[INSTALLFOLDER]|[ProductVersion]|$(var.DesktopSha256)|$(var.VaultAgentSha256)|$(var.ChromiumNativeHostSha256)|$(var.IdentityPackageSha256)"
+      Before="ProvisionIdentity"
       Sequence="execute"
       Condition="NOT (REMOVE~=&quot;ALL&quot;)" />
     <SetProperty
@@ -377,6 +391,10 @@
         After="RegisterIdentity"
         Condition="NOT (REMOVE~=&quot;ALL&quot;)" />
       <Custom
+        Action="ProvisionIdentity"
+        After="RegisterCurrentUserIdentity"
+        Condition="NOT (REMOVE~=&quot;ALL&quot;)" />
+      <Custom
         Action="SnapshotUnregisterIdentity"
         Before="RollbackUnregisterSnapshotCleanup"
         Condition="REMOVE~=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
@@ -394,7 +412,7 @@
         Condition="REMOVE~=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
       <Custom
         Action="UnregisterIdentity"
-        Before="RemoveFiles"
+        After="RemoveFiles"
         Condition="REMOVE~=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
       <Custom
         Action="CleanupIdentitySnapshot"

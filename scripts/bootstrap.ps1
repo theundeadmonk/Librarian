@@ -90,12 +90,19 @@ function Get-ToolOutput {
     $argumentText = Join-NativeProcessArguments -Arguments $Arguments
 
     $startInfo = New-Object Diagnostics.ProcessStartInfo
-    $startInfo.FileName = $FilePath
-    $startInfo.Arguments = $argumentText
     $startInfo.UseShellExecute = $false
     $startInfo.CreateNoWindow = $true
     $startInfo.RedirectStandardOutput = $true
     $startInfo.RedirectStandardError = $true
+    $startInfo.EnvironmentVariables["Path"] = $env:Path
+
+    if ([IO.Path]::GetExtension($FilePath) -eq ".cmd") {
+        $startInfo.FileName = $env:ComSpec
+        $startInfo.Arguments = '/d /s /c ""' + $FilePath + '" ' + $argumentText + '"'
+    } else {
+        $startInfo.FileName = $FilePath
+        $startInfo.Arguments = $argumentText
+    }
 
     $process = New-Object Diagnostics.Process
     $process.StartInfo = $startInfo

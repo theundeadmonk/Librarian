@@ -1068,7 +1068,8 @@ namespace
             snapshot.package_version,
             package_path,
             install_folder);
-        if (snapshot.provisioned)
+        if (snapshot.provisioned &&
+            !package_is_provisioned(manager, previous))
         {
             DeploymentResult const provisioned =
                 manager
@@ -1150,7 +1151,7 @@ extern "C" __declspec(dllexport) UINT __stdcall SnapshotIdentity(
 extern "C" __declspec(dllexport) UINT __stdcall RegisterIdentity(
     MSIHANDLE installer)
 {
-    return run_action(installer, L"identity registration", [&] {
+    return run_action(installer, L"identity staging", [&] {
         auto const fields =
             split_data(get_property(installer, L"CustomActionData"), 7);
         std::filesystem::path const package_path = absolute_path(fields[0]);
@@ -1166,18 +1167,11 @@ extern "C" __declspec(dllexport) UINT __stdcall RegisterIdentity(
         validate_release_payload(package_path, install_folder, hashes);
         PackageManager const manager;
         reject_newer_packages(manager, version);
-        Package const package = ensure_package_staged(
+        static_cast<void>(ensure_package_staged(
             manager,
             version,
             package_path,
-            install_folder);
-        DeploymentResult const provisioned =
-            manager
-                .ProvisionPackageForAllUsersAsync(package.Id().FamilyName())
-                .get();
-        check_deployment_result(
-            provisioned,
-            L"Identity package provisioning");
+            install_folder));
     });
 }
 
@@ -1206,6 +1200,37 @@ extern "C" __declspec(dllexport) UINT __stdcall RegisterCurrentUserIdentity(
             install_folder);
         Package const package = find_exact_package(manager, version);
         validate_external_location(package, install_folder);
+    });
+}
+
+extern "C" __declspec(dllexport) UINT __stdcall ProvisionIdentity(
+    MSIHANDLE installer)
+{
+    return run_action(installer, L"identity provisioning", [&] {
+        auto const fields =
+            split_data(get_property(installer, L"CustomActionData"), 7);
+        std::filesystem::path const package_path = absolute_path(fields[0]);
+        std::filesystem::path const install_folder = absolute_path(fields[1]);
+        PackageVersion const version = parse_version(fields[2]);
+        payload_hashes const hashes{
+            .desktop = parse_sha256(fields[3]),
+            .vault_agent = parse_sha256(fields[4]),
+            .native_host = parse_sha256(fields[5]),
+            .identity_package = parse_sha256(fields[6]),
+        };
+
+        validate_release_payload(package_path, install_folder, hashes);
+        PackageManager const manager;
+        reject_newer_packages(manager, version);
+        Package const package = find_exact_package(manager, version);
+        validate_external_location(package, install_folder);
+        DeploymentResult const provisioned =
+            manager
+                .ProvisionPackageForAllUsersAsync(package.Id().FamilyName())
+                .get();
+        check_deployment_result(
+            provisioned,
+            L"Identity package provisioning");
     });
 }
 
@@ -1280,6 +1305,10 @@ extern "C" __declspec(dllexport) UINT __stdcall UnregisterIdentity(
     MSIHANDLE installer)
 {
     return run_action(installer, L"identity removal", [&] {
+        // This all-user mutation is a checked commit custom action. It runs
+        // only after Windows Installer has completed the rollback-capable
+        // script, so a failed uninstall never removes another user's
+        // pre-existing package registration.
         auto const fields =
             split_data(get_property(installer, L"CustomActionData"), 1);
         PackageVersion const installed_version = parse_version(fields[0]);

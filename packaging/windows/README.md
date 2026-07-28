@@ -135,6 +135,14 @@ PowerShell. Deferred, rollback, and commit actions run without user
 impersonation and hide `CustomActionData` from logs. Install and uninstall
 rollback markers are disposable and contain version/state only.
 
+The rollback-capable script stages identity and registers only the invoking
+user. Device provisioning is a checked commit action. Uninstall similarly
+defers all-user package removal to its checked commit action, after MSI file
+removal has succeeded; only best-effort marker cleanup follows it. A failed
+transaction therefore does not remove another existing user's registration,
+and rollback does not clean-reprovision identity when the prior provisioning
+is already intact.
+
 Before either machine staging or invoking-user registration, the custom action
 requires exact SHA-256 matches for the installed desktop, vault-agent,
 native-host, and identity-package files. The expected values are generated

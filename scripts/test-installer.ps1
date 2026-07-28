@@ -522,6 +522,9 @@ try {
         RegisterCurrentUserIdentity = [PSCustomObject]@{
             Execute = "deferred"; Impersonate = "yes"
         }
+        ProvisionIdentity = [PSCustomObject]@{
+            Execute = "commit"; Impersonate = "no"
+        }
         SnapshotUnregisterIdentity = [PSCustomObject]@{
             Execute = "deferred"; Impersonate = "no"
         }
@@ -535,7 +538,7 @@ try {
             Execute = "rollback"; Impersonate = "no"
         }
         UnregisterIdentity = [PSCustomObject]@{
-            Execute = "deferred"; Impersonate = "no"
+            Execute = "commit"; Impersonate = "no"
         }
         CleanupIdentitySnapshot = [PSCustomObject]@{
             Execute = "commit"; Impersonate = "no"
@@ -631,6 +634,19 @@ try {
         $null -ne $commitCleanup -and
         $commitCleanup.GetAttribute("Return") -eq "ignore"
     ) "Post-commit snapshot cleanup must not report a committed install as failed."
+    foreach ($commitActionId in @("ProvisionIdentity", "UnregisterIdentity")) {
+        $commitAction = $decompiled.SelectSingleNode(
+            "//*[local-name()='CustomAction' and @Id='$commitActionId']"
+        )
+        Assert-True (
+            $null -ne $commitAction -and
+            $commitAction.GetAttribute("Execute") -eq "commit" -and
+            $commitAction.GetAttribute("Return") -in @("", "check")
+        ) (
+            "All-profile identity mutation '$commitActionId' must be a " +
+            "checked commit action."
+        )
+    }
     $faultInjection = $decompiled.SelectSingleNode(
         (
             "//*[local-name()='InstallExecuteSequence']/" +
@@ -667,6 +683,21 @@ try {
     $installFiles = Get-MsiSequence `
         -DatabasePath $resolvedMsi `
         -Action "InstallFiles"
+    $registerCurrentUserIdentity = Get-MsiSequence `
+        -DatabasePath $resolvedMsi `
+        -Action "RegisterCurrentUserIdentity"
+    $provisionIdentity = Get-MsiSequence `
+        -DatabasePath $resolvedMsi `
+        -Action "ProvisionIdentity"
+    $removeFiles = Get-MsiSequence `
+        -DatabasePath $resolvedMsi `
+        -Action "RemoveFiles"
+    $unregisterIdentity = Get-MsiSequence `
+        -DatabasePath $resolvedMsi `
+        -Action "UnregisterIdentity"
+    $cleanupIdentitySnapshot = Get-MsiSequence `
+        -DatabasePath $resolvedMsi `
+        -Action "CleanupIdentitySnapshot"
     $installFinalize = Get-MsiSequence `
         -DatabasePath $resolvedMsi `
         -Action "InstallFinalize"
@@ -686,6 +717,17 @@ try {
     ) (
         "Identity snapshot and rollback actions must run in order after the " +
         "protected directory exists and before product files are installed."
+    )
+    Assert-True (
+        $provisionIdentity -gt $registerCurrentUserIdentity -and
+        $unregisterIdentity -gt $removeFiles -and
+        $provisionIdentity -lt $cleanupIdentitySnapshot -and
+        $unregisterIdentity -lt $cleanupIdentitySnapshot -and
+        $cleanupIdentitySnapshot -lt $installFinalize
+    ) (
+        "All-profile identity provisioning/removal must be queued only after " +
+        "their rollback-capable per-user or file operations and before the " +
+        "best-effort commit cleanup."
     )
 
     $chromeManifestPath = Get-ExtractedMsiFile `
@@ -773,7 +815,8 @@ try {
     ) -join "|"
     foreach ($actionId in @(
         "SetRegisterIdentity",
-        "SetRegisterCurrentUserIdentity"
+        "SetRegisterCurrentUserIdentity",
+        "SetProvisionIdentity"
     )) {
         $hashPropertyAction = $decompiled.SelectSingleNode(
             "//*[local-name()='CustomAction' and @Id='$actionId']"
@@ -951,6 +994,7 @@ try {
     ) "dumpbin failed to inspect the embedded custom-action DLL."
     $expectedExports = @(
         "CleanupIdentitySnapshot",
+        "ProvisionIdentity",
         "RegisterCurrentUserIdentity",
         "RegisterIdentity",
         "RollbackCurrentUserIdentity",
