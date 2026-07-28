@@ -19,6 +19,11 @@
     },
     {
       "platform": "windows",
+      "test": "librarian-windows-hello-agent::lib:librarian_windows_hello_agent::windows::tests::enrollment_cleanup_failure_preserves_the_bounded_credential_id::test:active",
+      "rationale": "Exercises the Windows-only C ABI enrollment result contract that preserves a bounded credential identifier when native WebAuthn cleanup fails so the vault agent can persist a restart-safe removal retry."
+    },
+    {
+      "platform": "windows",
       "test": "librarian-windows-hello-agent::lib:librarian_windows_hello_agent::windows::tests::handle_deletion_never_targets_a_replacement_path::test:active",
       "rationale": "Exercises Windows handle-based local-state deletion and proves a verified file can be removed without deleting a pathname replacement."
     },
