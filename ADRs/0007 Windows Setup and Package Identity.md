@@ -53,9 +53,12 @@ entry.
 The MSI owns registration and removal of the identity package. Production setup
 uses the Windows `PackageManager` API with the installed external location; it
 does not shell out to PowerShell. Every identity-bearing executable embeds
-matching side-by-side MSIX identity metadata. Package name, publisher,
-application identifiers, executable paths, architecture, and version must
-match exactly.
+matching side-by-side MSIX identity metadata. Package name, publisher, and
+application identifiers must match exactly. The identity-only MSIX remains
+architecture-neutral as required by Microsoft's external-location guidance;
+the external production executables and installer payload remain x64-only.
+Setup separately validates the fixed executable paths and requires every
+payload component to carry the same product version.
 
 The existing package-enabled WinUI development target may continue to produce a
 full MSIX for isolated UI smoke tests. It is not the production product

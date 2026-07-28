@@ -16,6 +16,11 @@ identity metadata in Release builds. Unsigned, unregistered debug test
 harnesses intentionally omit that metadata so Windows Application Control can
 execute repository tests.
 
+The identity manifest intentionally follows Microsoft's external-location
+template: it uses a neutral package architecture and keeps referenced visual
+assets outside the identity package. The MSI-owned external installation
+location must provide any image paths that Windows needs to resolve.
+
 Browser integrations are optional. Setup may register the native host for an
 installed browser only after user selection; browser extensions remain
 user-confirmed installations from the official Chrome Web Store or Microsoft
@@ -29,5 +34,8 @@ The identity fixture and validation scripts added here are development-only
 until release signing, installer authoring, transaction, upgrade, repair, and
 uninstall tests are complete. They must not install a package, trust a
 certificate, or enable secret-bearing product paths automatically. MakeAppx
-uses `/nv` because the future passkey-provider executable does not exist yet;
-production setup must reject that incomplete payload rather than register it.
+uses `/nv` because external executable and visual-resource paths intentionally
+do not resolve inside the identity package, as required by Microsoft's manual
+external-location packaging procedure. The future passkey-provider executable
+does not exist yet; production setup must reject that incomplete payload rather
+than register it.

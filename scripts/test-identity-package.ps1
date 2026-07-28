@@ -7,6 +7,18 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
+$repoRoot = Split-Path $PSScriptRoot -Parent
+$cargoManifestPath = Join-Path $repoRoot "Cargo.toml"
+$cargoManifest = Get-Content -LiteralPath $cargoManifestPath -Raw
+$workspaceVersionMatch = [regex]::Match(
+    $cargoManifest,
+    '(?ms)^\[workspace\.package\].*?^version\s*=\s*"(?<version>\d+\.\d+\.\d+)"'
+)
+if (-not $workspaceVersionMatch.Success) {
+    throw "Could not read the workspace package version from '$cargoManifestPath'."
+}
+$expectedVersion = "$($workspaceVersionMatch.Groups["version"].Value).0"
+
 $expectedPackageName = "TheUndeadMonk.Librarian.Development"
 $expectedPublisher = "CN=Librarian Development"
 $expectedApplications = [ordered]@{
@@ -49,6 +61,27 @@ foreach ($namespace in @("uap", "uap10", "rescap")) {
     }
 }
 
+$expectedTopLevelOrder = @(
+    "Identity",
+    "Properties",
+    "Resources",
+    "Dependencies",
+    "Capabilities",
+    "Applications"
+)
+$actualTopLevelOrder = @(
+    $package.ChildNodes |
+        Where-Object { $_.NodeType -eq [Xml.XmlNodeType]::Element } |
+        ForEach-Object { $_.LocalName }
+)
+if (($actualTopLevelOrder -join ",") -ne ($expectedTopLevelOrder -join ",")) {
+    throw (
+        "Identity package top-level elements must follow Microsoft's external-location " +
+        "template order. Expected '$($expectedTopLevelOrder -join ", ")'; found " +
+        "'$($actualTopLevelOrder -join ", ")'."
+    )
+}
+
 $identity = $manifest.SelectSingleNode(
     "/foundation:Package/foundation:Identity",
     $namespaceManager
@@ -65,8 +98,11 @@ if ($identity.Publisher -ne $expectedPublisher) {
 if ($identity.ProcessorArchitecture -ne "neutral") {
     throw "Identity package architecture must be neutral."
 }
-if ($identity.Version -notmatch "^\d+\.\d+\.\d+\.\d+$") {
-    throw "Identity package version '$($identity.Version)' is not four-part."
+if ($identity.Version -ne $expectedVersion) {
+    throw (
+        "Identity package version '$($identity.Version)' does not match workspace " +
+        "version '$expectedVersion'."
+    )
 }
 
 $allowExternalContent = $manifest.SelectSingleNode(
@@ -125,7 +161,6 @@ foreach ($applicationId in $expectedApplications.Keys) {
     }
 }
 
-$repoRoot = Split-Path $PSScriptRoot -Parent
 $externalManifestPaths = [ordered]@{
     Desktop = "apps\windows\Librarian.Windows\app.manifest"
     VaultAgent = "crates\vault-agent\app.manifest"
@@ -140,6 +175,21 @@ foreach ($applicationId in $externalManifestPaths.Keys) {
     )
     $externalNamespaceManager.AddNamespace("assembly", "urn:schemas-microsoft-com:asm.v1")
     $externalNamespaceManager.AddNamespace("msix", "urn:schemas-microsoft-com:msix.v1")
+
+    $assemblyIdentity = $externalManifest.SelectSingleNode(
+        "/assembly:assembly/assembly:assemblyIdentity",
+        $externalNamespaceManager
+    )
+    if (-not $assemblyIdentity) {
+        throw "'$externalManifestPath' is missing its assembly identity."
+    }
+    if ($assemblyIdentity.GetAttribute("version") -ne $expectedVersion) {
+        throw (
+            "'$externalManifestPath' assembly version " +
+            "'$($assemblyIdentity.GetAttribute("version"))' does not match workspace " +
+            "version '$expectedVersion'."
+        )
+    }
 
     $msix = $externalManifest.SelectSingleNode(
         "/assembly:assembly/msix:msix",
@@ -157,4 +207,5 @@ foreach ($applicationId in $externalManifestPaths.Keys) {
 
 Write-Host "Identity package manifest validation passed."
 Write-Host "Manifest: $resolvedManifest"
+Write-Host "Version: $expectedVersion"
 Write-Host "Applications: $($expectedApplications.Count)"

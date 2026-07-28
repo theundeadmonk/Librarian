@@ -1,7 +1,5 @@
 [CmdletBinding()]
 param(
-    [string]$Version,
-
     [string]$MakeAppxPath
 )
 
@@ -16,17 +14,15 @@ $layoutName = "identity-layout-$PID-$([Guid]::NewGuid().ToString('N'))"
 $layoutPath = Join-Path $packageRoot $layoutName
 $renderedManifestPath = Join-Path $layoutPath "AppxManifest.xml"
 
-if (-not $Version) {
-    $cargoManifest = Get-Content -LiteralPath $cargoManifestPath -Raw
-    $workspaceVersionMatch = [regex]::Match(
-        $cargoManifest,
-        '(?ms)^\[workspace\.package\].*?^version\s*=\s*"(?<version>\d+\.\d+\.\d+)"'
-    )
-    if (-not $workspaceVersionMatch.Success) {
-        throw "Could not read the workspace package version from '$cargoManifestPath'."
-    }
-    $Version = "$($workspaceVersionMatch.Groups["version"].Value).0"
+$cargoManifest = Get-Content -LiteralPath $cargoManifestPath -Raw
+$workspaceVersionMatch = [regex]::Match(
+    $cargoManifest,
+    '(?ms)^\[workspace\.package\].*?^version\s*=\s*"(?<version>\d+\.\d+\.\d+)"'
+)
+if (-not $workspaceVersionMatch.Success) {
+    throw "Could not read the workspace package version from '$cargoManifestPath'."
 }
+$Version = "$($workspaceVersionMatch.Groups["version"].Value).0"
 
 if ($Version -notmatch "^\d+\.\d+\.\d+\.\d+$") {
     throw "Identity package version '$Version' must contain four numeric parts."

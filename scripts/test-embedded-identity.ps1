@@ -22,6 +22,17 @@ if (-not (Test-Path -LiteralPath $MtPath -PathType Leaf)) {
 }
 
 $repoRoot = Split-Path $PSScriptRoot -Parent
+$cargoManifestPath = Join-Path $repoRoot "Cargo.toml"
+$cargoManifest = Get-Content -LiteralPath $cargoManifestPath -Raw
+$workspaceVersionMatch = [regex]::Match(
+    $cargoManifest,
+    '(?ms)^\[workspace\.package\].*?^version\s*=\s*"(?<version>\d+\.\d+\.\d+)"'
+)
+if (-not $workspaceVersionMatch.Success) {
+    throw "Could not read the workspace package version from '$cargoManifestPath'."
+}
+$expectedVersion = "$($workspaceVersionMatch.Groups["version"].Value).0"
+
 $outputDirectory = Join-Path $repoRoot "artifacts\package\embedded-manifests"
 New-Item -ItemType Directory -Path $outputDirectory -Force | Out-Null
 
@@ -58,6 +69,20 @@ foreach ($applicationId in $binaries.Keys) {
     $namespaceManager = New-Object Xml.XmlNamespaceManager($manifest.NameTable)
     $namespaceManager.AddNamespace("assembly", "urn:schemas-microsoft-com:asm.v1")
     $namespaceManager.AddNamespace("msix", "urn:schemas-microsoft-com:msix.v1")
+    $assemblyIdentity = $manifest.SelectSingleNode(
+        "/assembly:assembly/assembly:assemblyIdentity",
+        $namespaceManager
+    )
+    if (-not $assemblyIdentity) {
+        throw "'$binaryPath' is missing its embedded assembly identity."
+    }
+    if ($assemblyIdentity.GetAttribute("version") -ne $expectedVersion) {
+        throw (
+            "'$binaryPath' has embedded assembly version " +
+            "'$($assemblyIdentity.GetAttribute("version"))'; expected '$expectedVersion'."
+        )
+    }
+
     $msix = $manifest.SelectSingleNode(
         "/assembly:assembly/msix:msix",
         $namespaceManager
@@ -73,4 +98,5 @@ foreach ($applicationId in $binaries.Keys) {
 }
 
 Write-Host "Release binary identity validation passed."
+Write-Host "Version: $expectedVersion"
 Write-Host "Binaries: $($binaries.Count)"
