@@ -198,6 +198,72 @@ exit 1
     }
 }
 
+function Register-DisposableUserIdentity {
+    param(
+        [Parameter(Mandatory)]
+        [PSCredential]$Credential,
+
+        [Parameter(Mandatory)]
+        [string]$PackagePath,
+
+        [Parameter(Mandatory)]
+        [string]$ExternalLocation,
+
+        [Parameter(Mandatory)]
+        [ValidatePattern("^\d+\.\d+\.\d+\.\d+$")]
+        [string]$ExpectedVersion
+    )
+
+    $escapedPackagePath = $PackagePath.Replace("'", "''")
+    $escapedExternalLocation = $ExternalLocation.Replace("'", "''")
+    $probe = @"
+`$ErrorActionPreference = "Stop"
+Add-AppxPackage `
+    -Path '$escapedPackagePath' `
+    -ExternalLocation '$escapedExternalLocation' `
+    -ForceUpdateFromAnyVersion
+`$versions = @(
+    Get-AppxPackage -Name "TheUndeadMonk.Librarian.Development" |
+        ForEach-Object { `$_.Version.ToString() } |
+        Sort-Object -Unique
+)
+if (`$versions.Count -ne 1 -or `$versions[0] -ne "$ExpectedVersion") {
+    exit 1
+}
+exit 0
+"@
+    $encodedProbe = [Convert]::ToBase64String(
+        [Text.Encoding]::Unicode.GetBytes($probe)
+    )
+    $process = Start-Process `
+        -FilePath (
+            "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
+        ) `
+        -ArgumentList @(
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-EncodedCommand",
+            $encodedProbe
+        ) `
+        -Credential $Credential `
+        -LoadUserProfile `
+        -WorkingDirectory $env:SystemRoot `
+        -WindowStyle Hidden `
+        -Wait `
+        -PassThru
+    try {
+        Assert-True (
+            $process.ExitCode -eq 0
+        ) (
+            "The disposable secondary user could not register Librarian " +
+            "identity version '$ExpectedVersion'."
+        )
+    } finally {
+        $process.Dispose()
+    }
+}
+
 function Get-VisibleArpEntries {
     $entries = @()
     foreach ($root in @(
@@ -688,6 +754,13 @@ Assert-True (
 $resolvedUnsignedSetup = (Resolve-Path -LiteralPath $UnsignedSetupPath).Path
 $resolvedSignedLowMsi = (Resolve-Path -LiteralPath $SignedLowMsiPath).Path
 $resolvedSignedLowSetup = (Resolve-Path -LiteralPath $SignedLowSetupPath).Path
+$resolvedSignedLowIdentity = (
+    Resolve-Path -LiteralPath (
+        Join-Path (
+            Split-Path $resolvedSignedLowMsi -Parent
+        ) "Librarian.Identity.msix"
+    )
+).Path
 $resolvedSignedHighMsi = (Resolve-Path -LiteralPath $SignedHighMsiPath).Path
 $resolvedSignedHighSetup = (Resolve-Path -LiteralPath $SignedHighSetupPath).Path
 $resolvedLogDirectory = [IO.Path]::GetFullPath($LogDirectory)
@@ -805,8 +878,10 @@ try {
         -ChromeRegistryPath $chromeRegistryPath `
         -EdgeRegistryPath $edgeRegistryPath `
         -ProductRegistryPath $productRegistryPath
-    Invoke-DisposableUserIdentityProbe `
+    Register-DisposableUserIdentity `
         -Credential $disposableUserCredential `
+        -PackagePath $resolvedSignedLowIdentity `
+        -ExternalLocation $installFolder `
         -ExpectedVersion $LowVersion
 
     $desktopProcess = Start-Process `
@@ -938,6 +1013,45 @@ try {
             "/norestart",
             "/log",
             (Join-Path $resolvedLogDirectory "07-upgrade-high.log")
+        )
+    Assert-Installed `
+        -ExpectedVersion $HighVersion `
+        -BrowsersExpected $true `
+        -InstallFolder $installFolder `
+        -ChromeRegistryPath $chromeRegistryPath `
+        -EdgeRegistryPath $edgeRegistryPath `
+        -ProductRegistryPath $productRegistryPath
+    Invoke-DisposableUserIdentityProbe `
+        -Credential $disposableUserCredential `
+        -ExpectedVersion $HighVersion
+    Assert-Sentinel -Path $sentinelPath -Expected $sentinelValue
+
+    Register-DisposableUserIdentity `
+        -Credential $disposableUserCredential `
+        -PackagePath $resolvedSignedLowIdentity `
+        -ExternalLocation $installFolder `
+        -ExpectedVersion $LowVersion
+    $coexistingVersions = @(
+        Get-LibrarianPackages |
+            ForEach-Object { $_.Version.ToString() } |
+            Sort-Object -Unique
+    )
+    Assert-True (
+        $coexistingVersions.Count -eq 2 -and
+        $coexistingVersions -contains $LowVersion -and
+        $coexistingVersions -contains $HighVersion
+    ) "The secondary-user fixture did not create two package versions."
+    Invoke-SuccessfulProcess `
+        -Label "Repair with a retained secondary-user identity" `
+        -FilePath $msiexec `
+        -Arguments @(
+            "/fa",
+            $resolvedSignedHighMsi,
+            "ADDLOCAL=Core,ChromeIntegration,EdgeIntegration",
+            "/qn",
+            "/norestart",
+            "/l*v",
+            (Join-Path $resolvedLogDirectory "07b-secondary-user-repair.log")
         )
     Assert-Installed `
         -ExpectedVersion $HighVersion `

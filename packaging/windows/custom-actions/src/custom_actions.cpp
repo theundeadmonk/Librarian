@@ -866,24 +866,70 @@ namespace
         std::wstring const& user_sid)
     {
         std::vector<Package> const packages = matching_packages(manager);
-        if (packages.size() > 1U)
-        {
-            fail(
-                L"Setup refused ambiguous existing identity package state.");
-        }
         if (packages.empty())
         {
             return {};
         }
 
-        Package const package = packages.front();
-        PackageVersion const version = package.Id().Version();
-        if (comparable_version(version) >
-            comparable_version(incoming_version))
+        std::vector<Package> invoking_user_packages;
+        std::vector<Package> provisioned_packages;
+        for (Package const& package : packages)
         {
-            fail(L"Setup refused to replace a newer identity package.");
+            if (comparable_version(package.Id().Version()) >
+                comparable_version(incoming_version))
+            {
+                fail(L"Setup refused to replace a newer identity package.");
+            }
+            validate_external_location(package, install_folder);
+            if (package_is_registered_for_user(manager, package, user_sid))
+            {
+                invoking_user_packages.push_back(package);
+            }
+            if (package_is_provisioned(manager, package))
+            {
+                provisioned_packages.push_back(package);
+            }
         }
-        validate_external_location(package, install_folder);
+        if (invoking_user_packages.size() > 1U ||
+            provisioned_packages.size() > 1U)
+        {
+            fail(
+                L"Setup refused ambiguous existing identity package state.");
+        }
+
+        Package package{nullptr};
+        if (!invoking_user_packages.empty())
+        {
+            package = invoking_user_packages.front();
+        }
+        else
+        {
+            auto const exact = std::ranges::find_if(
+                packages,
+                [&incoming_version](Package const& candidate) {
+                    return comparable_version(candidate.Id().Version()) ==
+                           comparable_version(incoming_version);
+                });
+            if (exact != packages.end())
+            {
+                package = *exact;
+            }
+            else if (!provisioned_packages.empty())
+            {
+                package = provisioned_packages.front();
+            }
+            else
+            {
+                package = *std::ranges::max_element(
+                    packages,
+                    [](Package const& left, Package const& right) {
+                        return comparable_version(left.Id().Version()) <
+                               comparable_version(right.Id().Version());
+                    });
+            }
+        }
+
+        PackageVersion const version = package.Id().Version();
         return identity_snapshot{
             .package_present = true,
             .package_version = version,

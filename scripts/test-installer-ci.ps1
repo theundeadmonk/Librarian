@@ -101,7 +101,8 @@ function Copy-InstallerFixture {
     New-Item -ItemType Directory -Path $DestinationRoot -Force | Out-Null
     $sourceMsi = Join-Path $SourceRoot "msi\Librarian.Package.msi"
     $sourceSetup = Join-Path $SourceRoot "bundle\LibrarianSetup.exe"
-    foreach ($source in @($sourceMsi, $sourceSetup)) {
+    $sourceIdentity = Join-Path $SourceRoot "payload\Librarian.Identity.msix"
+    foreach ($source in @($sourceMsi, $sourceSetup, $sourceIdentity)) {
         Assert-True (
             (Test-Path -LiteralPath $source -PathType Leaf)
         ) "Installer fixture input is missing at '$source'."
@@ -112,6 +113,9 @@ function Copy-InstallerFixture {
     Copy-Item `
         -LiteralPath $sourceSetup `
         -Destination (Join-Path $DestinationRoot "LibrarianSetup.exe")
+    Copy-Item `
+        -LiteralPath $sourceIdentity `
+        -Destination (Join-Path $DestinationRoot "Librarian.Identity.msix")
 }
 
 if ($env:GITHUB_ACTIONS -ne "true" -or
