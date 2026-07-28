@@ -165,6 +165,51 @@ portable restore. If Windows cannot meet that contract against the accepted
 local-attacker model, Hello unlock remains disabled rather than becoming a
 weaker convenience path.
 
+### Windows Hello local protector state
+
+Issue #15 selects a WebAuthn PRF credential owned by the current Windows user
+as the user-verification mechanism. The trusted vault agent invokes the
+Windows-owned prompt through the bounded native bridge recorded in ADR 0002.
+The desktop supplies only a parent window that the agent binds to the
+authenticated desktop process; it never supplies a credential ID, PRF salt,
+PRF result, installation key, protector, or cryptographic choice.
+
+The agent generates one random 256-bit installation key and stores it with the
+credential ID, PRF salt, and opaque protector in one versioned device-local
+record. The complete record is protected for the current Windows user with
+DPAPI using UI-forbidden mode, written beneath the agent-owned package-local
+data directory with a protected, non-inheriting DACL containing exactly the
+current Windows user and LocalSystem with full control, and excluded from
+portable vaults and backups. The current user must also own the file. The
+agent reads the descriptor back and fails closed for a missing, inherited,
+defaulted, broadened, or otherwise mismatched ACL. Unpackaged development uses
+the corresponding agent-owned local-data directory with the same ACL and
+reparse-point checks. The agent creates, opens, replaces, and removes this
+record with the same guarded-path, file-identity, atomic-publication, and
+durability rules used for other security-critical local state.
+
+DPAPI and the ACL are defense in depth, not an alternative authenticator.
+Same-user code that copies or decrypts local state still lacks the
+authenticator-held PRF secret. Every unlock performs a fresh Windows-owned
+user-verification ceremony for the exact stored credential and salt, then
+combines its transient PRF output with the installation key in Rust. A copied
+protector, DPAPI blob, or credential ID is not independently sufficient to
+release the VRK.
+
+Enrollment requires an already unlocked vault and explicit desktop consent.
+The agent creates and validates the platform credential, constructs the
+protector in Rust, and atomically publishes the protected local record. Any
+failure before publication removes the newly created credential. Reenrollment
+publishes a complete new record before retiring the old credential. Removal
+deletes the platform credential before removing local state; an interrupted
+removal remains fail closed and retryable without modifying the master
+wrapper or vault contents.
+
+Lock, shutdown, sign-out, peer exit, cancellation, deadline expiry, a changed
+key epoch, a stale unlock epoch, local-state corruption, DPAPI failure,
+credential removal, or a changed Windows Hello enrollment releases no key and
+retains master-password fallback. No automatic fallback attempt occurs.
+
 ### Password derivation profile
 
 Version 1 writes exactly:
@@ -615,11 +660,13 @@ them.
   succeeded without logging addresses or bytes.
 - No cryptographic algorithm, secret serialization, decrypted record, password,
   recovery material, or raw IPC payload is delegated across an FFI boundary.
-  Rust owns cryptography and SQLite envelope construction. The only permitted
-  secret-buffer FFI is a reviewed, fixed-length Windows memory lock or unlock
-  call over an already allocated Rust buffer; its pointer, exact length, return
-  value, and cleanup are bounded and tested. Native clients receive only
-  bounded operation values.
+  Rust owns cryptography and SQLite envelope construction. Permitted
+  secret-buffer FFI is limited to reviewed fixed-length Windows memory
+  lock/unlock calls and the ADR 0002 agent-internal Windows Hello adapter
+  writing one 32-byte PRF result into already allocated zeroizing Rust storage.
+  Pointer, exact length, initialization, return value, and cleanup are bounded
+  and tested. The adapter receives no installation key or VRK, and native
+  clients receive only bounded operation values.
 - Panic messages, structured logs, Windows eventing, minidumps, temporary
   files, and test fixtures contain no secret values. Crash-dump policy and
   canary scans are acceptance work, not assumed protections.

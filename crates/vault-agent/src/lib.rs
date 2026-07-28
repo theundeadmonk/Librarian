@@ -11,6 +11,7 @@ mod runtime;
 mod snapshot;
 mod sqlite;
 mod storage;
+mod windows_hello;
 
 pub use errors::{AccountError, CreateError, UnlockError};
 pub use librarian_vault_core::{

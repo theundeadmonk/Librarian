@@ -87,6 +87,7 @@ pub enum OperationCode {
     DeleteAccount = 9,
     EnrollWindowsHello = 10,
     RemoveWindowsHello = 11,
+    UnlockWindowsHello = 12,
     ExactOriginMatches = 20,
     GetSelectedCredential = 21,
     CaptureCredential = 22,
@@ -98,7 +99,7 @@ pub enum OperationCode {
 
 impl OperationCode {
     /// Complete closed operation set for version 1.
-    pub const ALL: [Self; 18] = [
+    pub const ALL: [Self; 19] = [
         Self::Status,
         Self::CreateVault,
         Self::UnlockMasterPassword,
@@ -110,6 +111,7 @@ impl OperationCode {
         Self::DeleteAccount,
         Self::EnrollWindowsHello,
         Self::RemoveWindowsHello,
+        Self::UnlockWindowsHello,
         Self::ExactOriginMatches,
         Self::GetSelectedCredential,
         Self::CaptureCredential,
@@ -135,6 +137,7 @@ impl OperationCode {
                     | Self::DeleteAccount
                     | Self::EnrollWindowsHello
                     | Self::RemoveWindowsHello
+                    | Self::UnlockWindowsHello
             ),
             ClientRole::NativeHost => matches!(
                 self,
@@ -189,6 +192,16 @@ impl OperationCode {
         )
     }
 
+    #[must_use]
+    pub const fn required_feature(self) -> Option<u16> {
+        match self {
+            Self::EnrollWindowsHello | Self::RemoveWindowsHello | Self::UnlockWindowsHello => {
+                Some(crate::FEATURE_WINDOWS_HELLO)
+            }
+            _ => None,
+        }
+    }
+
     pub(crate) const fn from_u64(value: u64) -> Option<Self> {
         match value {
             1 => Some(Self::Status),
@@ -202,6 +215,7 @@ impl OperationCode {
             9 => Some(Self::DeleteAccount),
             10 => Some(Self::EnrollWindowsHello),
             11 => Some(Self::RemoveWindowsHello),
+            12 => Some(Self::UnlockWindowsHello),
             20 => Some(Self::ExactOriginMatches),
             21 => Some(Self::GetSelectedCredential),
             22 => Some(Self::CaptureCredential),

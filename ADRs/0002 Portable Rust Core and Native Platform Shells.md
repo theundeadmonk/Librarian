@@ -25,6 +25,45 @@ For the Windows MVP, the C++/WinRT app and passkey provider communicate with the
 
 For future Kotlin and Swift bindings, evaluate UniFFI in a bounded spike. Do not adopt it until cancellation, errors, concurrency, binary size, versioning, and secret-memory behavior have been measured and the version is pinned.
 
+## 2026-07-27 amendment: agent-internal Windows Hello bridge
+
+Issue #15 requires the Rust vault agent to own the Windows Hello ceremony.
+Sending a WebAuthn PRF result through desktop-controlled IPC was rejected
+because a modified desktop could choose those bytes and bypass the
+Windows-owned verification prompt. Running the existing reviewed native
+WebAuthn component out of process would recreate the same secret-bearing IPC
+problem, while independently redeclaring the evolving WebAuthn API-v8 ABI in
+Rust would duplicate a security-critical Windows boundary.
+
+The agent may therefore statically link one narrow C ABI adapter around
+`platform/windows-hello` as a measured exception to the general prohibition on
+in-process C++/Rust FFI. This exception is part of the trusted agent process;
+it is not available to the desktop, passkey provider, native-messaging host,
+extension, or website.
+
+The exception is limited to:
+
+- capability discovery, enrollment, PRF evaluation, cancellation, and removal
+  for the fixed Librarian relying party;
+- one nonzero parent-window value that the Rust agent validates belongs to the
+  authenticated desktop peer before calling native code;
+- bounded public metadata: a credential ID of at most 1,024 bytes and one
+  32-byte PRF salt;
+- exactly one 32-byte transient PRF result written into caller-owned,
+  zeroizing Rust storage; and
+- integer status codes with no exception, allocator, object, string, or
+  ownership transfer across the ABI.
+
+The adapter catches every C++ exception, initializes outputs before work,
+clears native and caller-visible secret buffers on every unsuccessful path,
+and never receives a password, installation key, VRK, protector ciphertext,
+vault record, or database handle. Rust remains the only owner of cryptography,
+protector construction, local protected-state parsing, vault state, and
+authorization. ABI size/offset assertions, canaries, cancellation and cleanup
+tests, and independent review are required before production readiness.
+This amendment does not authorize a general binding layer or any other
+secret-bearing FFI.
+
 ## Consequences
 
 ### Benefits

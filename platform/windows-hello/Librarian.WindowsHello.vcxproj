@@ -52,10 +52,12 @@
     </ClCompile>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClInclude Include="include\librarian\windows_hello\bridge.h" />
     <ClInclude Include="include\librarian\windows_hello\client.h" />
     <ClInclude Include="src\validation.h" />
   </ItemGroup>
   <ItemGroup>
+    <ClCompile Include="src\bridge.cpp" />
     <ClCompile Include="src\client.cpp" />
     <ClCompile Include="src\validation.cpp" />
   </ItemGroup>

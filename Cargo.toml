@@ -5,6 +5,7 @@ members = [
     "crates/vault-core",
     "crates/vault-format",
     "platform/chromium-native-host",
+    "platform/windows-hello-agent",
     "platform/windows-ipc",
 ]
 resolver = "3"

@@ -56,5 +56,11 @@ pub const UNLOCK_TIMEOUT_MS: u32 = 30_000;
 /// Maximum Windows-mediated passkey deadline.
 pub const PASSKEY_TIMEOUT_MS: u32 = 120_000;
 
+/// Oldest protocol revision accepted by this agent.
+pub const MINIMUM_VERSION: Version = Version::new(1, 0);
 /// Current trusted-protocol version.
-pub const CURRENT_VERSION: Version = Version::new(1, 0);
+pub const CURRENT_VERSION: Version = Version::new(1, 1);
+/// First protocol revision that defines agent-owned Windows Hello operations.
+pub const WINDOWS_HELLO_VERSION: Version = Version::new(1, 1);
+/// Explicit feature grant required for every Windows Hello operation.
+pub const FEATURE_WINDOWS_HELLO: u16 = 1;

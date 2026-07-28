@@ -160,6 +160,12 @@ impl VaultAgent {
         self.session.as_ref().map(|session| *session.vault_id())
     }
 
+    pub(crate) fn authenticated_vault_binding(&self) -> Option<([u8; 16], u32)> {
+        self.session
+            .as_ref()
+            .map(|session| (*session.vault_id(), session.key_epoch()))
+    }
+
     /// Creates an opaque, installation-bound Windows Hello protector from the
     /// currently unlocked vault root key.
     ///

@@ -74,6 +74,7 @@ fn connection(role: ClientRole, runtime: &AgentRuntime, marker: u8) -> Connectio
     .expect("client hello");
     Connection::negotiate(
         role,
+        17,
         BUILD_ID,
         &hello,
         &[],

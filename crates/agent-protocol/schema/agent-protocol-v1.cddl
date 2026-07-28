@@ -64,6 +64,9 @@ get-account-body = [record-id: bytes .size 16]
 add-account-body = [account-fields]
 update-account-body = [record-id: bytes .size 16, account-fields]
 delete-account-body = [record-id: bytes .size 16]
+enroll-windows-hello-body = [parent-window: 1..18446744073709551615]
+unlock-windows-hello-body = [parent-window: 1..18446744073709551615]
+remove-windows-hello-body = []
 
 account-fields = (
   service-name: text .size (0..256),
