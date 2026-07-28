@@ -140,6 +140,58 @@ function Invoke-FailingProcess {
     ) "$Label unexpectedly succeeded."
 }
 
+function Invoke-DisposableUserPowerShell {
+    param(
+        [Parameter(Mandatory)]
+        [PSCredential]$Credential,
+
+        [Parameter(Mandatory)]
+        [string]$Script
+    )
+
+    # CreateProcessWithLogonW limits its command line to 1,024 characters.
+    # Keep the generated probe out of ArgumentList and remove it after use.
+    $probePath = Join-Path `
+        ([Environment]::GetFolderPath(
+            [Environment+SpecialFolder]::CommonApplicationData
+        )) `
+        ("LibrarianInstallerLifecycleProbe-{0}.ps1" -f [Guid]::NewGuid().ToString("N"))
+    try {
+        [IO.File]::WriteAllText(
+            $probePath,
+            $Script,
+            (New-Object Text.UTF8Encoding($false))
+        )
+        $process = Start-Process `
+            -FilePath (
+                "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
+            ) `
+            -ArgumentList @(
+                "-NoLogo",
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                $probePath
+            ) `
+            -Credential $Credential `
+            -LoadUserProfile `
+            -UseNewEnvironment `
+            -WorkingDirectory $env:SystemRoot `
+            -WindowStyle Hidden `
+            -Wait `
+            -PassThru
+        try {
+            return $process.ExitCode
+        } finally {
+            $process.Dispose()
+        }
+    } finally {
+        Remove-Item -LiteralPath $probePath -Force -ErrorAction SilentlyContinue
+    }
+}
+
 function Invoke-DisposableUserIdentityProbe {
     param(
         [Parameter(Mandatory)]
@@ -166,37 +218,15 @@ do {
 } while ([DateTime]::UtcNow -lt `$deadline)
 exit 1
 "@
-    $encodedProbe = [Convert]::ToBase64String(
-        [Text.Encoding]::Unicode.GetBytes($probe)
-    )
-    $process = Start-Process `
-        -FilePath (
-            "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
-        ) `
-        -ArgumentList @(
-            "-NoLogo",
-            "-NoProfile",
-            "-NonInteractive",
-            "-EncodedCommand",
-            $encodedProbe
-        ) `
+    $exitCode = Invoke-DisposableUserPowerShell `
         -Credential $Credential `
-        -LoadUserProfile `
-        -UseNewEnvironment `
-        -WorkingDirectory $env:SystemRoot `
-        -WindowStyle Hidden `
-        -Wait `
-        -PassThru
-    try {
-        Assert-True (
-            $process.ExitCode -eq 0
-        ) (
-            "The disposable secondary user did not receive Librarian identity " +
-            "version '$ExpectedVersion'."
-        )
-    } finally {
-        $process.Dispose()
-    }
+        -Script $probe
+    Assert-True (
+        $exitCode -eq 0
+    ) (
+        "The disposable secondary user did not receive Librarian identity " +
+        "version '$ExpectedVersion'."
+    )
 }
 
 function Register-DisposableUserIdentity {
@@ -233,37 +263,15 @@ if (`$versions.Count -ne 1 -or `$versions[0] -ne "$ExpectedVersion") {
 }
 exit 0
 "@
-    $encodedProbe = [Convert]::ToBase64String(
-        [Text.Encoding]::Unicode.GetBytes($probe)
-    )
-    $process = Start-Process `
-        -FilePath (
-            "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
-        ) `
-        -ArgumentList @(
-            "-NoLogo",
-            "-NoProfile",
-            "-NonInteractive",
-            "-EncodedCommand",
-            $encodedProbe
-        ) `
+    $exitCode = Invoke-DisposableUserPowerShell `
         -Credential $Credential `
-        -LoadUserProfile `
-        -UseNewEnvironment `
-        -WorkingDirectory $env:SystemRoot `
-        -WindowStyle Hidden `
-        -Wait `
-        -PassThru
-    try {
-        Assert-True (
-            $process.ExitCode -eq 0
-        ) (
-            "The disposable secondary user could not register Librarian " +
-            "identity version '$ExpectedVersion'."
-        )
-    } finally {
-        $process.Dispose()
-    }
+        -Script $probe
+    Assert-True (
+        $exitCode -eq 0
+    ) (
+        "The disposable secondary user could not register Librarian " +
+        "identity version '$ExpectedVersion'."
+    )
 }
 
 function Register-CurrentUserIdentity {
