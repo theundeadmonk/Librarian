@@ -62,6 +62,10 @@ behavior. Production signing credentials are never part of the repository or
 local build command.
 On a normal Windows checkout, the build also checks whitespace in the committed branch diff, the index, and the working tree. GitHub Actions supplies the pull request or push base commit explicitly.
 
+Rust tests use optimized test code with debug assertions and overflow checks
+enabled. This keeps the vault-agent integration suite's production request
+deadlines representative without relaxing those deadlines.
+
 ## Interactive Windows shell smoke test
 
 After a successful Release build, run the packaged WinUI shell smoke test from

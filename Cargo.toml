@@ -23,3 +23,12 @@ unsafe_code = "forbid"
 [workspace.lints.clippy]
 all = { level = "deny", priority = -1 }
 pedantic = { level = "deny", priority = -1 }
+
+# Runtime integration tests enforce production request deadlines around
+# cryptography and durable SQLite writes. Optimize their code paths so those
+# deadlines measure representative work while retaining test assertions and
+# overflow checks.
+[profile.test]
+opt-level = 2
+debug-assertions = true
+overflow-checks = true
