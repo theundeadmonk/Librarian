@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "dependencies": {
+    "native,Version=v0.0": {
+      "Microsoft.Windows.CppWinRT": {
+        "type": "Direct",
+        "requested": "[3.0.260715.1, )",
+        "resolved": "3.0.260715.1",
+        "contentHash": "zwoJXZ+BV7gEmyosDp/aYai5nXDCN0dZ9cQ4ACLnyCQisRqcGLqH7LXXTNo5Va6lAnXrItbxUWP+dHnel1/Vdw=="
+      },
+      "Microsoft.Windows.SDK.BuildTools": {
+        "type": "Direct",
+        "requested": "[10.0.28000.2270, )",
+        "resolved": "10.0.28000.2270",
+        "contentHash": "a7xlGBRfSyXQrjnzFMDd0FCOvyv9mA/oX0FNt4A5hAVvVy6w62NBxygDC/LHM1205dXH9Pv4u0D+Qr77GH8e4Q=="
+      }
+    }
+  }
+}

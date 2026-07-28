@@ -30,12 +30,12 @@ The package-enabled WinUI development target may continue to build a full,
 unsigned MSIX for isolated UI smoke tests. That development package is not the
 production setup lifecycle.
 
-The identity fixture and validation scripts added here are development-only
-until release signing, installer authoring, transaction, upgrade, repair, and
-uninstall tests are complete. They must not install a package, trust a
-certificate, or enable secret-bearing product paths automatically. MakeAppx
+The identity fixture is embedded in the issue #19 MSI and inspected by the
+installer structural suite. Build validation must not install a package, trust
+a certificate, or enable secret-bearing product paths automatically. MakeAppx
 uses `/nv` because external executable and visual-resource paths intentionally
 do not resolve inside the identity package, as required by Microsoft's manual
-external-location packaging procedure. The future passkey-provider executable
-does not exist yet; production setup must reject that incomplete payload rather
-than register it.
+external-location packaging procedure. The passkey-provider executable does
+not exist yet; the current setup rejects that incomplete role rather than
+registering a placeholder. Issue #18 will extend the same lifecycle when the
+real provider exists.

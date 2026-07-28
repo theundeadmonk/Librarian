@@ -35,12 +35,22 @@ The MSI installs the native product binaries beneath a protected per-machine
 - `Librarian.VaultAgent.exe`
 - `Librarian.Windows.exe`
 - `Librarian.ChromiumNativeHost.exe`
-- `Librarian.PasskeyProvider.exe`
+
+The `Librarian.PasskeyProvider.exe` role remains reserved by ADR 0006, but it
+is not installed or registered until issue #18 supplies the real provider.
+Issue #19 must fail closed rather than add a placeholder executable or identity.
+Issue #18 will extend this same setup lifecycle with the fourth component.
 
 The setup executable, MSI, identity package, and native binaries carry one
 compatible product version. Installation must validate the complete required
 payload before enabling registrations. An interrupted or invalid installation
 rolls back instead of leaving a partially authorized product.
+
+WiX Toolset 7.0.0 authors the setup bundle and MSI. The source is available
+under the Microsoft Reciprocal License; the project accepts the Open Source
+Maintenance Fee EULA v1.1 that governs the official WiX binaries, including
+its maintenance-fee obligation if the applicable annual-revenue threshold is
+reached. The exact SDK and extension package versions are pinned in source.
 
 ### Identity-only MSIX
 
@@ -100,9 +110,9 @@ the user's independent browser-extension choices.
 - Supported production installation is x64 on supported Windows 11 editions,
   including Windows 11 Home. Browser absence is not an installation error.
 
-The installer authoring tool and production signing service require a separate
-version and licensing decision before they are pinned. This ADR chooses the
-product boundary, not a tool vendor.
+The production signing service remains a separate release decision. Local
+development uses only an explicitly supplied non-production certificate;
+setup never creates or trusts one.
 
 ## Consequences
 
@@ -126,3 +136,22 @@ Issue #19 must produce and validate the identity package, setup/MSI payload, and
 registration fixtures with disposable values. A production-credential release
 remains blocked until the release gates in [[Threat Model]] pass, including a
 clean-profile install and independent security review.
+
+The Release pipeline decompiles and inspects the built MSI and Burn bundle; it
+does not treat source review as proof of the bound installer. Windows Installer
+ICE validation is also mandatory in CI. A local Windows 11 development machine
+with Smart App Control enforcement may explicitly skip ICE because Windows
+blocks the validator's temporary unsigned MSI even when WiX is elevated. That
+exception does not suppress the structural suite, does not weaken Smart App
+Control, and is not permitted on the clean Windows CI runner.
+
+The disposable GitHub-hosted Windows runner also creates a short-lived,
+non-exportable development code-signing certificate, trusts only its public
+certificate for that job, and removes both certificate-store entries in a
+`finally` block. CI builds a workspace-version fixture and a strictly higher
+fixture whose first three Windows Installer version fields differ. It then
+executes unsigned and wrong-component rejection, clean install and launch,
+browser opt-in, repair, interrupted-upgrade rollback, successful upgrade,
+downgrade rejection, uninstall, reinstall, registration cleanup, and retained
+disposable user-data checks. The harness refuses to run on a developer or
+self-hosted machine and never exports a PFX or private key.

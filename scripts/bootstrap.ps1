@@ -10,11 +10,26 @@ $expected = [ordered]@{
     Node = "24.18.0"
     Npm = "11.16.0"
     Rust = "1.97.1"
+    DotNetSdk = "10.0.302"
+    Wix = "7.0.0"
     WindowsSdk = "10.0.28000.0"
     WindowsSdkBuildTools = "10.0.28000.2270"
     WindowsAppSdk = "2.3.1"
     CppWinRt = "3.0.260715.1"
     Wil = "1.0.260126.7"
+}
+
+function Normalize-ProcessPathEnvironment {
+    # Windows environment names are case-insensitive, but some process launchers
+    # can supply both Path and PATH. .NET Framework then throws while copying the
+    # inherited block for a child process. Rewrite only this process's entry.
+    $activePath = [Environment]::GetEnvironmentVariable("Path", "Process")
+    if ($null -eq $activePath) {
+        throw "The current process does not have a Path environment variable."
+    }
+
+    [Environment]::SetEnvironmentVariable("PATH", $null, "Process")
+    [Environment]::SetEnvironmentVariable("Path", $activePath, "Process")
 }
 
 function Add-KnownToolDirectories {
@@ -70,21 +85,35 @@ function Get-ToolOutput {
         [string[]]$Arguments
     )
 
-    $standardOutput = [IO.Path]::GetTempFileName()
-    $standardError = [IO.Path]::GetTempFileName()
+    $argumentText = ($Arguments | ForEach-Object {
+        if ($_ -match '^".*"$' -or $_ -notmatch '\s') {
+            $_
+        } else {
+            '"' + $_.Replace('"', '\"') + '"'
+        }
+    }) -join " "
+
+    $startInfo = New-Object Diagnostics.ProcessStartInfo
+    $startInfo.FileName = $FilePath
+    $startInfo.Arguments = $argumentText
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+
+    $process = New-Object Diagnostics.Process
+    $process.StartInfo = $startInfo
+    if (-not $process.Start()) {
+        throw "Could not start '$FilePath'."
+    }
 
     try {
-        $process = Start-Process `
-            -FilePath $FilePath `
-            -ArgumentList $Arguments `
-            -Wait `
-            -PassThru `
-            -NoNewWindow `
-            -RedirectStandardOutput $standardOutput `
-            -RedirectStandardError $standardError
+        $standardOutput = $process.StandardOutput.ReadToEndAsync()
+        $standardError = $process.StandardError.ReadToEndAsync()
+        $process.WaitForExit()
 
-        $output = [string](Get-Content -Raw $standardOutput)
-        $errorOutput = [string](Get-Content -Raw $standardError)
+        $output = $standardOutput.Result
+        $errorOutput = $standardError.Result
         if ($process.ExitCode -ne 0) {
             $diagnostics = (@($output, $errorOutput) | Where-Object { $_ }) -join [Environment]::NewLine
             throw "'$FilePath $($Arguments -join ' ')' failed with exit code $($process.ExitCode): $($diagnostics.Trim())"
@@ -92,7 +121,7 @@ function Get-ToolOutput {
 
         return $output.Trim()
     } finally {
-        Remove-Item $standardOutput, $standardError -Force -ErrorAction SilentlyContinue
+        $process.Dispose()
     }
 }
 
@@ -181,6 +210,7 @@ if ($windowsVersion.Build -lt $minimumWindowsBuild) {
     throw "Windows 11 build $minimumWindowsBuild or newer is required; build $($windowsVersion.Build) is active."
 }
 
+Normalize-ProcessPathEnvironment
 Add-KnownToolDirectories
 
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
@@ -199,6 +229,9 @@ $cargo = Resolve-Tool -Name "cargo.exe" -KnownPaths @(
 $git = Resolve-Tool -Name "git.exe" -KnownPaths @(
     (Join-Path $env:ProgramFiles "Git\cmd\git.exe")
 )
+$dotnet = Resolve-Tool -Name "dotnet.exe" -KnownPaths @(
+    (Join-Path $env:ProgramFiles "dotnet\dotnet.exe")
+)
 $msbuild = Resolve-MSBuild
 
 $nodeVersion = (Get-ToolOutput -FilePath $node -Arguments @("--version")).TrimStart("v")
@@ -206,6 +239,7 @@ $npmVersion = Get-ToolOutput -FilePath $npm -Arguments @("--version")
 $rustOutput = Get-ToolOutput -FilePath $rustc -Arguments @("--version")
 $cargoOutput = Get-ToolOutput -FilePath $cargo -Arguments @("--version")
 $gitVersion = Get-ToolOutput -FilePath $git -Arguments @("--version")
+$dotnetVersion = Get-ToolOutput -FilePath $dotnet -Arguments @("--version")
 
 if ($rustOutput -notmatch "^rustc ([^\s]+)") {
     throw "Could not parse rustc version from '$rustOutput'."
@@ -215,6 +249,10 @@ $rustVersion = $Matches[1]
 Assert-ExactVersion -Name "Node.js" -Actual $nodeVersion -Required $expected.Node
 Assert-ExactVersion -Name "npm" -Actual $npmVersion -Required $expected.Npm
 Assert-ExactVersion -Name "Rust" -Actual $rustVersion -Required $expected.Rust
+Assert-ExactVersion `
+    -Name ".NET SDK" `
+    -Actual $dotnetVersion `
+    -Required $expected.DotNetSdk
 
 if ($cargoOutput -match "(?i)(alpha|beta|preview|rc|experimental)") {
     throw "Cargo must be from a stable Rust toolchain, but '$cargoOutput' is active."
@@ -242,10 +280,57 @@ Assert-FileContains -Path $windowsProject -ExpectedText ('Include="Microsoft.Win
 Assert-FileContains -Path $windowsProject -ExpectedText ('Include="Microsoft.Windows.SDK.BuildTools" Version="' + $expected.WindowsSdkBuildTools + '"')
 Assert-FileContains -Path $windowsProject -ExpectedText ('Include="Microsoft.Windows.ImplementationLibrary" Version="' + $expected.Wil + '"')
 
+$globalJsonPath = Join-Path $repoRoot "global.json"
+if (-not (Test-Path -LiteralPath $globalJsonPath -PathType Leaf)) {
+    throw "Required .NET SDK pin is missing: $globalJsonPath"
+}
+$globalJson = Get-Content -LiteralPath $globalJsonPath -Raw | ConvertFrom-Json
+if ($globalJson.sdk.version -ne $expected.DotNetSdk -or
+    $globalJson.sdk.rollForward -ne "disable" -or
+    $globalJson.sdk.allowPrerelease -ne $false) {
+    throw (
+        "global.json must pin .NET SDK $($expected.DotNetSdk), disable " +
+        "roll-forward, and disallow prerelease SDKs."
+    )
+}
+
+$customActionProject = Join-Path $repoRoot (
+    "packaging\windows\custom-actions\Librarian.Setup.CustomActions.vcxproj"
+)
+Assert-FileContains `
+    -Path $customActionProject `
+    -ExpectedText (
+        'Include="Microsoft.Windows.CppWinRT" Version="' +
+        $expected.CppWinRt +
+        '"'
+    )
+Assert-FileContains `
+    -Path $customActionProject `
+    -ExpectedText (
+        'Include="Microsoft.Windows.SDK.BuildTools" Version="' +
+        $expected.WindowsSdkBuildTools +
+        '"'
+    )
+
+foreach ($wixProject in @(
+    (Join-Path $repoRoot "packaging\windows\Librarian.Package.wixproj")
+    (Join-Path $repoRoot "packaging\windows\Librarian.Setup.wixproj")
+)) {
+    Assert-FileContains `
+        -Path $wixProject `
+        -ExpectedText ('Project Sdk="WixToolset.Sdk/' + $expected.Wix + '"')
+    Assert-FileContains `
+        -Path $wixProject `
+        -ExpectedText "<AcceptEula>wix7</AcceptEula>"
+}
+
 foreach ($lockfile in @(
     (Join-Path $repoRoot "Cargo.lock")
     (Join-Path $repoRoot "package-lock.json")
     (Join-Path $repoRoot "apps\windows\Librarian.Windows\packages.lock.json")
+    (Join-Path $repoRoot "packaging\windows\custom-actions\packages.lock.json")
+    (Join-Path $repoRoot "packaging\windows\Librarian.Package.packages.lock.json")
+    (Join-Path $repoRoot "packaging\windows\Librarian.Setup.packages.lock.json")
 )) {
     if (-not (Test-Path $lockfile)) {
         throw "Required dependency lockfile is missing: $lockfile"
@@ -259,6 +344,7 @@ $result = [PSCustomObject]@{
     Rustc = $rustc
     Cargo = $cargo
     Git = $git
+    DotNet = $dotnet
     MSBuild = $msbuild
     WindowsSdkRoot = $windowsSdkRoot
     Versions = [PSCustomObject]@{
@@ -275,6 +361,8 @@ $result = [PSCustomObject]@{
         Node = $nodeVersion
         Npm = $npmVersion
         Git = $gitVersion
+        DotNetSdk = $dotnetVersion
+        Wix = $expected.Wix
     }
 }
 

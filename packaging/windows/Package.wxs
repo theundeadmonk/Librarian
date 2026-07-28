@@ -1,0 +1,312 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Wix
+  xmlns="http://wixtoolset.org/schemas/v4/wxs"
+  xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui"
+  xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util">
+  <Package
+    Name="Librarian"
+    Manufacturer="Librarian contributors"
+    Version="$(var.ProductVersion)"
+    UpgradeCode="{212A27C7-B2F4-4053-A80D-FCDAB5C2CEC1}"
+    Scope="perMachine"
+    InstallerVersion="500"
+    Compressed="yes">
+
+    <SummaryInformation
+      Description="Librarian Windows product"
+      Keywords="Librarian,password manager,Windows"
+      Manufacturer="Librarian contributors" />
+    <MajorUpgrade
+      DowngradeErrorMessage="A newer version of Librarian is already installed."
+      Schedule="afterInstallExecute" />
+    <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
+
+    <!-- Burn owns the single Programs and Features entry. -->
+    <Property Id="ARPSYSTEMCOMPONENT" Value="1" />
+    <Property Id="MSIRESTARTMANAGERCONTROL" Value="Disable" />
+    <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOXTEXT" Value="Launch Librarian" />
+    <Property Id="WixShellExecTarget" Value="[#DesktopExecutable]" />
+
+    <Property Id="CHROME_MACHINE">
+      <RegistrySearch
+        Root="HKLM"
+        Key="SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\chrome.exe"
+        Type="raw"
+        Bitness="always64" />
+    </Property>
+    <Property Id="CHROME_USER">
+      <RegistrySearch
+        Root="HKCU"
+        Key="SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\chrome.exe"
+        Type="raw" />
+    </Property>
+    <Property Id="EDGE_MACHINE">
+      <RegistrySearch
+        Root="HKLM"
+        Key="SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\msedge.exe"
+        Type="raw"
+        Bitness="always64" />
+    </Property>
+    <Property Id="EDGE_USER">
+      <RegistrySearch
+        Root="HKCU"
+        Key="SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\msedge.exe"
+        Type="raw" />
+    </Property>
+
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="Librarian" />
+    </StandardDirectory>
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Directory Id="LibrarianProgramMenu" Name="Librarian" />
+    </StandardDirectory>
+
+    <Feature
+      Id="Core"
+      Title="Librarian"
+      Description="Desktop app, vault agent, native host, and package identity."
+      AllowAbsent="no"
+      AllowAdvertise="no"
+      InstallDefault="local"
+      Level="1">
+      <Component Id="CoreExecutables" Directory="INSTALLFOLDER" Guid="*">
+        <File
+          Id="DesktopExecutable"
+          Source="$(var.PayloadDir)\Librarian.Windows.exe"
+          KeyPath="yes">
+          <Shortcut
+            Id="LibrarianStartMenuShortcut"
+            Directory="LibrarianProgramMenu"
+            Name="Librarian"
+            Description="Open Librarian"
+            WorkingDirectory="INSTALLFOLDER" />
+        </File>
+        <RemoveFolder
+          Id="RemoveLibrarianProgramMenu"
+          Directory="LibrarianProgramMenu"
+          On="uninstall" />
+        <RegistryValue
+          Root="HKLM"
+          Key="SOFTWARE\TheUndeadMonk\Librarian"
+          Name="Version"
+          Type="string"
+          Value="[ProductVersion]" />
+      </Component>
+      <Component Id="VaultAgentExecutableComponent" Directory="INSTALLFOLDER" Guid="*">
+        <File
+          Id="VaultAgentExecutable"
+          Source="$(var.PayloadDir)\Librarian.VaultAgent.exe"
+          KeyPath="yes" />
+      </Component>
+      <Component Id="ChromiumHostExecutableComponent" Directory="INSTALLFOLDER" Guid="*">
+        <File
+          Id="ChromiumHostExecutable"
+          Source="$(var.PayloadDir)\Librarian.ChromiumNativeHost.exe"
+          KeyPath="yes" />
+      </Component>
+      <Component Id="IdentityPackageComponent" Directory="INSTALLFOLDER" Guid="*">
+        <File
+          Id="IdentityMsix"
+          Source="$(var.PayloadDir)\Librarian.Identity.msix"
+          KeyPath="yes" />
+      </Component>
+      <Files
+        Include="$(var.PayloadDir)\**"
+        Directory="INSTALLFOLDER">
+        <Exclude Files="$(var.PayloadDir)\Librarian.Windows.exe" />
+        <Exclude Files="$(var.PayloadDir)\Librarian.VaultAgent.exe" />
+        <Exclude Files="$(var.PayloadDir)\Librarian.ChromiumNativeHost.exe" />
+        <Exclude Files="$(var.PayloadDir)\Librarian.Identity.msix" />
+      </Files>
+    </Feature>
+
+    <Feature
+      Id="ChromeIntegration"
+      Title="Google Chrome integration"
+      Description="Registers Librarian's native-messaging host for Chrome. The extension remains a separate user-approved store install."
+      AllowAbsent="yes"
+      AllowAdvertise="no"
+      InstallDefault="local"
+      Level="0">
+      <Level Value="2" Condition="CHROME_MACHINE OR CHROME_USER" />
+      <Component Id="ChromeNativeHostManifestFile" Directory="INSTALLFOLDER" Guid="*">
+        <File
+          Id="ChromeNativeHostManifest"
+          Source="$(var.BrowserManifestDir)\com.theundeadmonk.librarian.chrome.json"
+          KeyPath="yes" />
+      </Component>
+      <Component Id="ChromeNativeHostRegistration" Directory="INSTALLFOLDER" Guid="*">
+        <RegistryValue
+          Root="HKLM"
+          Key="SOFTWARE\Google\Chrome\NativeMessagingHosts\com.theundeadmonk.librarian"
+          Type="string"
+          Value="[#ChromeNativeHostManifest]"
+          KeyPath="yes" />
+      </Component>
+    </Feature>
+
+    <Feature
+      Id="EdgeIntegration"
+      Title="Microsoft Edge integration"
+      Description="Registers Librarian's native-messaging host for Edge. The extension remains a separate user-approved store install."
+      AllowAbsent="yes"
+      AllowAdvertise="no"
+      InstallDefault="local"
+      Level="0">
+      <Level Value="2" Condition="EDGE_MACHINE OR EDGE_USER" />
+      <Component Id="EdgeNativeHostManifestFile" Directory="INSTALLFOLDER" Guid="*">
+        <File
+          Id="EdgeNativeHostManifest"
+          Source="$(var.BrowserManifestDir)\com.theundeadmonk.librarian.edge.json"
+          KeyPath="yes" />
+      </Component>
+      <Component Id="EdgeNativeHostRegistration" Directory="INSTALLFOLDER" Guid="*">
+        <RegistryValue
+          Root="HKLM"
+          Key="SOFTWARE\Microsoft\Edge\NativeMessagingHosts\com.theundeadmonk.librarian"
+          Type="string"
+          Value="[#EdgeNativeHostManifest]"
+          KeyPath="yes" />
+      </Component>
+    </Feature>
+
+    <Binary
+      Id="LibrarianSetupCustomActions"
+      SourceFile="$(var.CustomActionPath)" />
+
+    <CustomAction
+      Id="SnapshotIdentity"
+      BinaryRef="LibrarianSetupCustomActions"
+      DllEntry="SnapshotIdentity"
+      Execute="deferred"
+      Impersonate="no"
+      Return="check"
+      HideTarget="yes" />
+    <CustomAction
+      Id="RollbackIdentity"
+      BinaryRef="LibrarianSetupCustomActions"
+      DllEntry="RollbackIdentity"
+      Execute="rollback"
+      Impersonate="no"
+      Return="check"
+      HideTarget="yes" />
+    <CustomAction
+      Id="RegisterIdentity"
+      BinaryRef="LibrarianSetupCustomActions"
+      DllEntry="RegisterIdentity"
+      Execute="deferred"
+      Impersonate="no"
+      Return="check"
+      HideTarget="yes" />
+    <CustomAction
+      Id="CleanupIdentitySnapshot"
+      BinaryRef="LibrarianSetupCustomActions"
+      DllEntry="CleanupIdentitySnapshot"
+      Execute="commit"
+      Impersonate="no"
+      Return="check"
+      HideTarget="yes" />
+    <CustomAction
+      Id="RollbackUnregisterIdentity"
+      BinaryRef="LibrarianSetupCustomActions"
+      DllEntry="RegisterIdentity"
+      Execute="rollback"
+      Impersonate="no"
+      Return="check"
+      HideTarget="yes" />
+    <CustomAction
+      Id="UnregisterIdentity"
+      BinaryRef="LibrarianSetupCustomActions"
+      DllEntry="UnregisterIdentity"
+      Execute="deferred"
+      Impersonate="no"
+      Return="check"
+      HideTarget="yes" />
+    <CustomAction
+      Id="LaunchApplication"
+      BinaryRef="Wix4UtilCA_$(sys.BUILDARCHSHORT)"
+      DllEntry="WixShellExec"
+      Impersonate="yes"
+      Return="check" />
+
+    <SetProperty
+      Id="SnapshotIdentity"
+      Value="[INSTALLFOLDER]Librarian.Identity.msix.state|[INSTALLFOLDER]|[ProductVersion]"
+      Before="SnapshotIdentity"
+      Sequence="execute"
+      Condition="NOT (REMOVE~=&quot;ALL&quot;)" />
+    <SetProperty
+      Id="RollbackIdentity"
+      Value="[INSTALLFOLDER]Librarian.Identity.msix.state|[INSTALLFOLDER]|[ProductVersion]"
+      Before="RollbackIdentity"
+      Sequence="execute"
+      Condition="NOT (REMOVE~=&quot;ALL&quot;)" />
+    <SetProperty
+      Id="RegisterIdentity"
+      Value="[#IdentityMsix]|[INSTALLFOLDER]|[ProductVersion]"
+      Before="RegisterIdentity"
+      Sequence="execute"
+      Condition="NOT (REMOVE~=&quot;ALL&quot;)" />
+    <SetProperty
+      Id="CleanupIdentitySnapshot"
+      Value="[INSTALLFOLDER]Librarian.Identity.msix.state|[INSTALLFOLDER]"
+      Before="CleanupIdentitySnapshot"
+      Sequence="execute"
+      Condition="NOT (REMOVE~=&quot;ALL&quot;)" />
+    <SetProperty
+      Id="RollbackUnregisterIdentity"
+      Value="[#IdentityMsix]|[INSTALLFOLDER]|[ProductVersion]"
+      Before="RollbackUnregisterIdentity"
+      Sequence="execute"
+      Condition="REMOVE~=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
+    <SetProperty
+      Id="UnregisterIdentity"
+      Value="[ProductVersion]"
+      Before="UnregisterIdentity"
+      Sequence="execute"
+      Condition="REMOVE~=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
+
+    <InstallExecuteSequence>
+      <Custom
+        Action="SnapshotIdentity"
+        After="InstallFiles"
+        Condition="NOT (REMOVE~=&quot;ALL&quot;)" />
+      <Custom
+        Action="RollbackIdentity"
+        After="SnapshotIdentity"
+        Condition="NOT (REMOVE~=&quot;ALL&quot;)" />
+      <Custom
+        Action="RegisterIdentity"
+        After="RollbackIdentity"
+        Condition="NOT (REMOVE~=&quot;ALL&quot;)" />
+      <Custom
+        Action="CleanupIdentitySnapshot"
+        After="RegisterIdentity"
+        Condition="NOT (REMOVE~=&quot;ALL&quot;)" />
+      <Custom
+        Action="RollbackUnregisterIdentity"
+        Before="UnregisterIdentity"
+        Condition="REMOVE~=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
+      <Custom
+        Action="UnregisterIdentity"
+        Before="RemoveFiles"
+        Condition="REMOVE~=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
+    </InstallExecuteSequence>
+
+    <UI Id="LibrarianInstallerUI">
+      <ui:WixUI Id="WixUI_FeatureTree" />
+      <Publish
+        Dialog="ExitDialog"
+        Control="Finish"
+        Event="DoAction"
+        Value="LaunchApplication"
+        Condition="WIXUI_EXITDIALOGOPTIONALCHECKBOX = 1 AND NOT Installed" />
+    </UI>
+    <WixVariable
+      Id="WixUILicenseRtf"
+      Value="$(var.LicenseRtfPath)" />
+
+    <!-- Enables WIXFAILWHENDEFERRED=1 for transactional rollback tests. -->
+    <util:FailWhenDeferred />
+  </Package>
+</Wix>

@@ -82,6 +82,21 @@ function Invoke-CheckedProcess {
     $process.Dispose()
 }
 
+function Test-SmartAppControlEnforced {
+    $policyPath = "HKLM:\SYSTEM\CurrentControlSet\Control\CI\Policy"
+    try {
+        $state = (
+            Get-ItemProperty `
+                -LiteralPath $policyPath `
+                -Name "VerifiedAndReputablePolicyState" `
+                -ErrorAction Stop
+        ).VerifiedAndReputablePolicyState
+        return $state -eq 1
+    } catch {
+        return $false
+    }
+}
+
 $toolchain = & (Join-Path $PSScriptRoot "bootstrap.ps1") -PassThru
 $repoRoot = $toolchain.RepoRoot
 $artifacts = Join-Path $repoRoot "artifacts"
@@ -341,6 +356,52 @@ Invoke-CheckedProcess `
         "apps\windows\Librarian.Windows\MainWindow.xaml.cpp"
     ) `
     -WorkingDirectory $repoRoot
+
+if ($Configuration -eq "Release") {
+    $installerBuildArguments = @(
+        "-NoProfile"
+        "-ExecutionPolicy"
+        "Bypass"
+        "-File"
+        "scripts\build-installer.ps1"
+        "-Configuration"
+        $Configuration
+        "-Platform"
+        $Platform
+    )
+    $installerTestArguments = @(
+        "-NoProfile"
+        "-ExecutionPolicy"
+        "Bypass"
+        "-File"
+        "scripts\test-installer.ps1"
+        "-ExpectedSigningMode"
+        "unsigned-fixture"
+    )
+
+    if (Test-SmartAppControlEnforced) {
+        Write-Host ""
+        Write-Host (
+            "Smart App Control is enforced. The local build will suppress WiX " +
+            "ICE execution because Windows blocks its temporary unsigned MSI; " +
+            "the structural suite still runs, and CI must run ICE validation."
+        )
+        $installerBuildArguments += "-SuppressMsiValidation"
+        $installerTestArguments += "-SkipIceValidation"
+    }
+
+    Invoke-CheckedProcess `
+        -Label "Unsigned single-installer fixture" `
+        -FilePath $powerShellHost `
+        -Arguments $installerBuildArguments `
+        -WorkingDirectory $repoRoot
+
+    Invoke-CheckedProcess `
+        -Label "Installer lifecycle structural and ICE validation" `
+        -FilePath $powerShellHost `
+        -Arguments $installerTestArguments `
+        -WorkingDirectory $repoRoot
+}
 
 $gitMetadata = Join-Path $repoRoot ".git"
 $usesWslWorktreeMetadata = (Test-Path $gitMetadata -PathType Leaf) -and

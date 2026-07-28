@@ -1,0 +1,9 @@
+{
+  "name": "com.theundeadmonk.librarian",
+  "description": "Librarian browser bridge",
+  "path": "Librarian.ChromiumNativeHost.exe",
+  "type": "stdio",
+  "allowed_origins": [
+    "chrome-extension://@EXTENSION_ID@/"
+  ]
+}

@@ -4,7 +4,7 @@ The active Librarian MVP builds only on x64 Windows 11. The repository does not 
 
 ## Supported toolchain
 
-The foundation is pinned to stable releases verified on 2026-07-22:
+The foundation is pinned to stable releases verified on 2026-07-28:
 
 | Area | Required version |
 |---|---|
@@ -15,6 +15,8 @@ The foundation is pinned to stable releases verified on 2026-07-22:
 | Windows App SDK | 2.3.1 |
 | C++/WinRT | 3.0.260715.1 |
 | Windows Implementation Library | 1.0.260126.7 |
+| .NET SDK | 10.0.302 |
+| WiX Toolset | 7.0.0 with accepted `wix7` OSMF EULA |
 | Rust | 1.97.1, x86_64-pc-windows-msvc |
 | Node.js | 24.18.0 LTS |
 | npm | 11.16.0 |
@@ -24,7 +26,8 @@ The manifests and lockfiles in source control are authoritative. Preview, releas
 
 ## First-time setup
 
-Install Git for Windows, the required Visual Studio workloads, Node.js 24.18.0, Rustup, and the Windows SDK:
+Install Git for Windows, the required Visual Studio workloads, .NET SDK
+10.0.302, Node.js 24.18.0, Rustup, and the Windows SDK:
 
 ```powershell
 winget install Microsoft.WindowsSDK.10.0.28000
@@ -42,14 +45,21 @@ The bootstrap command only validates the machine. It does not change system sett
 
 One command formats-checks, lints, tests, restores locked dependencies, builds
 the Rust workspace, Chromium extension, WinUI app, Windows passkey boundary,
-and Windows local-IPC security probe, then runs the probe's hostile-client
-checks:
+and Windows local-IPC security probe, then builds and inspects the unsigned
+single-installer fixture:
 
 ```powershell
 powershell.exe -NoProfile -File .\scripts\build.ps1 -Configuration Release -Platform x64
 ```
 
-Build outputs and diagnostic logs are written beneath `artifacts/` or the component-specific ignored output directories. Native artifacts are unsigned; production MSIX generation and signing are deferred to issue #19.
+Build outputs and diagnostic logs are written beneath `artifacts/` or the
+component-specific ignored output directories. The setup, MSI, identity MSIX,
+and native binaries produced by this command are unsigned test fixtures and
+must not be installed. See
+[`packaging/windows/README.md`](packaging/windows/README.md) for installer
+outputs, structural validation, development signing, and Smart App Control
+behavior. Production signing credentials are never part of the repository or
+local build command.
 On a normal Windows checkout, the build also checks whitespace in the committed branch diff, the index, and the working tree. GitHub Actions supplies the pull request or push base commit explicitly.
 
 ## Interactive Windows shell smoke test
@@ -72,7 +82,7 @@ Developer Mode and the matching Windows App Runtime are required. The official
 runtime installer is available from the
 [Windows App SDK downloads](https://learn.microsoft.com/windows/apps/windows-app-sdk/downloads)
 page. Loose registration is for development testing only and does not replace
-the signed MSIX validation planned for issue #19.
+the issue #19 installer lifecycle.
 
 Windows is the authoritative MVP build and remains responsible for the native
 application, passkey provider, packaging boundary, and Windows-specific
