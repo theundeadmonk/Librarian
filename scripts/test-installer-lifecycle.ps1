@@ -1056,6 +1056,77 @@ try {
         -ExpectedVersion $HighVersion
     Assert-Sentinel -Path $sentinelPath -Expected $sentinelValue
 
+    Register-CurrentUserIdentity `
+        -PackagePath $resolvedSignedLowIdentity `
+        -ExternalLocation $installFolder `
+        -ExpectedVersion $LowVersion
+    $highProvisioning = @(Get-LibrarianProvisionedPackages)
+    Assert-True (
+        $highProvisioning.Count -eq 1 -and
+        $highProvisioning[0].Version.ToString() -eq $HighVersion
+    ) "The retained-user fixture did not begin with high provisioning."
+    $null = Remove-AppxProvisionedPackage `
+        -Online `
+        -AllUsers `
+        -PackageName $highProvisioning[0].PackageName
+    Assert-True (
+        @(Get-LibrarianProvisionedPackages).Count -eq 0
+    ) "The retained-user fixture could not remove package provisioning."
+    Invoke-DisposableUserIdentityProbe `
+        -Credential $disposableUserCredential `
+        -ExpectedVersion $HighVersion
+    Invoke-FailingProcess `
+        -Label "Reject repair over another user's incoming identity" `
+        -FilePath $msiexec `
+        -Arguments @(
+            "/fa",
+            $resolvedSignedHighMsi,
+            "ADDLOCAL=Core,ChromeIntegration,EdgeIntegration",
+            "/qn",
+            "/norestart",
+            "/l*v",
+            (Join-Path $resolvedLogDirectory "07a-other-user-state-rejected.log")
+        )
+    $currentUserAfterOtherUserRejection = @(
+        Get-LibrarianCurrentUserPackages |
+            ForEach-Object { $_.Version.ToString() } |
+            Sort-Object -Unique
+    )
+    Assert-True (
+        $currentUserAfterOtherUserRejection.Count -eq 1 -and
+        $currentUserAfterOtherUserRejection[0] -eq $LowVersion -and
+        @(Get-LibrarianProvisionedPackages).Count -eq 0
+    ) "The rejected retained-user repair changed identity state."
+    Invoke-DisposableUserIdentityProbe `
+        -Credential $disposableUserCredential `
+        -ExpectedVersion $HighVersion
+    Register-CurrentUserIdentity `
+        -PackagePath (Join-Path $installFolder "Librarian.Identity.msix") `
+        -ExternalLocation $installFolder `
+        -ExpectedVersion $HighVersion
+    Invoke-SuccessfulProcess `
+        -Label "Restore provisioning after retained-user rejection" `
+        -FilePath $msiexec `
+        -Arguments @(
+            "/fa",
+            $resolvedSignedHighMsi,
+            "ADDLOCAL=Core,ChromeIntegration,EdgeIntegration",
+            "/qn",
+            "/norestart",
+            "/l*v",
+            (Join-Path $resolvedLogDirectory "07b-restored-provisioning.log")
+        )
+    Assert-Installed `
+        -ExpectedVersion $HighVersion `
+        -BrowsersExpected $true `
+        -InstallFolder $installFolder `
+        -ChromeRegistryPath $chromeRegistryPath `
+        -EdgeRegistryPath $edgeRegistryPath `
+        -ProductRegistryPath $productRegistryPath
+    Invoke-DisposableUserIdentityProbe `
+        -Credential $disposableUserCredential `
+        -ExpectedVersion $HighVersion
+
     Register-DisposableUserIdentity `
         -Credential $disposableUserCredential `
         -PackagePath $resolvedSignedLowIdentity `

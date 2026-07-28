@@ -896,6 +896,25 @@ namespace
             fail(
                 L"Setup refused ambiguous existing identity package state.");
         }
+        auto const incoming_package = std::ranges::find_if(
+            packages,
+            [&incoming_version](Package const& candidate) {
+                return comparable_version(candidate.Id().Version()) ==
+                       comparable_version(incoming_version);
+            });
+        if (!invoking_user_packages.empty() &&
+            incoming_package != packages.end() &&
+            comparable_version(
+                invoking_user_packages.front().Id().Version()) !=
+                comparable_version(incoming_version))
+        {
+            // The incoming package predates this transaction but belongs to
+            // another user or staging state. A rollback that treats it as new
+            // would remove state the compact marker cannot reconstruct.
+            fail(
+                L"Setup refused divergent invoking-user and incoming "
+                L"identity package state.");
+        }
         if (!invoking_user_packages.empty() &&
             !provisioned_packages.empty() &&
             comparable_version(
@@ -919,15 +938,9 @@ namespace
         }
         else
         {
-            auto const exact = std::ranges::find_if(
-                packages,
-                [&incoming_version](Package const& candidate) {
-                    return comparable_version(candidate.Id().Version()) ==
-                           comparable_version(incoming_version);
-                });
-            if (exact != packages.end())
+            if (incoming_package != packages.end())
             {
-                package = *exact;
+                package = *incoming_package;
             }
             else if (!provisioned_packages.empty())
             {

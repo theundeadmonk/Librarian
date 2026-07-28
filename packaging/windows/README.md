@@ -165,7 +165,9 @@ and rollback does not clean-reprovision identity when the prior provisioning
 is already intact. Snapshotting fails closed before mutation if the invoking
 user's registered identity version differs from the device-provisioned
 version, because a single-version rollback marker cannot safely restore both
-states.
+states. It also fails closed if a different incoming version already exists
+for another user or as staged state, because rollback must not remove state
+that predates the transaction.
 
 Before either machine staging or invoking-user registration, the custom action
 requires exact SHA-256 matches for the installed desktop, vault-agent,
