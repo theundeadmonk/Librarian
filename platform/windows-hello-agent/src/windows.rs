@@ -108,6 +108,16 @@ pub enum BridgeError {
     CredentialRemovalFailed,
 }
 
+/// A failed enrollment and any bounded credential identifier whose native
+/// cleanup must be retried by the vault agent.
+///
+/// Formatting and cloning are intentionally unavailable so identifiers cannot
+/// be copied into diagnostic output accidentally.
+pub enum EnrollmentError {
+    Bridge(BridgeError),
+    CredentialRemovalFailed(Vec<u8>),
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ProtectedStateError {
     InvalidArgument,
@@ -289,7 +299,10 @@ pub fn is_available() -> Result<bool, BridgeError> {
 ///
 /// Returns a bounded bridge category for invalid input, cancellation,
 /// unavailable capability, invalid native output, or platform failure.
-pub fn enroll(parent: ParentWindow, operation_id: OperationId) -> Result<Enrollment, BridgeError> {
+pub fn enroll(
+    parent: ParentWindow,
+    operation_id: OperationId,
+) -> Result<Enrollment, EnrollmentError> {
     let mut credential_id = vec![0_u8; MAXIMUM_CREDENTIAL_ID_BYTES];
     let mut credential_id_bytes = 0_u32;
     let mut salt = [0_u8; PRF_BYTES];
@@ -308,17 +321,40 @@ pub fn enroll(parent: ParentWindow, operation_id: OperationId) -> Result<Enrollm
             PRF_BYTES_U32,
         )
     };
-    map_status(status)?;
-    let credential_id_bytes =
-        usize::try_from(credential_id_bytes).map_err(|_| BridgeError::InvalidResponse)?;
+    finish_enrollment(
+        status,
+        credential_id,
+        credential_id_bytes,
+        salt,
+        &prf_output,
+    )
+}
+
+fn finish_enrollment(
+    status: u32,
+    mut credential_id: Vec<u8>,
+    credential_id_bytes: u32,
+    salt: [u8; PRF_BYTES],
+    prf_output: &Zeroizing<[u8; PRF_BYTES]>,
+) -> Result<Enrollment, EnrollmentError> {
+    let credential_id_bytes = usize::try_from(credential_id_bytes)
+        .map_err(|_| EnrollmentError::Bridge(BridgeError::InvalidResponse))?;
+    if status == STATUS_CREDENTIAL_REMOVAL_FAILED {
+        if credential_id_bytes == 0 || credential_id_bytes > credential_id.len() {
+            return Err(EnrollmentError::Bridge(BridgeError::InvalidResponse));
+        }
+        credential_id.truncate(credential_id_bytes);
+        return Err(EnrollmentError::CredentialRemovalFailed(credential_id));
+    }
+    map_status(status).map_err(EnrollmentError::Bridge)?;
     if credential_id_bytes == 0 || credential_id_bytes > credential_id.len() {
-        return Err(BridgeError::InvalidResponse);
+        return Err(EnrollmentError::Bridge(BridgeError::InvalidResponse));
     }
     credential_id.truncate(credential_id_bytes);
     Ok(Enrollment {
         credential_id,
         salt,
-        prf_output: WindowsHelloPrfOutput::new(*prf_output),
+        prf_output: WindowsHelloPrfOutput::new(**prf_output),
     })
 }
 
@@ -962,9 +998,10 @@ mod tests {
     use zeroize::Zeroizing;
 
     use super::{
-        BridgeError, OperationId, ParentWindow, ProtectedStateError, delete_user_file_by_handle,
-        is_available, protect_user_state, restrict_user_file, unprotect_user_state,
-        verify_user_file_restriction,
+        BridgeError, EnrollmentError, MAXIMUM_CREDENTIAL_ID_BYTES, OperationId, PRF_BYTES,
+        ParentWindow, ProtectedStateError, STATUS_CREDENTIAL_REMOVAL_FAILED,
+        delete_user_file_by_handle, finish_enrollment, is_available, protect_user_state,
+        restrict_user_file, unprotect_user_state, verify_user_file_restriction,
     };
 
     static TEST_FILE_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -984,6 +1021,27 @@ mod tests {
             ParentWindow::for_authenticated_process(0, 1),
             Err(BridgeError::InvalidArgument)
         ));
+    }
+
+    #[test]
+    fn enrollment_cleanup_failure_preserves_the_bounded_credential_id() {
+        let credential_id = vec![0xC1, 0xC2, 0xC3];
+        let mut output = vec![0_u8; MAXIMUM_CREDENTIAL_ID_BYTES];
+        output[..credential_id.len()].copy_from_slice(&credential_id);
+        match finish_enrollment(
+            STATUS_CREDENTIAL_REMOVAL_FAILED,
+            output,
+            u32::try_from(credential_id.len()).expect("credential length"),
+            [0; PRF_BYTES],
+            &Zeroizing::new([0; PRF_BYTES]),
+        ) {
+            Err(EnrollmentError::CredentialRemovalFailed(actual)) => {
+                assert_eq!(actual, credential_id);
+            }
+            Ok(_) | Err(EnrollmentError::Bridge(_)) => {
+                panic!("cleanup failure did not preserve its credential identifier");
+            }
+        }
     }
 
     #[test]

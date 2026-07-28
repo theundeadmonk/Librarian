@@ -69,13 +69,13 @@ pub(crate) enum WindowsHelloStateError {
         reason = "the portable runtime maps errors constructed by Windows and test providers"
     )
 )]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum WindowsHelloProviderError {
     InvalidRequest,
     Unavailable,
     Cancelled,
     Failed,
     RemovalFailed,
+    CleanupRequired(Vec<u8>),
 }
 
 /// One enrollment result whose PRF allocation remains inside the agent.
@@ -132,8 +132,17 @@ impl WindowsHelloProvider for PlatformWindowsHelloProvider {
     ) -> Result<WindowsHelloEnrollment, WindowsHelloProviderError> {
         let parent = platform_parent(parent_window, authenticated_process_id)?;
         let operation = platform_operation(operation_id)?;
-        let enrollment =
-            librarian_windows_hello_agent::enroll(parent, operation).map_err(map_bridge_error)?;
+        let enrollment = match librarian_windows_hello_agent::enroll(parent, operation) {
+            Ok(enrollment) => enrollment,
+            Err(librarian_windows_hello_agent::EnrollmentError::Bridge(error)) => {
+                return Err(map_bridge_error(error));
+            }
+            Err(librarian_windows_hello_agent::EnrollmentError::CredentialRemovalFailed(
+                credential_id,
+            )) => {
+                return Err(WindowsHelloProviderError::CleanupRequired(credential_id));
+            }
+        };
         let (credential_id, prf_salt, prf_output) = enrollment.into_parts();
         Ok(WindowsHelloEnrollment {
             credential_id,

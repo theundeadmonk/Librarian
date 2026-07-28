@@ -70,6 +70,23 @@ namespace
             SecureZeroMemory(value, bytes);
         }
     }
+
+    [[nodiscard]] bool publish_credential_id(
+        std::span<std::uint8_t const> const value,
+        std::uint8_t* const output,
+        std::uint32_t const capacity,
+        std::uint32_t* const length) noexcept
+    {
+        if (
+            value.empty() ||
+            value.size() > capacity)
+        {
+            return false;
+        }
+        std::copy(value.begin(), value.end(), output);
+        *length = static_cast<std::uint32_t>(value.size());
+        return true;
+    }
 }
 
 std::uint32_t librarian_windows_hello_is_available(
@@ -137,13 +154,29 @@ std::uint32_t librarian_windows_hello_enroll(
         operation(operation_id));
     if (result.error != Error::None)
     {
+        if (result.error == Error::CredentialRemovalFailed)
+        {
+            return publish_credential_id(
+                result.pending_removal_credential_id,
+                credential_id,
+                credential_id_capacity,
+                credential_id_length)
+                ? librarian_windows_hello_credential_removal_failed
+                : librarian_windows_hello_invalid_response;
+        }
         if (
             result.enrollment.has_value() &&
             !result.enrollment->credential_id.empty() &&
             librarian::windows_hello::Remove(
                 result.enrollment->credential_id) != Error::None)
         {
-            return librarian_windows_hello_credential_removal_failed;
+            return publish_credential_id(
+                result.enrollment->credential_id,
+                credential_id,
+                credential_id_capacity,
+                credential_id_length)
+                ? librarian_windows_hello_credential_removal_failed
+                : librarian_windows_hello_invalid_response;
         }
         return status(result.error);
     }
@@ -165,12 +198,14 @@ std::uint32_t librarian_windows_hello_enroll(
                 : librarian_windows_hello_credential_removal_failed;
     }
 
-    std::copy(
-        enrollment.credential_id.begin(),
-        enrollment.credential_id.end(),
-        credential_id);
-    *credential_id_length =
-        static_cast<std::uint32_t>(enrollment.credential_id.size());
+    if (!publish_credential_id(
+        enrollment.credential_id,
+        credential_id,
+        credential_id_capacity,
+        credential_id_length))
+    {
+        return librarian_windows_hello_invalid_response;
+    }
     std::copy(enrollment.salt.begin(), enrollment.salt.end(), salt);
     std::copy(
         enrollment.output.value().begin(),

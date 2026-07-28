@@ -74,6 +74,7 @@ namespace librarian::windows_hello
     {
         Error error{Error::PlatformFailure};
         std::optional<Enrollment> enrollment;
+        std::vector<std::uint8_t> pending_removal_credential_id;
     };
 
     struct EvaluationResult final
@@ -94,7 +95,8 @@ namespace librarian::windows_hello
 
     // Displays a Windows-owned user-verification prompt and creates one
     // platform credential for Librarian. On every failure after credential
-    // creation, the credential is removed before the error is returned.
+    // creation, the credential is removed before the error is returned. If
+    // removal fails, its bounded identifier is returned for durable retry.
     [[nodiscard]] EnrollmentResult Enroll(
         HWND parent,
         OperationId const& operation_id) noexcept;

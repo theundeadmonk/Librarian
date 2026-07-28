@@ -121,6 +121,27 @@ namespace librarian::windows_hello
             Error error_;
         };
 
+        class credential_cleanup_failure final : public std::exception
+        {
+        public:
+            explicit credential_cleanup_failure(
+                std::span<std::uint8_t const> const credential_id) :
+                credential_id_(
+                    credential_id.begin(),
+                    credential_id.end())
+            {
+            }
+
+            [[nodiscard]] std::vector<std::uint8_t>
+            release_credential_id() noexcept
+            {
+                return std::move(credential_id_);
+            }
+
+        private:
+            std::vector<std::uint8_t> credential_id_;
+        };
+
         [[noreturn]] void fail(Error const error)
         {
             throw failure(error);
@@ -369,6 +390,12 @@ namespace librarian::windows_hello
                     owned_ = false;
                 }
                 return result;
+            }
+
+            [[nodiscard]] std::span<std::uint8_t const>
+            identifier() const noexcept
+            {
+                return {identifier_, size_};
             }
 
         private:
@@ -653,7 +680,8 @@ namespace librarian::windows_hello
                     std::current_exception();
                 if (FAILED(credential.remove()))
                 {
-                    fail(Error::CredentialRemovalFailed);
+                    throw credential_cleanup_failure(
+                        credential.identifier());
                 }
                 std::rethrow_exception(original);
             }
@@ -777,6 +805,14 @@ namespace librarian::windows_hello
             return {
                 .error = Error::None,
                 .enrollment = enroll(parent, operation_id),
+            };
+        }
+        catch (credential_cleanup_failure& error)
+        {
+            return {
+                .error = Error::CredentialRemovalFailed,
+                .pending_removal_credential_id =
+                    error.release_credential_id(),
             };
         }
         catch (failure const& error)

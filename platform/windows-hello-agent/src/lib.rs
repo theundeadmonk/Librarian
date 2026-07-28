@@ -11,8 +11,8 @@ mod windows;
 
 #[cfg(windows)]
 pub use windows::{
-    BridgeError, Enrollment, OperationId, ParentWindow, ProtectedStateError, cancel,
-    delete_user_file_by_handle, enroll, evaluate, is_available, protect_user_state, remove,
+    BridgeError, Enrollment, EnrollmentError, OperationId, ParentWindow, ProtectedStateError,
+    cancel, delete_user_file_by_handle, enroll, evaluate, is_available, protect_user_state, remove,
     replace_file_atomically, restrict_user_file, unprotect_user_state,
     verify_user_file_restriction,
 };

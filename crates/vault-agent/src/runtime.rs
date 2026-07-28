@@ -1285,7 +1285,20 @@ impl AgentRuntime {
             });
         let enrollment = match enrollment {
             Ok(enrollment) => enrollment,
-            Err(error) => return Ok(map_windows_hello_provider_error(error)),
+            Err(WindowsHelloProviderError::CleanupRequired(credential_id)) => {
+                return Ok(
+                    if self.persist_windows_hello_cleanup(
+                        state_store,
+                        previous.as_mut(),
+                        &credential_id,
+                    ) {
+                        ExecutionOutcome::retryable_failure()
+                    } else {
+                        ExecutionOutcome::failed()
+                    },
+                );
+            }
+            Err(error) => return Ok(map_windows_hello_provider_error(&error)),
         };
         if let Some(outcome) = self.windows_hello_terminal_abort(registration, deadline) {
             return self.remove_enrollment_or(
@@ -1571,7 +1584,7 @@ impl AgentRuntime {
             Ok(output) => output,
             Err(error) => {
                 self.set_locked_unless_shutting_down();
-                return Ok(map_windows_hello_provider_error(error));
+                return Ok(map_windows_hello_provider_error(&error));
             }
         };
         if let Some(outcome) = self.windows_hello_terminal_abort(registration, deadline) {
@@ -2656,13 +2669,14 @@ fn map_account_error(error: AccountError) -> ExecutionOutcome {
     }
 }
 
-fn map_windows_hello_provider_error(error: WindowsHelloProviderError) -> ExecutionOutcome {
+fn map_windows_hello_provider_error(error: &WindowsHelloProviderError) -> ExecutionOutcome {
     match error {
         WindowsHelloProviderError::InvalidRequest => ExecutionOutcome::invalid(),
         WindowsHelloProviderError::Cancelled => ExecutionOutcome::cancelled(),
         WindowsHelloProviderError::Unavailable
         | WindowsHelloProviderError::Failed
-        | WindowsHelloProviderError::RemovalFailed => ExecutionOutcome::failed(),
+        | WindowsHelloProviderError::RemovalFailed
+        | WindowsHelloProviderError::CleanupRequired(_) => ExecutionOutcome::failed(),
     }
 }
 
@@ -2888,6 +2902,7 @@ mod tests {
     struct TestWindowsHelloProvider {
         next_credential: AtomicUsize,
         invalid_next_enrollment: AtomicBool,
+        next_cleanup_failure: Mutex<Option<Vec<u8>>>,
         evaluated: Mutex<Vec<(u64, u32, Vec<u8>)>>,
         removed: Mutex<Vec<Vec<u8>>>,
         removal_failures: Mutex<BTreeSet<Vec<u8>>>,
@@ -2902,6 +2917,7 @@ mod tests {
             Self {
                 next_credential: AtomicUsize::new(0),
                 invalid_next_enrollment: AtomicBool::new(false),
+                next_cleanup_failure: Mutex::new(None),
                 evaluated: Mutex::new(Vec::new()),
                 removed: Mutex::new(Vec::new()),
                 removal_failures: Mutex::new(BTreeSet::new()),
@@ -2941,6 +2957,13 @@ mod tests {
             self.invalid_next_enrollment.store(true, Ordering::Release);
         }
 
+        fn fail_next_enrollment_cleanup(&self, credential_id: Vec<u8>) {
+            *self
+                .next_cleanup_failure
+                .lock()
+                .expect("next cleanup failure") = Some(credential_id);
+        }
+
         fn block_removal(&self) {
             self.allow_removal.store(false, Ordering::Release);
             self.block_removal.store(true, Ordering::Release);
@@ -2960,6 +2983,14 @@ mod tests {
         ) -> Result<WindowsHelloEnrollment, WindowsHelloProviderError> {
             if parent_window == 0 || authenticated_process_id == 0 || operation_id == [0; 16] {
                 return Err(WindowsHelloProviderError::InvalidRequest);
+            }
+            if let Some(credential_id) = self
+                .next_cleanup_failure
+                .lock()
+                .map_err(|_| WindowsHelloProviderError::Failed)?
+                .take()
+            {
+                return Err(WindowsHelloProviderError::CleanupRequired(credential_id));
             }
             let ordinal = self.next_credential.fetch_add(1, Ordering::AcqRel);
             let marker = u8::try_from(ordinal).map_err(|_| WindowsHelloProviderError::Failed)?;
@@ -5551,6 +5582,71 @@ mod tests {
         assert!(state.is_empty());
         assert_eq!(runtime.state(), AgentState::ShuttingDown);
         assert!(!runtime.windows_hello_active.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn windows_hello_native_cleanup_failure_persists_credential_for_restart_retry() {
+        let directory = TestDirectory::new();
+        let path = directory.vault_path();
+        let provider = Arc::new(TestWindowsHelloProvider::new());
+        let state = Arc::new(TestWindowsHelloStateRepository::default());
+        let runtime =
+            AgentRuntime::start_with_components(&path, Some(provider.clone()), Some(state.clone()))
+                .expect("runtime");
+        let password = "disposable native cleanup recovery password";
+        create_test_vault(&runtime, password);
+
+        let orphaned_credential_id = vec![0xC1, 0xC2];
+        provider.fail_next_enrollment_cleanup(orphaned_credential_id.clone());
+        let first_registration = test_registration(&runtime, 0xDA);
+        let first = runtime
+            .enroll_windows_hello(
+                0x5678,
+                23,
+                runtime.unlock_epoch(),
+                &first_registration,
+                Instant::now() + Duration::from_secs(10),
+            )
+            .expect("native cleanup failure");
+        assert_eq!(first.error, Some(PublicErrorCode::OperationFailed));
+        assert_eq!(first.retry, RetryCategory::Backoff);
+        assert!(!should_cache(&first));
+        assert_eq!(state.credential_id(), None);
+        assert_eq!(
+            state.pending_removal_credential_id(),
+            Some(orphaned_credential_id.clone())
+        );
+        drop(first_registration);
+        drop(runtime);
+
+        let runtime =
+            AgentRuntime::start_with_components(&path, Some(provider.clone()), Some(state.clone()))
+                .expect("restarted runtime");
+        let unlock_registration = test_registration(&runtime, 0xDB);
+        let unlocked = runtime
+            .unlock_vault(
+                password,
+                &unlock_registration,
+                Instant::now() + Duration::from_secs(10),
+            )
+            .expect("password unlock after restart");
+        assert_eq!(unlocked.error, None);
+        drop(unlock_registration);
+
+        let retry_registration = test_registration(&runtime, 0xDC);
+        let retry = runtime
+            .enroll_windows_hello(
+                0x5678,
+                23,
+                runtime.unlock_epoch(),
+                &retry_registration,
+                Instant::now() + Duration::from_secs(10),
+            )
+            .expect("cleanup retry enrollment");
+        assert_eq!(retry.error, None);
+        assert_eq!(state.credential_id(), Some(vec![0xA0, 0]));
+        assert_eq!(state.pending_removal_credential_id(), None);
+        assert_eq!(provider.removed(), vec![orphaned_credential_id]);
     }
 
     #[test]
