@@ -275,6 +275,17 @@ Assert-FileContains -Path $windowsProject -ExpectedText ('Include="Microsoft.Win
 Assert-FileContains -Path $windowsProject -ExpectedText ('Include="Microsoft.Windows.CppWinRT" Version="' + $expected.CppWinRt + '"')
 Assert-FileContains -Path $windowsProject -ExpectedText ('Include="Microsoft.Windows.SDK.BuildTools" Version="' + $expected.WindowsSdkBuildTools + '"')
 Assert-FileContains -Path $windowsProject -ExpectedText ('Include="Microsoft.Windows.ImplementationLibrary" Version="' + $expected.Wil + '"')
+Assert-FileContains -Path $windowsProject -ExpectedText "<WindowsAppSDKSelfContained>true</WindowsAppSDKSelfContained>"
+Assert-FileContains -Path $windowsProject -ExpectedText "<UseCrtSDKReferenceStaticWarning>false</UseCrtSDKReferenceStaticWarning>"
+Assert-FileContains `
+    -Path (Join-Path $repoRoot "apps\windows\Librarian.Windows\Directory.Build.props") `
+    -ExpectedText '<Import Project="$(MSBuildThisFileDirectory)HybridCRT.props" />'
+Assert-FileContains `
+    -Path (Join-Path $repoRoot "apps\windows\Librarian.Windows\HybridCRT.props") `
+    -ExpectedText "<RuntimeLibrary>MultiThreaded</RuntimeLibrary>"
+Assert-FileContains `
+    -Path (Join-Path $repoRoot "scripts\build-installer.ps1") `
+    -ExpectedText "Test-CertificateEnhancedKeyUsage"
 
 $globalJsonPath = Join-Path $repoRoot "global.json"
 if (-not (Test-Path -LiteralPath $globalJsonPath -PathType Leaf)) {

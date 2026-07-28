@@ -25,6 +25,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
 . (Join-Path $PSScriptRoot "native-process-arguments.ps1")
+. (Join-Path $PSScriptRoot "certificate-helpers.ps1")
 
 function Invoke-CheckedProcess {
     param(
@@ -254,10 +255,9 @@ function Resolve-DevelopmentCertificate {
     }
 
     $codeSigningOid = "1.3.6.1.5.5.7.3.3"
-    $hasCodeSigning = @(
-        $certificate.EnhancedKeyUsageList |
-            Where-Object { $_.ObjectId.Value -eq $codeSigningOid }
-    ).Count -gt 0
+    $hasCodeSigning = Test-CertificateEnhancedKeyUsage `
+        -Certificate $certificate `
+        -RequiredOid $codeSigningOid
     if (-not $hasCodeSigning) {
         throw "The development certificate is not valid for code signing."
     }
@@ -546,12 +546,17 @@ $componentPaths = [ordered]@{
     ChromiumNativeHost = "Librarian.ChromiumNativeHost.exe"
     IdentityPackage = "Librarian.Identity.msix"
 }
+$componentHashes = [ordered]@{}
 $components = foreach ($entry in $componentPaths.GetEnumerator()) {
     $componentPath = Join-Path $payloadDirectory $entry.Value
+    $componentHash = (
+        Get-FileHash -LiteralPath $componentPath -Algorithm SHA256
+    ).Hash
+    $componentHashes[$entry.Key] = $componentHash
     [ordered]@{
         role = $entry.Key
         path = $entry.Value
-        sha256 = (Get-FileHash -LiteralPath $componentPath -Algorithm SHA256).Hash
+        sha256 = $componentHash
     }
 }
 $releaseManifest = [ordered]@{
@@ -599,6 +604,10 @@ $packageBuildArguments = @(
         "-p:CustomActionPath=" +
         (Join-Path $customActionInputDirectory "Librarian.Setup.CustomActions.dll")
     ),
+    "-p:DesktopSha256=$($componentHashes.Desktop)",
+    "-p:VaultAgentSha256=$($componentHashes.VaultAgent)",
+    "-p:ChromiumNativeHostSha256=$($componentHashes.ChromiumNativeHost)",
+    "-p:IdentityPackageSha256=$($componentHashes.IdentityPackage)",
     "-p:LicenseRtfPath=$licenseRtf",
     "-p:OutputPath=$msiOutputDirectory\",
     "-p:IntermediateOutputPath=$intermediateDirectory\package\"

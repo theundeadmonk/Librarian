@@ -18,6 +18,13 @@ The passkey-provider role is reserved for issue
 [#18](https://github.com/theundeadmonk/Librarian/issues/18). This installer
 does not add a placeholder executable, application identity, or registration.
 
+The WinUI app is built with the Windows App SDK self-contained deployment mode
+and Microsoft's hybrid CRT configuration. Its required Windows App SDK runtime
+files are installed beside the executable, so the one setup does not require a
+separate Windows App SDK or Visual C++ Redistributable installation. The pinned
+runtime currently contributes Microsoft's `RestartAgent.exe`; it is a runtime
+helper, not a fourth Librarian product role or package identity.
+
 Chrome and Edge native-messaging registrations are separate optional MSI
 features. They are offered only when the corresponding browser is detected.
 Each manifest allows one exact extension origin. Setup never bundles,
@@ -73,7 +80,8 @@ never be installed.
 The structural suite decompiles the MSI, extracts the Burn bundle, checks the
 three-component scope, feature conditions, registry ownership, custom-action
 transaction modes and exports, package identity, hashes, native-messaging
-origins, signing mode, and upgrade sequence. It does not execute setup.
+origins, signing mode, self-contained Windows App SDK payload, hybrid CRT
+linkage, and upgrade sequence. It does not execute setup.
 
 Windows Installer ICE validation also runs unless the caller explicitly passes
 `-SkipIceValidation`. Smart App Control can block ICE's temporary unsigned MSI
@@ -96,6 +104,12 @@ uninstalls, reinstalls, and confirms that a disposable per-user data sentinel
 survives every repair, update, and removal. The suite may mutate Program Files,
 HKLM, package provisioning, and the test profile, so its CI guard must not be
 removed or bypassed for developer machines.
+
+Windows Installer Restart Manager remains enabled so repair and upgrade can
+coordinate processes that hold product files. The lifecycle suite requires a
+zero exit code; it does not treat a restart-required result as a completed
+replacement. Identity registration independently rejects any retained
+identity-bearing file whose hash does not match the incoming MSI.
 
 ## Development signing
 
@@ -120,6 +134,18 @@ action that calls the Windows package-management API. It does not invoke
 PowerShell. Deferred, rollback, and commit actions run without user
 impersonation and hide `CustomActionData` from logs. Install and uninstall
 rollback markers are disposable and contain version/state only.
+
+Before either machine staging or invoking-user registration, the custom action
+requires exact SHA-256 matches for the installed desktop, vault-agent,
+native-host, and identity-package files. The expected values are generated
+from the release payload and embedded in the signed MSI; a stale or
+mixed-release identity-bearing file fails closed.
+
+The MSI creates the protected installation directory before taking its
+identity-state snapshot on a clean install. Snapshot removal after transaction
+commit is best-effort: a temporary scanner lock may leave only a disposable
+version/state marker, but cannot turn an already committed product transaction
+into a reported rollback.
 
 The MSI owns Librarian files and registrations beneath `Program Files` and
 machine-level native-messaging keys. Vaults and backups remain outside the

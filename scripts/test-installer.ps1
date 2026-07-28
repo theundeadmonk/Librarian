@@ -411,16 +411,31 @@ try {
             Where-Object { $_ -like "*.exe" } |
             Sort-Object
     )
-    $expectedExecutables = @(
+    $productExecutableNames = @(
+        $executableNames |
+            Where-Object { $_ -like "Librarian.*.exe" }
+    )
+    $expectedProductExecutables = @(
         "Librarian.ChromiumNativeHost.exe",
         "Librarian.VaultAgent.exe",
         "Librarian.Windows.exe"
     )
     Assert-True (
-        ($executableNames -join "`n") -eq ($expectedExecutables -join "`n")
+        ($productExecutableNames -join "`n") -eq
+            ($expectedProductExecutables -join "`n")
     ) (
         "The MSI must contain exactly the three implemented product executables. " +
-        "Found: $($executableNames -join ', ')."
+        "Found: $($productExecutableNames -join ', ')."
+    )
+    $runtimeExecutableNames = @(
+        $executableNames |
+            Where-Object { $_ -notlike "Librarian.*.exe" }
+    )
+    Assert-True (
+        ($runtimeExecutableNames -join "`n") -eq "RestartAgent.exe"
+    ) (
+        "The self-contained Windows App SDK executable scope changed. Found: " +
+        "$($runtimeExecutableNames -join ', ')."
     )
     Assert-True (
         -not (($fileNodes | ForEach-Object {
@@ -593,6 +608,29 @@ try {
     Assert-True (
         $unsafeCustomActions.Count -eq 0
     ) "The MSI must not shell out or embed script custom actions."
+    $restartManagerControl = $decompiled.SelectSingleNode(
+        "//*[local-name()='Property' and @Id='MSIRESTARTMANAGERCONTROL']"
+    )
+    Assert-True (
+        $null -eq $restartManagerControl -or
+        $restartManagerControl.GetAttribute("Value") -ne "Disable"
+    ) "Windows Installer Restart Manager must remain enabled."
+    $coreCreateFolder = $decompiled.SelectSingleNode(
+        (
+            "//*[local-name()='Component' and @Id='CoreExecutables']/" +
+            "*[local-name()='CreateFolder']"
+        )
+    )
+    Assert-True (
+        $null -ne $coreCreateFolder
+    ) "The protected install directory must be created before identity snapshotting."
+    $commitCleanup = $decompiled.SelectSingleNode(
+        "//*[local-name()='CustomAction' and @Id='CleanupIdentitySnapshot']"
+    )
+    Assert-True (
+        $null -ne $commitCleanup -and
+        $commitCleanup.GetAttribute("Return") -eq "ignore"
+    ) "Post-commit snapshot cleanup must not report a committed install as failed."
     $faultInjection = $decompiled.SelectSingleNode(
         (
             "//*[local-name()='InstallExecuteSequence']/" +
@@ -611,6 +649,24 @@ try {
     $installExecute = Get-MsiSequence `
         -DatabasePath $resolvedMsi `
         -Action "InstallExecute"
+    $createFolders = Get-MsiSequence `
+        -DatabasePath $resolvedMsi `
+        -Action "CreateFolders"
+    $snapshotIdentity = Get-MsiSequence `
+        -DatabasePath $resolvedMsi `
+        -Action "SnapshotIdentity"
+    $rollbackSnapshotCleanup = Get-MsiSequence `
+        -DatabasePath $resolvedMsi `
+        -Action "RollbackIdentitySnapshotCleanup"
+    $rollbackCurrentUserIdentity = Get-MsiSequence `
+        -DatabasePath $resolvedMsi `
+        -Action "RollbackCurrentUserIdentity"
+    $rollbackIdentity = Get-MsiSequence `
+        -DatabasePath $resolvedMsi `
+        -Action "RollbackIdentity"
+    $installFiles = Get-MsiSequence `
+        -DatabasePath $resolvedMsi `
+        -Action "InstallFiles"
     $installFinalize = Get-MsiSequence `
         -DatabasePath $resolvedMsi `
         -Action "InstallFinalize"
@@ -620,6 +676,16 @@ try {
     ) (
         "RemoveExistingProducts must run after InstallExecute and before " +
         "InstallFinalize so an upgrade can roll back."
+    )
+    Assert-True (
+        $snapshotIdentity -gt $createFolders -and
+        $rollbackSnapshotCleanup -gt $snapshotIdentity -and
+        $rollbackCurrentUserIdentity -gt $rollbackSnapshotCleanup -and
+        $rollbackIdentity -gt $rollbackCurrentUserIdentity -and
+        $rollbackIdentity -lt $installFiles
+    ) (
+        "Identity snapshot and rollback actions must run in order after the " +
+        "protected directory exists and before product files are installed."
     )
 
     $chromeManifestPath = Get-ExtractedMsiFile `
@@ -672,7 +738,19 @@ try {
         ) "A native-messaging manifest must allow exactly one extension origin."
     }
 
+    $expectedComponentRoles = @(
+        "Desktop",
+        "VaultAgent",
+        "ChromiumNativeHost",
+        "IdentityPackage"
+    )
+    $releaseHashes = [ordered]@{}
     foreach ($component in @($releaseManifest.components)) {
+        Assert-True (
+            $component.role -in $expectedComponentRoles -and
+            -not $releaseHashes.Contains($component.role) -and
+            $component.sha256 -match '^[0-9A-F]{64}$'
+        ) "The release manifest has an invalid or duplicate component hash."
         $componentPath = Get-ExtractedMsiFile `
             -DecompiledMsi $decompiled `
             -ExtractRoot $msiExtractRoot `
@@ -683,6 +761,47 @@ try {
         Assert-True (
             $actualHash -eq $component.sha256
         ) "Release hash mismatch for '$($component.path)'."
+        $releaseHashes[$component.role] = $component.sha256
+    }
+    Assert-True (
+        $releaseHashes.Count -eq $expectedComponentRoles.Count
+    ) "The release manifest does not hash every identity-bound component."
+
+    $expectedHashData = (
+        $expectedComponentRoles |
+            ForEach-Object { $releaseHashes[$_] }
+    ) -join "|"
+    foreach ($actionId in @(
+        "SetRegisterIdentity",
+        "SetRegisterCurrentUserIdentity"
+    )) {
+        $hashPropertyAction = $decompiled.SelectSingleNode(
+            "//*[local-name()='CustomAction' and @Id='$actionId']"
+        )
+        Assert-True (
+            $null -ne $hashPropertyAction -and
+            $hashPropertyAction.GetAttribute("Value").EndsWith(
+                "|$expectedHashData",
+                [StringComparison]::Ordinal
+            )
+        ) (
+            "Identity registration action '$actionId' is not bound to every " +
+            "release payload hash."
+        )
+    }
+
+    $desktopExecutablePath = Get-ExtractedMsiFile `
+        -DecompiledMsi $decompiled `
+        -ExtractRoot $msiExtractRoot `
+        -Name "Librarian.Windows.exe"
+    foreach ($runtimeFile in @(
+        "Microsoft.WindowsAppRuntime.dll",
+        "Microsoft.ui.xaml.dll"
+    )) {
+        [void](Get-ExtractedMsiFile `
+            -DecompiledMsi $decompiled `
+            -ExtractRoot $msiExtractRoot `
+            -Name $runtimeFile)
     }
 
     $manifestTool = Join-Path $toolchain.WindowsSdkRoot (
@@ -811,6 +930,18 @@ try {
     Assert-True (
         $dumpbinCandidates.Count -gt 0
     ) "Visual Studio dumpbin.exe could not be resolved."
+    $desktopDependencies = Invoke-CapturedProcess `
+        -FilePath $dumpbinCandidates[-1] `
+        -Arguments @("/nologo", "/dependents", $desktopExecutablePath) `
+        -WorkingDirectory $repoRoot
+    Assert-True (
+        $desktopDependencies.ExitCode -eq 0 -and
+        $desktopDependencies.StandardOutput -notmatch
+            '(?im)^\s*(MSVCP|VCRUNTIME)\d+(?:_\d+)?(?:D)?\.dll\s*$'
+    ) (
+        "The desktop executable must use the hybrid CRT instead of requiring " +
+        "a separately installed Visual C++ runtime."
+    )
     $dumpbinResult = Invoke-CapturedProcess `
         -FilePath $dumpbinCandidates[-1] `
         -Arguments @("/nologo", "/exports", $customActionBinary) `

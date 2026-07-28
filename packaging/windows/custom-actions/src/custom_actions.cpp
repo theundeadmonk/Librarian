@@ -1,4 +1,5 @@
 #include <windows.h>
+#include <bcrypt.h>
 #include <msi.h>
 #include <msiquery.h>
 #include <sddl.h>
@@ -44,6 +45,7 @@ namespace
         L"Librarian.PasskeyProvider.exe"};
     constexpr std::wstring_view snapshot_name{
         L"Librarian.Identity.msix.state"};
+    using sha256_digest = std::array<std::uint8_t, 32>;
 
     struct identity_snapshot
     {
@@ -51,6 +53,14 @@ namespace
         PackageVersion package_version{};
         bool provisioned{};
         bool invoking_user_registered{};
+    };
+
+    struct payload_hashes
+    {
+        sha256_digest desktop{};
+        sha256_digest vault_agent{};
+        sha256_digest native_host{};
+        sha256_digest identity_package{};
     };
 
     void log_message(
@@ -75,6 +85,208 @@ namespace
     {
         throw std::runtime_error(
             std::filesystem::path{message}.string());
+    }
+
+    struct file_handle
+    {
+        HANDLE value{INVALID_HANDLE_VALUE};
+
+        file_handle() = default;
+
+        ~file_handle()
+        {
+            if (value != INVALID_HANDLE_VALUE)
+            {
+                CloseHandle(value);
+            }
+        }
+
+        file_handle(file_handle const&) = delete;
+        file_handle& operator=(file_handle const&) = delete;
+    };
+
+    struct bcrypt_algorithm_handle
+    {
+        BCRYPT_ALG_HANDLE value{};
+
+        bcrypt_algorithm_handle() = default;
+
+        ~bcrypt_algorithm_handle()
+        {
+            if (value != nullptr)
+            {
+                BCryptCloseAlgorithmProvider(value, 0);
+            }
+        }
+
+        bcrypt_algorithm_handle(bcrypt_algorithm_handle const&) = delete;
+        bcrypt_algorithm_handle& operator=(
+            bcrypt_algorithm_handle const&) = delete;
+    };
+
+    struct bcrypt_hash_handle
+    {
+        BCRYPT_HASH_HANDLE value{};
+
+        bcrypt_hash_handle() = default;
+
+        ~bcrypt_hash_handle()
+        {
+            if (value != nullptr)
+            {
+                BCryptDestroyHash(value);
+            }
+        }
+
+        bcrypt_hash_handle(bcrypt_hash_handle const&) = delete;
+        bcrypt_hash_handle& operator=(bcrypt_hash_handle const&) = delete;
+    };
+
+    void check_bcrypt(NTSTATUS status)
+    {
+        if (!BCRYPT_SUCCESS(status))
+        {
+            fail(L"Setup could not verify an installed payload hash.");
+        }
+    }
+
+    std::uint8_t parse_hex_digit(wchar_t value)
+    {
+        if (value >= L'0' && value <= L'9')
+        {
+            return static_cast<std::uint8_t>(value - L'0');
+        }
+        if (value >= L'A' && value <= L'F')
+        {
+            return static_cast<std::uint8_t>(value - L'A' + 10);
+        }
+        if (value >= L'a' && value <= L'f')
+        {
+            return static_cast<std::uint8_t>(value - L'a' + 10);
+        }
+        fail(L"Setup received an invalid expected payload hash.");
+    }
+
+    sha256_digest parse_sha256(std::wstring_view value)
+    {
+        if (value.size() != 64U)
+        {
+            fail(L"Setup received an invalid expected payload hash.");
+        }
+
+        sha256_digest digest{};
+        for (std::size_t index = 0; index < digest.size(); ++index)
+        {
+            digest[index] = static_cast<std::uint8_t>(
+                (parse_hex_digit(value[index * 2U]) << 4U) |
+                parse_hex_digit(value[index * 2U + 1U]));
+        }
+        return digest;
+    }
+
+    sha256_digest hash_file(std::filesystem::path const& path)
+    {
+        file_handle file;
+        file.value = CreateFileW(
+            path.c_str(),
+            GENERIC_READ,
+            FILE_SHARE_READ,
+            nullptr,
+            OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN,
+            nullptr);
+        if (file.value == INVALID_HANDLE_VALUE)
+        {
+            fail(L"Setup could not read an installed payload file.");
+        }
+
+        bcrypt_algorithm_handle algorithm;
+        check_bcrypt(BCryptOpenAlgorithmProvider(
+            &algorithm.value,
+            BCRYPT_SHA256_ALGORITHM,
+            nullptr,
+            0));
+
+        DWORD object_length = 0;
+        DWORD result_length = 0;
+        check_bcrypt(BCryptGetProperty(
+            algorithm.value,
+            BCRYPT_OBJECT_LENGTH,
+            reinterpret_cast<PUCHAR>(&object_length),
+            sizeof(object_length),
+            &result_length,
+            0));
+        if (result_length != sizeof(object_length) || object_length == 0U)
+        {
+            fail(L"Setup could not initialize installed payload hashing.");
+        }
+
+        DWORD hash_length = 0;
+        check_bcrypt(BCryptGetProperty(
+            algorithm.value,
+            BCRYPT_HASH_LENGTH,
+            reinterpret_cast<PUCHAR>(&hash_length),
+            sizeof(hash_length),
+            &result_length,
+            0));
+        if (result_length != sizeof(hash_length) ||
+            hash_length != static_cast<DWORD>(sha256_digest{}.size()))
+        {
+            fail(L"Setup could not initialize SHA-256 payload hashing.");
+        }
+
+        std::vector<UCHAR> hash_object(object_length);
+        bcrypt_hash_handle hash;
+        check_bcrypt(BCryptCreateHash(
+            algorithm.value,
+            &hash.value,
+            hash_object.data(),
+            static_cast<ULONG>(hash_object.size()),
+            nullptr,
+            0,
+            0));
+
+        std::array<UCHAR, 64U * 1024U> buffer{};
+        while (true)
+        {
+            DWORD read = 0;
+            if (!ReadFile(
+                    file.value,
+                    buffer.data(),
+                    static_cast<DWORD>(buffer.size()),
+                    &read,
+                    nullptr))
+            {
+                fail(L"Setup could not read an installed payload file.");
+            }
+            if (read == 0U)
+            {
+                break;
+            }
+            check_bcrypt(BCryptHashData(
+                hash.value,
+                buffer.data(),
+                read,
+                0));
+        }
+
+        sha256_digest digest{};
+        check_bcrypt(BCryptFinishHash(
+            hash.value,
+            reinterpret_cast<PUCHAR>(digest.data()),
+            static_cast<ULONG>(digest.size()),
+            0));
+        return digest;
+    }
+
+    void verify_file_hash(
+        std::filesystem::path const& path,
+        sha256_digest const& expected)
+    {
+        if (hash_file(path) != expected)
+        {
+            fail(L"Setup refused a mismatched installed payload file.");
+        }
     }
 
     std::wstring get_property(MSIHANDLE installer, wchar_t const* name)
@@ -268,9 +480,11 @@ namespace
         std::filesystem::path const& install_folder)
     {
         validate_install_folder(install_folder);
-        if (!std::filesystem::is_regular_file(package_path))
+        if (!paths_equal(package_path.parent_path(), install_folder) ||
+            package_path.filename().native() != L"Librarian.Identity.msix" ||
+            !std::filesystem::is_regular_file(package_path))
         {
-            fail(L"Setup refused a missing identity package.");
+            fail(L"Setup refused an invalid identity package path.");
         }
         reject_reparse_chain(
             package_path,
@@ -295,6 +509,24 @@ namespace
             fail(
                 L"Setup refused an unexpected passkey provider before issue #18.");
         }
+    }
+
+    void validate_release_payload(
+        std::filesystem::path const& package_path,
+        std::filesystem::path const& install_folder,
+        payload_hashes const& hashes)
+    {
+        validate_payload(package_path, install_folder);
+        verify_file_hash(
+            install_folder / required_executables[0],
+            hashes.desktop);
+        verify_file_hash(
+            install_folder / required_executables[1],
+            hashes.vault_agent);
+        verify_file_hash(
+            install_folder / required_executables[2],
+            hashes.native_host);
+        verify_file_hash(package_path, hashes.identity_package);
     }
 
     PackageVersion parse_version(std::wstring_view text)
@@ -920,11 +1152,18 @@ extern "C" __declspec(dllexport) UINT __stdcall RegisterIdentity(
 {
     return run_action(installer, L"identity registration", [&] {
         auto const fields =
-            split_data(get_property(installer, L"CustomActionData"), 3);
+            split_data(get_property(installer, L"CustomActionData"), 7);
         std::filesystem::path const package_path = absolute_path(fields[0]);
         std::filesystem::path const install_folder = absolute_path(fields[1]);
         PackageVersion const version = parse_version(fields[2]);
+        payload_hashes const hashes{
+            .desktop = parse_sha256(fields[3]),
+            .vault_agent = parse_sha256(fields[4]),
+            .native_host = parse_sha256(fields[5]),
+            .identity_package = parse_sha256(fields[6]),
+        };
 
+        validate_release_payload(package_path, install_folder, hashes);
         PackageManager const manager;
         reject_newer_packages(manager, version);
         Package const package = ensure_package_staged(
@@ -947,11 +1186,18 @@ extern "C" __declspec(dllexport) UINT __stdcall RegisterCurrentUserIdentity(
 {
     return run_action(installer, L"invoking-user identity registration", [&] {
         auto const fields =
-            split_data(get_property(installer, L"CustomActionData"), 3);
+            split_data(get_property(installer, L"CustomActionData"), 7);
         std::filesystem::path const package_path = absolute_path(fields[0]);
         std::filesystem::path const install_folder = absolute_path(fields[1]);
         PackageVersion const version = parse_version(fields[2]);
+        payload_hashes const hashes{
+            .desktop = parse_sha256(fields[3]),
+            .vault_agent = parse_sha256(fields[4]),
+            .native_host = parse_sha256(fields[5]),
+            .identity_package = parse_sha256(fields[6]),
+        };
 
+        validate_release_payload(package_path, install_folder, hashes);
         PackageManager const manager;
         register_package_for_current_user(
             manager,

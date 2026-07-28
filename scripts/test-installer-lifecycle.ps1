@@ -115,7 +115,7 @@ function Invoke-SuccessfulProcess {
         -FilePath $FilePath `
         -Arguments $Arguments
     Assert-True (
-        $result.ExitCode -in @(0, 3010)
+        $result.ExitCode -eq 0
     ) "$Label failed with exit code $($result.ExitCode)."
 }
 
@@ -136,7 +136,7 @@ function Invoke-FailingProcess {
         -FilePath $FilePath `
         -Arguments $Arguments
     Assert-True (
-        $result.ExitCode -notin @(0, 3010)
+        $result.ExitCode -ne 0
     ) "$Label unexpectedly succeeded."
 }
 

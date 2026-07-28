@@ -122,6 +122,18 @@ Invoke-CheckedProcess `
     -WorkingDirectory $repoRoot
 
 Invoke-CheckedProcess `
+    -Label "Certificate helper tests" `
+    -FilePath $powerShellHost `
+    -Arguments @(
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        "scripts\test-certificate-helpers.ps1"
+    ) `
+    -WorkingDirectory $repoRoot
+
+Invoke-CheckedProcess `
     -Label "Rust formatting" `
     -FilePath $toolchain.Cargo `
     -Arguments @("fmt", "--all", "--", "--check") `

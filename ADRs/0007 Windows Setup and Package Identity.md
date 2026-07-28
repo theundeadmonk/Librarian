@@ -46,6 +46,12 @@ compatible product version. Installation must validate the complete required
 payload before enabling registrations. An interrupted or invalid installation
 rolls back instead of leaving a partially authorized product.
 
+The WinUI desktop output is self-contained for the Windows App SDK and uses
+Microsoft's hybrid CRT configuration. The MSI therefore carries the native
+Windows App SDK runtime beside the application and does not require a separate
+Windows App SDK or Visual C++ Redistributable installation. Windows system UCRT
+API-set dependencies remain operating-system components.
+
 WiX Toolset 7.0.0 authors the setup bundle and MSI. The source is available
 under the Microsoft Reciprocal License; the project accepts the Open Source
 Maintenance Fee EULA v1.1 that governs the official WiX binaries, including
@@ -78,6 +84,13 @@ protected installation directory. It restores that exact state after a failed
 install, repair, upgrade, or uninstall, including preserving pre-existing
 absence.
 
+Before staging or registering identity, both the elevated and impersonated
+custom actions hash the three identity-bearing executables and the fixed
+identity-package path. Those SHA-256 values must match the values embedded in
+the signed MSI at build time. A stale or mixed-version file left at the
+protected installation path therefore fails closed before it can receive
+package identity.
+
 The existing package-enabled WinUI development target may continue to produce a
 full MSIX for isolated UI smoke tests. It is not the production product
 lifecycle described by this ADR.
@@ -109,9 +122,12 @@ the user's independent browser-extension choices.
   before registration. Downgrades and mixed release sets fail closed.
 - The shared four-part version keeps its revision field at zero because Windows
   Installer major-upgrade comparison uses only the first three fields.
-- Update and repair lock the agent and disconnect clients before replacing
-  product files or registrations. Clients from a partial or incompatible
-  release cannot connect to an unlocked agent.
+- Windows Installer Restart Manager remains enabled to coordinate running
+  product processes before update or repair replaces files. Setup does not
+  accept a restart-required result as a completed lifecycle test, and
+  hash-bound identity registration fails closed if any old executable remains.
+  Clients from a partial or incompatible release cannot receive the incoming
+  package identity.
 - The MSI uses transactional installation and Windows Installer repair. Native
   binaries and registrations are removed together.
 - User vaults and encrypted backups live outside the installation directory.
