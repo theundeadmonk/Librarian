@@ -189,16 +189,20 @@ function Invoke-DisposableUserPowerShell {
             -PassThru
         try {
             $standardOutput = [string](
-                Get-Content `
-                    -LiteralPath $standardOutputPath `
-                    -Raw `
-                    -ErrorAction SilentlyContinue
+                @(
+                    Get-Content `
+                        -LiteralPath $standardOutputPath `
+                        -Raw `
+                        -ErrorAction SilentlyContinue
+                ) -join [Environment]::NewLine
             )
             $standardError = [string](
-                Get-Content `
-                    -LiteralPath $standardErrorPath `
-                    -Raw `
-                    -ErrorAction SilentlyContinue
+                @(
+                    Get-Content `
+                        -LiteralPath $standardErrorPath `
+                        -Raw `
+                        -ErrorAction SilentlyContinue
+                ) -join [Environment]::NewLine
             )
             $diagnostic = @(
                 $standardError.Trim(),
