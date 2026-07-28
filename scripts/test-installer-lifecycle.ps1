@@ -182,6 +182,7 @@ exit 1
         ) `
         -Credential $Credential `
         -LoadUserProfile `
+        -UseNewEnvironment `
         -WorkingDirectory $env:SystemRoot `
         -WindowStyle Hidden `
         -Wait `
@@ -248,6 +249,7 @@ exit 0
         ) `
         -Credential $Credential `
         -LoadUserProfile `
+        -UseNewEnvironment `
         -WorkingDirectory $env:SystemRoot `
         -WindowStyle Hidden `
         -Wait `
