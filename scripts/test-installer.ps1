@@ -320,9 +320,11 @@ try {
             ) `
             -WorkingDirectory $repoRoot
         $iceDiagnostics = @(
-            $iceResult.StandardOutput,
-            $iceResult.StandardError
-        ) | Where-Object { $_ }
+            @(
+                $iceResult.StandardOutput,
+                $iceResult.StandardError
+            ) | Where-Object { $_ }
+        )
         if ($iceDiagnostics.Count -gt 0) {
             Write-Host ($iceDiagnostics -join [Environment]::NewLine).TrimEnd()
         }
