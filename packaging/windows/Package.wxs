@@ -79,6 +79,7 @@
             Directory="LibrarianProgramMenu"
             Name="Librarian"
             Description="Open Librarian"
+            Advertise="yes"
             WorkingDirectory="INSTALLFOLDER" />
         </File>
         <RemoveFolder
@@ -129,13 +130,13 @@
       InstallDefault="local"
       Level="0">
       <Level Value="2" Condition="CHROME_MACHINE OR CHROME_USER" />
-      <Component Id="ChromeNativeHostManifestFile" Directory="INSTALLFOLDER" Guid="*">
+      <Component
+        Id="ChromeNativeHostManifestFile"
+        Directory="INSTALLFOLDER"
+        Guid="{568004E8-5DB4-40DB-B862-91CCD4BE29F3}">
         <File
           Id="ChromeNativeHostManifest"
-          Source="$(var.BrowserManifestDir)\com.theundeadmonk.librarian.chrome.json"
-          KeyPath="yes" />
-      </Component>
-      <Component Id="ChromeNativeHostRegistration" Directory="INSTALLFOLDER" Guid="*">
+          Source="$(var.BrowserManifestDir)\com.theundeadmonk.librarian.chrome.json" />
         <RegistryValue
           Root="HKLM"
           Key="SOFTWARE\Google\Chrome\NativeMessagingHosts\com.theundeadmonk.librarian"
@@ -154,13 +155,13 @@
       InstallDefault="local"
       Level="0">
       <Level Value="2" Condition="EDGE_MACHINE OR EDGE_USER" />
-      <Component Id="EdgeNativeHostManifestFile" Directory="INSTALLFOLDER" Guid="*">
+      <Component
+        Id="EdgeNativeHostManifestFile"
+        Directory="INSTALLFOLDER"
+        Guid="{290C27FD-6338-48B8-9E8A-3434B4396795}">
         <File
           Id="EdgeNativeHostManifest"
-          Source="$(var.BrowserManifestDir)\com.theundeadmonk.librarian.edge.json"
-          KeyPath="yes" />
-      </Component>
-      <Component Id="EdgeNativeHostRegistration" Directory="INSTALLFOLDER" Guid="*">
+          Source="$(var.BrowserManifestDir)\com.theundeadmonk.librarian.edge.json" />
         <RegistryValue
           Root="HKLM"
           Key="SOFTWARE\Microsoft\Edge\NativeMessagingHosts\com.theundeadmonk.librarian"
@@ -191,11 +192,35 @@
       Return="check"
       HideTarget="yes" />
     <CustomAction
+      Id="RollbackCurrentUserIdentity"
+      BinaryRef="LibrarianSetupCustomActions"
+      DllEntry="RollbackCurrentUserIdentity"
+      Execute="rollback"
+      Impersonate="yes"
+      Return="check"
+      HideTarget="yes" />
+    <CustomAction
+      Id="RollbackIdentitySnapshotCleanup"
+      BinaryRef="LibrarianSetupCustomActions"
+      DllEntry="CleanupIdentitySnapshot"
+      Execute="rollback"
+      Impersonate="no"
+      Return="check"
+      HideTarget="yes" />
+    <CustomAction
       Id="RegisterIdentity"
       BinaryRef="LibrarianSetupCustomActions"
       DllEntry="RegisterIdentity"
       Execute="deferred"
       Impersonate="no"
+      Return="check"
+      HideTarget="yes" />
+    <CustomAction
+      Id="RegisterCurrentUserIdentity"
+      BinaryRef="LibrarianSetupCustomActions"
+      DllEntry="RegisterCurrentUserIdentity"
+      Execute="deferred"
+      Impersonate="yes"
       Return="check"
       HideTarget="yes" />
     <CustomAction
@@ -207,9 +232,33 @@
       Return="check"
       HideTarget="yes" />
     <CustomAction
+      Id="SnapshotUnregisterIdentity"
+      BinaryRef="LibrarianSetupCustomActions"
+      DllEntry="SnapshotIdentity"
+      Execute="deferred"
+      Impersonate="no"
+      Return="check"
+      HideTarget="yes" />
+    <CustomAction
       Id="RollbackUnregisterIdentity"
       BinaryRef="LibrarianSetupCustomActions"
-      DllEntry="RegisterIdentity"
+      DllEntry="RollbackIdentity"
+      Execute="rollback"
+      Impersonate="no"
+      Return="check"
+      HideTarget="yes" />
+    <CustomAction
+      Id="RollbackUnregisterCurrentUserIdentity"
+      BinaryRef="LibrarianSetupCustomActions"
+      DllEntry="RollbackCurrentUserIdentity"
+      Execute="rollback"
+      Impersonate="yes"
+      Return="check"
+      HideTarget="yes" />
+    <CustomAction
+      Id="RollbackUnregisterSnapshotCleanup"
+      BinaryRef="LibrarianSetupCustomActions"
+      DllEntry="CleanupIdentitySnapshot"
       Execute="rollback"
       Impersonate="no"
       Return="check"
@@ -231,13 +280,25 @@
 
     <SetProperty
       Id="SnapshotIdentity"
-      Value="[INSTALLFOLDER]Librarian.Identity.msix.state|[INSTALLFOLDER]|[ProductVersion]"
+      Value="[INSTALLFOLDER]Librarian.Identity.msix.state|[INSTALLFOLDER]|[ProductVersion]|[UserSID]"
       Before="SnapshotIdentity"
       Sequence="execute"
       Condition="NOT (REMOVE~=&quot;ALL&quot;)" />
     <SetProperty
+      Id="RollbackIdentitySnapshotCleanup"
+      Value="[INSTALLFOLDER]Librarian.Identity.msix.state|[INSTALLFOLDER]"
+      Before="RollbackIdentitySnapshotCleanup"
+      Sequence="execute"
+      Condition="NOT (REMOVE~=&quot;ALL&quot;)" />
+    <SetProperty
+      Id="RollbackCurrentUserIdentity"
+      Value="[INSTALLFOLDER]Librarian.Identity.msix.state|[#IdentityMsix]|[INSTALLFOLDER]|[ProductVersion]"
+      Before="RollbackCurrentUserIdentity"
+      Sequence="execute"
+      Condition="NOT (REMOVE~=&quot;ALL&quot;)" />
+    <SetProperty
       Id="RollbackIdentity"
-      Value="[INSTALLFOLDER]Librarian.Identity.msix.state|[INSTALLFOLDER]|[ProductVersion]"
+      Value="[INSTALLFOLDER]Librarian.Identity.msix.state|[#IdentityMsix]|[INSTALLFOLDER]|[ProductVersion]"
       Before="RollbackIdentity"
       Sequence="execute"
       Condition="NOT (REMOVE~=&quot;ALL&quot;)" />
@@ -248,14 +309,38 @@
       Sequence="execute"
       Condition="NOT (REMOVE~=&quot;ALL&quot;)" />
     <SetProperty
+      Id="RegisterCurrentUserIdentity"
+      Value="[#IdentityMsix]|[INSTALLFOLDER]|[ProductVersion]"
+      Before="RegisterCurrentUserIdentity"
+      Sequence="execute"
+      Condition="NOT (REMOVE~=&quot;ALL&quot;)" />
+    <SetProperty
       Id="CleanupIdentitySnapshot"
       Value="[INSTALLFOLDER]Librarian.Identity.msix.state|[INSTALLFOLDER]"
       Before="CleanupIdentitySnapshot"
       Sequence="execute"
-      Condition="NOT (REMOVE~=&quot;ALL&quot;)" />
+      Condition="NOT (REMOVE~=&quot;ALL&quot;) OR (REMOVE~=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE)" />
+    <SetProperty
+      Id="SnapshotUnregisterIdentity"
+      Value="[INSTALLFOLDER]Librarian.Identity.msix.state|[INSTALLFOLDER]|[ProductVersion]|[UserSID]"
+      Before="SnapshotUnregisterIdentity"
+      Sequence="execute"
+      Condition="REMOVE~=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
+    <SetProperty
+      Id="RollbackUnregisterSnapshotCleanup"
+      Value="[INSTALLFOLDER]Librarian.Identity.msix.state|[INSTALLFOLDER]"
+      Before="RollbackUnregisterSnapshotCleanup"
+      Sequence="execute"
+      Condition="REMOVE~=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
+    <SetProperty
+      Id="RollbackUnregisterCurrentUserIdentity"
+      Value="[INSTALLFOLDER]Librarian.Identity.msix.state|[#IdentityMsix]|[INSTALLFOLDER]|[ProductVersion]"
+      Before="RollbackUnregisterCurrentUserIdentity"
+      Sequence="execute"
+      Condition="REMOVE~=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
     <SetProperty
       Id="RollbackUnregisterIdentity"
-      Value="[#IdentityMsix]|[INSTALLFOLDER]|[ProductVersion]"
+      Value="[INSTALLFOLDER]Librarian.Identity.msix.state|[#IdentityMsix]|[INSTALLFOLDER]|[ProductVersion]"
       Before="RollbackUnregisterIdentity"
       Sequence="execute"
       Condition="REMOVE~=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
@@ -269,20 +354,40 @@
     <InstallExecuteSequence>
       <Custom
         Action="SnapshotIdentity"
-        After="InstallFiles"
+        Before="RollbackIdentitySnapshotCleanup"
+        Condition="NOT (REMOVE~=&quot;ALL&quot;)" />
+      <Custom
+        Action="RollbackIdentitySnapshotCleanup"
+        Before="RollbackCurrentUserIdentity"
+        Condition="NOT (REMOVE~=&quot;ALL&quot;)" />
+      <Custom
+        Action="RollbackCurrentUserIdentity"
+        Before="RollbackIdentity"
         Condition="NOT (REMOVE~=&quot;ALL&quot;)" />
       <Custom
         Action="RollbackIdentity"
-        After="SnapshotIdentity"
+        Before="InstallFiles"
         Condition="NOT (REMOVE~=&quot;ALL&quot;)" />
       <Custom
         Action="RegisterIdentity"
-        After="RollbackIdentity"
+        After="InstallFiles"
         Condition="NOT (REMOVE~=&quot;ALL&quot;)" />
       <Custom
-        Action="CleanupIdentitySnapshot"
+        Action="RegisterCurrentUserIdentity"
         After="RegisterIdentity"
         Condition="NOT (REMOVE~=&quot;ALL&quot;)" />
+      <Custom
+        Action="SnapshotUnregisterIdentity"
+        Before="RollbackUnregisterSnapshotCleanup"
+        Condition="REMOVE~=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
+      <Custom
+        Action="RollbackUnregisterSnapshotCleanup"
+        Before="RollbackUnregisterCurrentUserIdentity"
+        Condition="REMOVE~=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
+      <Custom
+        Action="RollbackUnregisterCurrentUserIdentity"
+        Before="RollbackUnregisterIdentity"
+        Condition="REMOVE~=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
       <Custom
         Action="RollbackUnregisterIdentity"
         Before="UnregisterIdentity"
@@ -291,6 +396,10 @@
         Action="UnregisterIdentity"
         Before="RemoveFiles"
         Condition="REMOVE~=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
+      <Custom
+        Action="CleanupIdentitySnapshot"
+        Before="InstallFinalize"
+        Condition="NOT (REMOVE~=&quot;ALL&quot;) OR (REMOVE~=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE)" />
     </InstallExecuteSequence>
 
     <UI Id="LibrarianInstallerUI">

@@ -24,6 +24,8 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
+. (Join-Path $PSScriptRoot "native-process-arguments.ps1")
+
 function Invoke-CheckedProcess {
     param(
         [Parameter(Mandatory)]
@@ -42,13 +44,7 @@ function Invoke-CheckedProcess {
     Write-Host ""
     Write-Host "==> $Label"
 
-    $argumentText = ($Arguments | ForEach-Object {
-        if ($_ -match '^".*"$' -or $_ -notmatch '\s') {
-            $_
-        } else {
-            '"' + $_.Replace('"', '\"') + '"'
-        }
-    }) -join " "
+    $argumentText = Join-NativeProcessArguments -Arguments $Arguments
 
     $startInfo = New-Object Diagnostics.ProcessStartInfo
     $startInfo.FileName = $FilePath
@@ -322,6 +318,13 @@ if ($versionParts[0] -gt 255 -or $versionParts[1] -gt 255 -or
         "Installer or MSIX field limits."
     )
 }
+if ($versionParts[3] -ne 0) {
+    throw (
+        "Installer product version '$ProductVersion' uses a nonzero revision. " +
+        "Windows Installer compares only the first three fields, so coherent " +
+        "upgrades require the fourth field to remain zero."
+    )
+}
 
 $artifactsRoot = Join-Path $repoRoot "artifacts"
 $installerRoot = Join-Path $artifactsRoot "installer"
@@ -383,7 +386,7 @@ Invoke-CheckedProcess `
     -Label "Locked setup custom-action restore" `
     -FilePath $toolchain.MSBuild `
     -Arguments @(
-        ('"' + $customActionProject + '"'),
+        $customActionProject,
         "/t:Restore",
         "/m",
         "/nr:false",
@@ -398,7 +401,7 @@ Invoke-CheckedProcess `
     -Label "Setup custom-action build" `
     -FilePath $toolchain.MSBuild `
     -Arguments @(
-        ('"' + $customActionProject + '"'),
+        $customActionProject,
         "/t:Build",
         "/m",
         "/nr:false",

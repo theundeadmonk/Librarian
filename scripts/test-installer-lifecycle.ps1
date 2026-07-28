@@ -28,6 +28,8 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
+. (Join-Path $PSScriptRoot "native-process-arguments.ps1")
+
 function Assert-True {
     param(
         [Parameter(Mandatory)]
@@ -56,13 +58,7 @@ function Invoke-CapturedProcess {
 
     Write-Host ""
     Write-Host "==> $Label"
-    $argumentText = ($Arguments | ForEach-Object {
-        if ($_ -match '^".*"$' -or $_ -notmatch '\s') {
-            $_
-        } else {
-            '"' + $_.Replace('"', '\"') + '"'
-        }
-    }) -join " "
+    $argumentText = Join-NativeProcessArguments -Arguments $Arguments
 
     $startInfo = New-Object Diagnostics.ProcessStartInfo
     $startInfo.FileName = $FilePath
@@ -176,6 +172,14 @@ function Get-LibrarianPackages {
     return @(
         Get-AppxPackage `
             -AllUsers `
+            -Name "TheUndeadMonk.Librarian.Development" `
+            -ErrorAction Stop
+    )
+}
+
+function Get-LibrarianCurrentUserPackages {
+    return @(
+        Get-AppxPackage `
             -Name "TheUndeadMonk.Librarian.Development" `
             -ErrorAction Stop
     )
@@ -345,6 +349,18 @@ function Assert-Installed {
         "The staged identity package is missing, stale, or duplicated. Found: " +
         "$($packageVersions -join ', ')."
     )
+    $currentUserVersions = @(
+        Get-LibrarianCurrentUserPackages |
+            ForEach-Object { $_.Version.ToString() } |
+            Sort-Object -Unique
+    )
+    Assert-True (
+        $currentUserVersions.Count -eq 1 -and
+        $currentUserVersions[0] -eq $ExpectedVersion
+    ) (
+        "The invoking user does not have the expected package identity. Found: " +
+        "$($currentUserVersions -join ', ')."
+    )
     $provisionedVersions = @(
         Get-LibrarianProvisionedPackages |
             ForEach-Object { $_.Version.ToString() } |
@@ -405,8 +421,73 @@ function Assert-ProductAbsent {
         @(Get-LibrarianPackages).Count -eq 0
     ) "A Librarian identity package remains installed."
     Assert-True (
+        @(Get-LibrarianCurrentUserPackages).Count -eq 0
+    ) "A Librarian identity package remains registered for the invoking user."
+    Assert-True (
         @(Get-LibrarianProvisionedPackages).Count -eq 0
     ) "A Librarian identity package remains provisioned."
+}
+
+function Assert-InstalledWithoutIdentity {
+    param(
+        [Parameter(Mandatory)]
+        [string]$ExpectedVersion,
+
+        [Parameter(Mandatory)]
+        [string]$InstallFolder,
+
+        [Parameter(Mandatory)]
+        [string]$ChromeRegistryPath,
+
+        [Parameter(Mandatory)]
+        [string]$EdgeRegistryPath,
+
+        [Parameter(Mandatory)]
+        [string]$ProductRegistryPath
+    )
+
+    foreach ($name in @(
+        "Librarian.Windows.exe",
+        "Librarian.VaultAgent.exe",
+        "Librarian.ChromiumNativeHost.exe",
+        "Librarian.Identity.msix",
+        "Librarian.Release.json"
+    )) {
+        Assert-True (
+            Test-Path -LiteralPath (Join-Path $InstallFolder $name) -PathType Leaf
+        ) "Uninstall rollback did not restore installer-owned file '$name'."
+    }
+    Assert-True (
+        (Get-ItemProperty -LiteralPath $ProductRegistryPath).Version -eq
+            $ExpectedVersion
+    ) "Uninstall rollback did not restore the product registration."
+    Assert-True (
+        @(Get-VisibleArpEntries).Count -eq 1
+    ) "Uninstall rollback did not restore the Programs and Features entry."
+    Assert-BrowserState `
+        -Expected $true `
+        -InstallFolder $InstallFolder `
+        -ChromeRegistryPath $ChromeRegistryPath `
+        -EdgeRegistryPath $EdgeRegistryPath
+    Assert-True (
+        @(Get-LibrarianPackages).Count -eq 0 -and
+        @(Get-LibrarianCurrentUserPackages).Count -eq 0 -and
+        @(Get-LibrarianProvisionedPackages).Count -eq 0
+    ) "Uninstall rollback created identity state that was absent beforehand."
+}
+
+function Remove-LibrarianIdentityState {
+    foreach ($package in Get-LibrarianProvisionedPackages) {
+        $null = Remove-AppxProvisionedPackage `
+            -Online `
+            -AllUsers `
+            -PackageName $package.PackageName
+    }
+    foreach ($package in Get-LibrarianPackages) {
+        Remove-AppxPackage `
+            -AllUsers `
+            -Package $package.PackageFullName
+    }
 }
 
 function Remove-ProductState {
@@ -537,6 +618,9 @@ Assert-True (
 ) "The installer lifecycle suite requires an administrator runner."
 $lowParts = @($LowVersion.Split(".") | ForEach-Object { [uint32]$_ })
 $highParts = @($HighVersion.Split(".") | ForEach-Object { [uint32]$_ })
+Assert-True (
+    $lowParts[3] -eq 0 -and $highParts[3] -eq 0
+) "Installer lifecycle fixtures must keep the ignored revision field at zero."
 $lowMsiVersion = [version]"$($lowParts[0]).$($lowParts[1]).$($lowParts[2])"
 $highMsiVersion = [version]"$($highParts[0]).$($highParts[1]).$($highParts[2])"
 Assert-True (
@@ -777,6 +861,54 @@ try {
         -ProductRegistryPath $productRegistryPath
     Assert-Sentinel -Path $sentinelPath -Expected $sentinelValue
 
+    Remove-LibrarianIdentityState
+    Assert-InstalledWithoutIdentity `
+        -ExpectedVersion $HighVersion `
+        -InstallFolder $installFolder `
+        -ChromeRegistryPath $chromeRegistryPath `
+        -EdgeRegistryPath $edgeRegistryPath `
+        -ProductRegistryPath $productRegistryPath
+    Invoke-FailingProcess `
+        -Label "Preserve absent identity through uninstall rollback" `
+        -FilePath $msiexec `
+        -Arguments @(
+            "/x",
+            $resolvedSignedHighMsi,
+            "WIXFAILWHENDEFERRED=1",
+            "/qn",
+            "/norestart",
+            "/l*v",
+            (Join-Path $resolvedLogDirectory "09-absent-identity-rollback.log")
+        )
+    Assert-InstalledWithoutIdentity `
+        -ExpectedVersion $HighVersion `
+        -InstallFolder $installFolder `
+        -ChromeRegistryPath $chromeRegistryPath `
+        -EdgeRegistryPath $edgeRegistryPath `
+        -ProductRegistryPath $productRegistryPath
+    Assert-Sentinel -Path $sentinelPath -Expected $sentinelValue
+
+    Invoke-SuccessfulProcess `
+        -Label "Repair identity after external package-state damage" `
+        -FilePath $msiexec `
+        -Arguments @(
+            "/fa",
+            $resolvedSignedHighMsi,
+            "ADDLOCAL=Core,ChromeIntegration,EdgeIntegration",
+            "/qn",
+            "/norestart",
+            "/l*v",
+            (Join-Path $resolvedLogDirectory "10-repair-identity.log")
+        )
+    Assert-Installed `
+        -ExpectedVersion $HighVersion `
+        -BrowsersExpected $true `
+        -InstallFolder $installFolder `
+        -ChromeRegistryPath $chromeRegistryPath `
+        -EdgeRegistryPath $edgeRegistryPath `
+        -ProductRegistryPath $productRegistryPath
+    Assert-Sentinel -Path $sentinelPath -Expected $sentinelValue
+
     Invoke-SuccessfulProcess `
         -Label "Uninstall upgraded fixture" `
         -FilePath $resolvedSignedHighSetup `
@@ -785,7 +917,7 @@ try {
             "/quiet",
             "/norestart",
             "/log",
-            (Join-Path $resolvedLogDirectory "09-uninstall-high.log")
+            (Join-Path $resolvedLogDirectory "11-uninstall-high.log")
         )
     Assert-ProductAbsent `
         -InstallFolder $installFolder `
@@ -802,7 +934,7 @@ try {
             "/quiet",
             "/norestart",
             "/log",
-            (Join-Path $resolvedLogDirectory "10-reinstall-high.log")
+            (Join-Path $resolvedLogDirectory "12-reinstall-high.log")
         )
     Assert-Installed `
         -ExpectedVersion $HighVersion `
@@ -821,7 +953,7 @@ try {
             "/quiet",
             "/norestart",
             "/log",
-            (Join-Path $resolvedLogDirectory "11-final-uninstall.log")
+            (Join-Path $resolvedLogDirectory "13-final-uninstall.log")
         )
     Assert-ProductAbsent `
         -InstallFolder $installFolder `

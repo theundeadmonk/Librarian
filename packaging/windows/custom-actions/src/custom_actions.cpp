@@ -1,6 +1,7 @@
 #include <windows.h>
 #include <msi.h>
 #include <msiquery.h>
+#include <sddl.h>
 #include <shlobj.h>
 
 #include <winrt/Windows.ApplicationModel.h>
@@ -14,6 +15,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -25,6 +27,7 @@ namespace
     using winrt::Windows::ApplicationModel::PackageVersion;
     using winrt::Windows::Foundation::Uri;
     using winrt::Windows::Management::Deployment::DeploymentResult;
+    using winrt::Windows::Management::Deployment::AddPackageOptions;
     using winrt::Windows::Management::Deployment::PackageManager;
     using winrt::Windows::Management::Deployment::RemovalOptions;
     using winrt::Windows::Management::Deployment::StagePackageOptions;
@@ -41,6 +44,14 @@ namespace
         L"Librarian.PasskeyProvider.exe"};
     constexpr std::wstring_view snapshot_name{
         L"Librarian.Identity.msix.state"};
+
+    struct identity_snapshot
+    {
+        bool package_present{};
+        PackageVersion package_version{};
+        bool provisioned{};
+        bool invoking_user_registered{};
+    };
 
     void log_message(
         MSIHANDLE installer,
@@ -116,6 +127,28 @@ namespace
             fail(L"Windows Installer supplied malformed custom-action data.");
         }
         return fields;
+    }
+
+    std::wstring validate_user_sid(std::wstring const& value)
+    {
+        if (value.size() < 5U || value.size() > SECURITY_MAX_SID_SIZE * 3U ||
+            !value.starts_with(L"S-1-"))
+        {
+            fail(L"Windows Installer supplied an invalid invoking-user SID.");
+        }
+
+        PSID parsed = nullptr;
+        if (!ConvertStringSidToSidW(value.c_str(), &parsed) ||
+            parsed == nullptr || !IsValidSid(parsed))
+        {
+            if (parsed != nullptr)
+            {
+                LocalFree(parsed);
+            }
+            fail(L"Windows Installer supplied an invalid invoking-user SID.");
+        }
+        LocalFree(parsed);
+        return value;
     }
 
     std::filesystem::path absolute_path(std::wstring const& value)
@@ -431,12 +464,80 @@ namespace
                error.value == package_not_registered_error;
     }
 
-    void remove_package(
+    bool package_is_provisioned(
         PackageManager const& manager,
         Package const& package)
     {
-        winrt::hstring const family_name = package.Id().FamilyName();
-        winrt::hstring const full_name = package.Id().FullName();
+        winrt::hstring const expected = package.Id().FullName();
+        return std::ranges::any_of(
+            manager.FindProvisionedPackages(),
+            [&expected](Package const& candidate) {
+                return _wcsicmp(
+                           candidate.Id().FullName().c_str(),
+                           expected.c_str()) == 0;
+            });
+    }
+
+    bool package_is_registered_for_user(
+        PackageManager const& manager,
+        Package const& package,
+        std::wstring const& user_sid)
+    {
+        try
+        {
+            Package const registered = manager.FindPackageForUser(
+                winrt::hstring{user_sid},
+                package.Id().FullName());
+            return registered != nullptr;
+        }
+        catch (winrt::hresult_error const& error)
+        {
+            if (package_not_found(error.code()))
+            {
+                return false;
+            }
+            throw;
+        }
+    }
+
+    identity_snapshot capture_snapshot(
+        PackageManager const& manager,
+        PackageVersion const& incoming_version,
+        std::filesystem::path const& install_folder,
+        std::wstring const& user_sid)
+    {
+        std::vector<Package> const packages = matching_packages(manager);
+        if (packages.size() > 1U)
+        {
+            fail(
+                L"Setup refused ambiguous existing identity package state.");
+        }
+        if (packages.empty())
+        {
+            return {};
+        }
+
+        Package const package = packages.front();
+        PackageVersion const version = package.Id().Version();
+        if (comparable_version(version) >
+            comparable_version(incoming_version))
+        {
+            fail(L"Setup refused to replace a newer identity package.");
+        }
+        validate_external_location(package, install_folder);
+        return identity_snapshot{
+            .package_present = true,
+            .package_version = version,
+            .provisioned = package_is_provisioned(manager, package),
+            .invoking_user_registered =
+                package_is_registered_for_user(manager, package, user_sid),
+        };
+    }
+
+    void deprovision_package_family(
+        PackageManager const& manager,
+        winrt::hstring const& family_name)
+    {
         try
         {
             DeploymentResult const deprovisioned =
@@ -452,6 +553,15 @@ namespace
                 throw;
             }
         }
+    }
+
+    void remove_package(
+        PackageManager const& manager,
+        Package const& package)
+    {
+        winrt::hstring const family_name = package.Id().FamilyName();
+        winrt::hstring const full_name = package.Id().FullName();
+        deprovision_package_family(manager, family_name);
 
         try
         {
@@ -469,6 +579,89 @@ namespace
             {
                 throw;
             }
+        }
+    }
+
+    void remove_package_for_current_user(
+        PackageManager const& manager,
+        Package const& package)
+    {
+        try
+        {
+            DeploymentResult const removed =
+                manager.RemovePackageAsync(package.Id().FullName()).get();
+            check_deployment_result(
+                removed,
+                L"Invoking-user identity package removal");
+        }
+        catch (winrt::hresult_error const& error)
+        {
+            if (!package_not_found(error.code()))
+            {
+                throw;
+            }
+        }
+    }
+
+    Package ensure_package_staged(
+        PackageManager const& manager,
+        PackageVersion const& version,
+        std::filesystem::path const& package_path,
+        std::filesystem::path const& install_folder)
+    {
+        if (!exact_package_exists(manager, version))
+        {
+            validate_payload(package_path, install_folder);
+            StagePackageOptions const options;
+            options.ExternalLocationUri(Uri{install_folder.c_str()});
+            DeploymentResult const staged =
+                manager
+                    .StagePackageByUriAsync(
+                        Uri{package_path.c_str()},
+                        options)
+                    .get();
+            check_deployment_result(staged, L"Identity package staging");
+        }
+
+        Package const package = find_exact_package(manager, version);
+        validate_external_location(package, install_folder);
+        return package;
+    }
+
+    void register_package_for_current_user(
+        PackageManager const& manager,
+        PackageVersion const& version,
+        std::filesystem::path const& package_path,
+        std::filesystem::path const& install_folder)
+    {
+        validate_payload(package_path, install_folder);
+        if (exact_package_exists(manager, version))
+        {
+            Package const existing = find_exact_package(manager, version);
+            validate_external_location(existing, install_folder);
+            if (package_is_registered_for_user(manager, existing, L""))
+            {
+                return;
+            }
+        }
+
+        AddPackageOptions const options;
+        options.ExternalLocationUri(Uri{install_folder.c_str()});
+        DeploymentResult const registered =
+            manager.AddPackageByUriAsync(
+                Uri{package_path.c_str()},
+                options).get();
+        check_deployment_result(
+            registered,
+            L"Invoking-user identity package registration");
+
+        Package const package = find_exact_package(manager, version);
+        validate_external_location(package, install_folder);
+        if (!package_is_registered_for_user(manager, package, L""))
+        {
+            fail(
+                L"Identity package registration did not become visible "
+                L"for the invoking user.");
         }
     }
 
@@ -521,7 +714,7 @@ namespace
 
     void write_snapshot(
         std::filesystem::path const& marker,
-        bool present)
+        identity_snapshot const& snapshot)
     {
         std::ofstream stream{
             marker,
@@ -530,7 +723,13 @@ namespace
         {
             fail(L"Setup could not create its identity rollback marker.");
         }
-        stream.put(present ? '1' : '0');
+        stream << "v1|" << (snapshot.package_present ? '1' : '0') << '|'
+               << snapshot.package_version.Major << '.'
+               << snapshot.package_version.Minor << '.'
+               << snapshot.package_version.Build << '.'
+               << snapshot.package_version.Revision << '|'
+               << (snapshot.provisioned ? '1' : '0') << '|'
+               << (snapshot.invoking_user_registered ? '1' : '0');
         stream.flush();
         if (!stream)
         {
@@ -538,15 +737,55 @@ namespace
         }
     }
 
-    bool read_snapshot(std::filesystem::path const& marker)
+    bool parse_snapshot_boolean(std::wstring const& value)
+    {
+        if (value == L"0")
+        {
+            return false;
+        }
+        if (value == L"1")
+        {
+            return true;
+        }
+        fail(L"Setup could not parse its identity rollback marker.");
+    }
+
+    identity_snapshot read_snapshot(std::filesystem::path const& marker)
     {
         std::ifstream stream{marker, std::ios::binary | std::ios::in};
-        char value = '\0';
-        if (!stream.get(value) || (value != '0' && value != '1'))
+        std::string const serialized{
+            std::istreambuf_iterator<char>{stream},
+            std::istreambuf_iterator<char>{}};
+        if (stream.bad() || serialized.empty() || serialized.size() > 128U ||
+            std::ranges::any_of(serialized, [](char character) {
+                return character < 0x20 || character > 0x7E;
+            }))
         {
             fail(L"Setup could not read its identity rollback marker.");
         }
-        return value == '1';
+
+        std::wstring const text{serialized.begin(), serialized.end()};
+        auto const fields = split_data(text, 5);
+        if (fields[0] != L"v1")
+        {
+            fail(L"Setup found an unsupported identity rollback marker.");
+        }
+
+        identity_snapshot const snapshot{
+            .package_present = parse_snapshot_boolean(fields[1]),
+            .package_version = parse_version(fields[2]),
+            .provisioned = parse_snapshot_boolean(fields[3]),
+            .invoking_user_registered =
+                parse_snapshot_boolean(fields[4]),
+        };
+        if (!snapshot.package_present &&
+            (comparable_version(snapshot.package_version) != 0U ||
+             snapshot.provisioned ||
+             snapshot.invoking_user_registered))
+        {
+            fail(L"Setup found inconsistent identity rollback state.");
+        }
+        return snapshot;
     }
 
     void remove_snapshot(std::filesystem::path const& marker)
@@ -558,6 +797,100 @@ namespace
             fail(L"Setup could not remove its identity rollback marker.");
         }
     }
+
+    void remove_exact_package(
+        PackageManager const& manager,
+        PackageVersion const& version)
+    {
+        for (Package const& package : matching_packages(manager))
+        {
+            if (comparable_version(package.Id().Version()) ==
+                comparable_version(version))
+            {
+                remove_package(manager, package);
+            }
+        }
+    }
+
+    void restore_system_identity(
+        PackageManager const& manager,
+        identity_snapshot const& snapshot,
+        PackageVersion const& incoming_version,
+        std::filesystem::path const& package_path,
+        std::filesystem::path const& install_folder)
+    {
+        if (!snapshot.package_present)
+        {
+            remove_exact_package(manager, incoming_version);
+            return;
+        }
+
+        if (comparable_version(snapshot.package_version) !=
+            comparable_version(incoming_version))
+        {
+            remove_exact_package(manager, incoming_version);
+        }
+
+        Package const previous = ensure_package_staged(
+            manager,
+            snapshot.package_version,
+            package_path,
+            install_folder);
+        if (snapshot.provisioned)
+        {
+            DeploymentResult const provisioned =
+                manager
+                    .ProvisionPackageForAllUsersAsync(
+                        previous.Id().FamilyName())
+                    .get();
+            check_deployment_result(
+                provisioned,
+                L"Previous identity package provisioning");
+        }
+        else
+        {
+            deprovision_package_family(
+                manager,
+                previous.Id().FamilyName());
+        }
+    }
+
+    void restore_current_user_identity(
+        PackageManager const& manager,
+        identity_snapshot const& snapshot,
+        PackageVersion const& incoming_version,
+        std::filesystem::path const& package_path,
+        std::filesystem::path const& install_folder)
+    {
+        for (Package const& package : matching_packages(manager))
+        {
+            std::uint64_t const actual =
+                comparable_version(package.Id().Version());
+            bool const incoming =
+                actual == comparable_version(incoming_version);
+            bool const previous =
+                snapshot.package_present &&
+                actual == comparable_version(snapshot.package_version);
+            bool const preserve_previous =
+                snapshot.package_present &&
+                snapshot.invoking_user_registered &&
+                previous;
+            if (!preserve_previous && (incoming || previous))
+            {
+                remove_package_for_current_user(manager, package);
+            }
+        }
+
+        if (snapshot.package_present &&
+            snapshot.invoking_user_registered)
+        {
+            register_package_for_current_user(
+                manager,
+                snapshot.package_version,
+                package_path,
+                install_folder);
+        }
+    }
 }
 
 extern "C" __declspec(dllexport) UINT __stdcall SnapshotIdentity(
@@ -565,13 +898,20 @@ extern "C" __declspec(dllexport) UINT __stdcall SnapshotIdentity(
 {
     return run_action(installer, L"identity snapshot", [&] {
         auto const fields =
-            split_data(get_property(installer, L"CustomActionData"), 3);
+            split_data(get_property(installer, L"CustomActionData"), 4);
         std::filesystem::path const marker = absolute_path(fields[0]);
         std::filesystem::path const install_folder = absolute_path(fields[1]);
         PackageVersion const version = parse_version(fields[2]);
+        std::wstring const user_sid = validate_user_sid(fields[3]);
         validate_snapshot_path(marker, install_folder, true);
         PackageManager const manager;
-        write_snapshot(marker, exact_package_exists(manager, version));
+        write_snapshot(
+            marker,
+            capture_snapshot(
+                manager,
+                version,
+                install_folder,
+                user_sid));
     });
 }
 
@@ -585,26 +925,13 @@ extern "C" __declspec(dllexport) UINT __stdcall RegisterIdentity(
         std::filesystem::path const install_folder = absolute_path(fields[1]);
         PackageVersion const version = parse_version(fields[2]);
 
-        validate_payload(package_path, install_folder);
-
         PackageManager const manager;
         reject_newer_packages(manager, version);
-
-        if (!exact_package_exists(manager, version))
-        {
-            StagePackageOptions const options;
-            options.ExternalLocationUri(Uri{install_folder.c_str()});
-            DeploymentResult const staged =
-                manager
-                    .StagePackageByUriAsync(
-                        Uri{package_path.c_str()},
-                        options)
-                    .get();
-            check_deployment_result(staged, L"Identity package staging");
-        }
-
-        Package const package = find_exact_package(manager, version);
-        validate_external_location(package, install_folder);
+        Package const package = ensure_package_staged(
+            manager,
+            version,
+            package_path,
+            install_folder);
         DeploymentResult const provisioned =
             manager
                 .ProvisionPackageForAllUsersAsync(package.Id().FamilyName())
@@ -615,31 +942,79 @@ extern "C" __declspec(dllexport) UINT __stdcall RegisterIdentity(
     });
 }
 
+extern "C" __declspec(dllexport) UINT __stdcall RegisterCurrentUserIdentity(
+    MSIHANDLE installer)
+{
+    return run_action(installer, L"invoking-user identity registration", [&] {
+        auto const fields =
+            split_data(get_property(installer, L"CustomActionData"), 3);
+        std::filesystem::path const package_path = absolute_path(fields[0]);
+        std::filesystem::path const install_folder = absolute_path(fields[1]);
+        PackageVersion const version = parse_version(fields[2]);
+
+        PackageManager const manager;
+        register_package_for_current_user(
+            manager,
+            version,
+            package_path,
+            install_folder);
+        Package const package = find_exact_package(manager, version);
+        validate_external_location(package, install_folder);
+    });
+}
+
 extern "C" __declspec(dllexport) UINT __stdcall RollbackIdentity(
     MSIHANDLE installer)
 {
     return run_action(installer, L"identity rollback", [&] {
         auto const fields =
-            split_data(get_property(installer, L"CustomActionData"), 3);
+            split_data(get_property(installer, L"CustomActionData"), 4);
         std::filesystem::path const marker = absolute_path(fields[0]);
-        std::filesystem::path const install_folder = absolute_path(fields[1]);
-        PackageVersion const version = parse_version(fields[2]);
+        std::filesystem::path const package_path = absolute_path(fields[1]);
+        std::filesystem::path const install_folder = absolute_path(fields[2]);
+        PackageVersion const version = parse_version(fields[3]);
 
         validate_snapshot_path(marker, install_folder, false);
-        if (!read_snapshot(marker))
-        {
-            PackageManager const manager;
-            for (Package const& package : matching_packages(manager))
-            {
-                if (comparable_version(package.Id().Version()) ==
-                    comparable_version(version))
-                {
-                    remove_package(manager, package);
-                }
-            }
-        }
-        remove_snapshot(marker);
+        identity_snapshot const snapshot = read_snapshot(marker);
+        PackageManager const manager;
+        restore_system_identity(
+            manager,
+            snapshot,
+            version,
+            package_path,
+            install_folder);
     });
+}
+
+extern "C" __declspec(dllexport) UINT __stdcall RollbackCurrentUserIdentity(
+    MSIHANDLE installer)
+{
+    return run_action(
+        installer,
+        L"invoking-user identity rollback",
+        [&] {
+            auto const fields =
+                split_data(
+                    get_property(installer, L"CustomActionData"),
+                    4);
+            std::filesystem::path const marker =
+                absolute_path(fields[0]);
+            std::filesystem::path const package_path =
+                absolute_path(fields[1]);
+            std::filesystem::path const install_folder =
+                absolute_path(fields[2]);
+            PackageVersion const version = parse_version(fields[3]);
+
+            validate_snapshot_path(marker, install_folder, false);
+            identity_snapshot const snapshot = read_snapshot(marker);
+            PackageManager const manager;
+            restore_current_user_identity(
+                manager,
+                snapshot,
+                version,
+                package_path,
+                install_folder);
+        });
 }
 
 extern "C" __declspec(dllexport) UINT __stdcall CleanupIdentitySnapshot(

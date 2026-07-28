@@ -16,6 +16,8 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
+. (Join-Path $PSScriptRoot "native-process-arguments.ps1")
+
 function Assert-True {
     param(
         [Parameter(Mandatory)]
@@ -42,13 +44,7 @@ function Invoke-CapturedProcess {
         [string]$WorkingDirectory
     )
 
-    $argumentText = ($Arguments | ForEach-Object {
-        if ($_ -match '^".*"$' -or $_ -notmatch '\s') {
-            $_
-        } else {
-            '"' + $_.Replace('"', '\"') + '"'
-        }
-    }) -join " "
+    $argumentText = Join-NativeProcessArguments -Arguments $Arguments
 
     $startInfo = New-Object Diagnostics.ProcessStartInfo
     $startInfo.FileName = $FilePath
@@ -398,6 +394,13 @@ try {
     Assert-True (
         $null -ne $arpSystemComponent
     ) "The inner MSI must be hidden from Programs and Features."
+    $startMenuShortcut = $decompiled.SelectSingleNode(
+        "//*[local-name()='Shortcut' and @Id='LibrarianStartMenuShortcut']"
+    )
+    Assert-True (
+        $null -ne $startMenuShortcut -and
+        $startMenuShortcut.GetAttribute("Advertise") -eq "yes"
+    ) "The per-machine Start menu shortcut must be advertised."
 
     $fileNodes = @($decompiled.SelectNodes("//*[local-name()='File']"))
     $executableNames = @(
@@ -452,11 +455,14 @@ try {
         ) "Browser feature '$($entry.Key)' has an unsafe detection condition."
     }
 
-    $expectedRegistryKeys = @(
-        "SOFTWARE\Google\Chrome\NativeMessagingHosts\com.theundeadmonk.librarian",
-        "SOFTWARE\Microsoft\Edge\NativeMessagingHosts\com.theundeadmonk.librarian"
-    )
-    foreach ($key in $expectedRegistryKeys) {
+    $expectedRegistryKeys = [ordered]@{
+        "SOFTWARE\Google\Chrome\NativeMessagingHosts\com.theundeadmonk.librarian" =
+            "ChromeNativeHostManifest"
+        "SOFTWARE\Microsoft\Edge\NativeMessagingHosts\com.theundeadmonk.librarian" =
+            "EdgeNativeHostManifest"
+    }
+    foreach ($entry in $expectedRegistryKeys.GetEnumerator()) {
+        $key = $entry.Key
         $registryValue = @(
             $decompiled.SelectNodes("//*[local-name()='RegistryValue']") |
                 Where-Object {
@@ -467,25 +473,72 @@ try {
         Assert-True (
             $registryValue.Count -eq 1
         ) "Expected one machine-level native-messaging registration for '$key'."
+        $component = $registryValue[0].ParentNode
+        $manifestFile = $component.SelectSingleNode(
+            "*[local-name()='File' and @Id='$($entry.Value)']"
+        )
+        Assert-True (
+            $registryValue[0].GetAttribute("KeyPath") -eq "yes" -and
+            $null -ne $manifestFile
+        ) (
+            "Browser manifest and registration '$key' must share one " +
+            "registry-keyed repair component."
+        )
     }
 
     $expectedCustomActions = [ordered]@{
-        SnapshotIdentity = "deferred"
-        RollbackIdentity = "rollback"
-        RegisterIdentity = "deferred"
-        CleanupIdentitySnapshot = "commit"
-        RollbackUnregisterIdentity = "rollback"
-        UnregisterIdentity = "deferred"
+        SnapshotIdentity = [PSCustomObject]@{
+            Execute = "deferred"; Impersonate = "no"
+        }
+        RollbackIdentitySnapshotCleanup = [PSCustomObject]@{
+            Execute = "rollback"; Impersonate = "no"
+        }
+        RollbackCurrentUserIdentity = [PSCustomObject]@{
+            Execute = "rollback"; Impersonate = "yes"
+        }
+        RollbackIdentity = [PSCustomObject]@{
+            Execute = "rollback"; Impersonate = "no"
+        }
+        RegisterIdentity = [PSCustomObject]@{
+            Execute = "deferred"; Impersonate = "no"
+        }
+        RegisterCurrentUserIdentity = [PSCustomObject]@{
+            Execute = "deferred"; Impersonate = "yes"
+        }
+        SnapshotUnregisterIdentity = [PSCustomObject]@{
+            Execute = "deferred"; Impersonate = "no"
+        }
+        RollbackUnregisterSnapshotCleanup = [PSCustomObject]@{
+            Execute = "rollback"; Impersonate = "no"
+        }
+        RollbackUnregisterCurrentUserIdentity = [PSCustomObject]@{
+            Execute = "rollback"; Impersonate = "yes"
+        }
+        RollbackUnregisterIdentity = [PSCustomObject]@{
+            Execute = "rollback"; Impersonate = "no"
+        }
+        UnregisterIdentity = [PSCustomObject]@{
+            Execute = "deferred"; Impersonate = "no"
+        }
+        CleanupIdentitySnapshot = [PSCustomObject]@{
+            Execute = "commit"; Impersonate = "no"
+        }
     }
     foreach ($entry in $expectedCustomActions.GetEnumerator()) {
         $action = $decompiled.SelectSingleNode(
             "//*[local-name()='CustomAction' and @Id='$($entry.Key)']"
         )
         Assert-True ($null -ne $action) "Custom action '$($entry.Key)' is missing."
+        $actualImpersonate = $action.GetAttribute("Impersonate")
+        $impersonationMatches = if ($entry.Value.Impersonate -eq "yes") {
+            $actualImpersonate -in @("", "yes")
+        } else {
+            $actualImpersonate -eq "no"
+        }
         Assert-True (
             $action.GetAttribute("BinaryRef") -eq "LibrarianSetupCustomActions" -and
-            $action.GetAttribute("Execute") -eq $entry.Value -and
-            $action.GetAttribute("Impersonate") -eq "no" -and
+            $action.GetAttribute("Execute") -eq $entry.Value.Execute -and
+            $impersonationMatches -and
             $action.GetAttribute("HideTarget") -eq "yes"
         ) "Custom action '$($entry.Key)' has unsafe execution attributes."
 
@@ -502,8 +555,14 @@ try {
 
     foreach ($propertyActionId in @(
         "SetSnapshotIdentity",
+        "SetRollbackIdentitySnapshotCleanup",
+        "SetRollbackCurrentUserIdentity",
         "SetRollbackIdentity",
-        "SetCleanupIdentitySnapshot"
+        "SetCleanupIdentitySnapshot",
+        "SetSnapshotUnregisterIdentity",
+        "SetRollbackUnregisterSnapshotCleanup",
+        "SetRollbackUnregisterCurrentUserIdentity",
+        "SetRollbackUnregisterIdentity"
     )) {
         $propertyAction = $decompiled.SelectSingleNode(
             "//*[local-name()='CustomAction' and @Id='$propertyActionId']"
@@ -759,7 +818,9 @@ try {
     ) "dumpbin failed to inspect the embedded custom-action DLL."
     $expectedExports = @(
         "CleanupIdentitySnapshot",
+        "RegisterCurrentUserIdentity",
         "RegisterIdentity",
+        "RollbackCurrentUserIdentity",
         "RollbackIdentity",
         "SnapshotIdentity",
         "UnregisterIdentity"

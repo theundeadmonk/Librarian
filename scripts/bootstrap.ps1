@@ -6,6 +6,8 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
+. (Join-Path $PSScriptRoot "native-process-arguments.ps1")
+
 $expected = [ordered]@{
     Node = "24.18.0"
     Npm = "11.16.0"
@@ -85,13 +87,7 @@ function Get-ToolOutput {
         [string[]]$Arguments
     )
 
-    $argumentText = ($Arguments | ForEach-Object {
-        if ($_ -match '^".*"$' -or $_ -notmatch '\s') {
-            $_
-        } else {
-            '"' + $_.Replace('"', '\"') + '"'
-        }
-    }) -join " "
+    $argumentText = Join-NativeProcessArguments -Arguments $Arguments
 
     $startInfo = New-Object Diagnostics.ProcessStartInfo
     $startInfo.FileName = $FilePath

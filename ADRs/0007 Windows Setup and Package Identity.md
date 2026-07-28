@@ -70,6 +70,14 @@ the external production executables and installer payload remain x64-only.
 Setup separately validates the fixed executable paths and requires every
 payload component to carry the same product version.
 
+Setup stages and provisions the identity package for future profiles and also
+registers it immediately in the invoking user's impersonated Windows Installer
+context before any optional launch. Transaction rollback records the prior
+package version, provisioning state, and invoking-user registration in the
+protected installation directory. It restores that exact state after a failed
+install, repair, upgrade, or uninstall, including preserving pre-existing
+absence.
+
 The existing package-enabled WinUI development target may continue to produce a
 full MSIX for isolated UI smoke tests. It is not the production product
 lifecycle described by this ADR.
@@ -99,6 +107,8 @@ the user's independent browser-extension choices.
   silently.
 - Setup verifies expected signatures, identities, versions, and payload hashes
   before registration. Downgrades and mixed release sets fail closed.
+- The shared four-part version keeps its revision field at zero because Windows
+  Installer major-upgrade comparison uses only the first three fields.
 - Update and repair lock the agent and disconnect clients before replacing
   product files or registrations. Clients from a partial or incompatible
   release cannot connect to an unlocked agent.

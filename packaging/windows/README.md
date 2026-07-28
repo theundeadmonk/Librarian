@@ -25,6 +25,11 @@ force-installs, or trusts a browser extension; issue
 [#16](https://github.com/theundeadmonk/Librarian/issues/16) owns the real store
 IDs and browser connection.
 
+The host executable path remains relative to each colocated manifest. Chrome
+and Edge both explicitly support a path relative to the manifest directory on
+Windows; this avoids baking one machine's Program Files drive into the MSI.
+The registry default value remains the required absolute manifest path.
+
 ## Tooling and license
 
 The projects pin WiX Toolset 7.0.0 and accept the `wix7` Open Source Maintenance
@@ -48,6 +53,11 @@ The installer-specific commands are:
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\build-installer.ps1
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\test-installer.ps1 -ExpectedSigningMode unsigned-fixture
 ```
+
+The setup bundle, MSI, identity package, and embedded executable manifests use
+one four-part product version. The fourth field must remain zero because
+Windows Installer compares only the first three fields during major-upgrade
+detection; every installer upgrade must increment one of those fields.
 
 Outputs are written below `artifacts\installer\`:
 

@@ -13,6 +13,8 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 $env:PATHEXT = ".COM;.EXE;.BAT;.CMD;.VBS;.VBE;.JS;.JSE;.WSF;.WSH;.MSC"
 
+. (Join-Path $PSScriptRoot "native-process-arguments.ps1")
+
 function Invoke-CheckedProcess {
     param(
         [Parameter(Mandatory)]
@@ -31,13 +33,7 @@ function Invoke-CheckedProcess {
     Write-Host ""
     Write-Host "==> $Label"
 
-    $argumentText = ($Arguments | ForEach-Object {
-        if ($_ -match '^".*"$' -or $_ -notmatch '\s') {
-            $_
-        } else {
-            '"' + $_.Replace('"', '\"') + '"'
-        }
-    }) -join " "
+    $argumentText = Join-NativeProcessArguments -Arguments $Arguments
 
     $startInfo = New-Object Diagnostics.ProcessStartInfo
     $startInfo.WorkingDirectory = $WorkingDirectory
@@ -112,6 +108,18 @@ $windowsSdkBin = Join-Path $toolchain.WindowsSdkRoot "bin\$($toolchain.Versions.
 if (Test-Path $windowsSdkBin) {
     $env:Path = "$windowsSdkBin;$env:Path"
 }
+
+Invoke-CheckedProcess `
+    -Label "Native process argument tests" `
+    -FilePath $powerShellHost `
+    -Arguments @(
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        "scripts\test-native-process-arguments.ps1"
+    ) `
+    -WorkingDirectory $repoRoot
 
 Invoke-CheckedProcess `
     -Label "Rust formatting" `
@@ -220,7 +228,7 @@ $solution = Join-Path $repoRoot "Librarian.sln"
 $msbuildRestoreLog = Join-Path $logs "msbuild-restore-$Configuration-$Platform.log"
 $msbuildLog = Join-Path $logs "msbuild-$Configuration-$Platform.log"
 $msbuildRestoreArguments = @(
-    ('"' + $solution + '"')
+    $solution
     "/t:Restore"
     "/m"
     "/nr:false"
@@ -229,7 +237,7 @@ $msbuildRestoreArguments = @(
     "/p:RestoreLockedMode=true"
     "/verbosity:minimal"
     "/fileLogger"
-    ('"/fileLoggerParameters:LogFile=' + $msbuildRestoreLog + ';Verbosity=diagnostic"')
+    ("/fileLoggerParameters:LogFile=" + $msbuildRestoreLog + ";Verbosity=diagnostic")
 )
 
 Invoke-CheckedProcess `
@@ -253,7 +261,7 @@ if (-not (Test-Path (Join-Path $nugetWindowsSdkBin "mdmerge.exe"))) {
 $env:Path = "$nugetWindowsSdkBin;$env:Path"
 
 $msbuildArguments = @(
-    ('"' + $solution + '"')
+    $solution
     "/t:Build"
     "/m"
     "/nr:false"
@@ -264,7 +272,7 @@ $msbuildArguments = @(
     "/p:RestoreLockedMode=true"
     "/verbosity:minimal"
     "/fileLogger"
-    ('"/fileLoggerParameters:LogFile=' + $msbuildLog + ';Verbosity=diagnostic"')
+    ("/fileLoggerParameters:LogFile=" + $msbuildLog + ";Verbosity=diagnostic")
 )
 
 Invoke-CheckedProcess `
@@ -285,7 +293,7 @@ if ($Configuration -eq "Release") {
             "-File"
             "scripts\test-embedded-identity.ps1"
             "-MtPath"
-            ('"' + $manifestTool + '"')
+            $manifestTool
             "-Configuration"
             $Configuration
             "-Platform"
@@ -309,7 +317,7 @@ Invoke-CheckedProcess `
         "-File"
         "scripts\build-identity-package.ps1"
         "-MakeAppxPath"
-        ('"' + $makeAppx + '"')
+        $makeAppx
     ) `
     -WorkingDirectory $repoRoot
 
