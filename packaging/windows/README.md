@@ -119,11 +119,12 @@ builds two signed versions, and removes both certificate-store entries in a
 The lifecycle suite rejects unsigned and unexpected-provider installs, launches
 a clean installation, opts into and repairs both browser registrations, rolls
 back injected repair and upgrade failures, upgrades a disposable secondary
-Windows account's provisioned identity, rejects a downgrade, uninstalls,
-reinstalls, and confirms that a disposable per-user data sentinel survives
-every repair, update, and removal. The suite may mutate Program Files, HKLM,
-local accounts, package provisioning, and test profiles, so its CI guard must
-not be removed or bypassed for developer machines.
+Windows account's provisioned identity, proves divergent registered and
+provisioned versions fail closed without state loss, rejects a downgrade,
+uninstalls, reinstalls, and confirms that a disposable per-user data sentinel
+survives every repair, update, and removal. The suite may mutate Program Files,
+HKLM, local accounts, package provisioning, and test profiles, so its CI guard
+must not be removed or bypassed for developer machines.
 
 Windows Installer Restart Manager remains enabled so repair and upgrade can
 coordinate processes that hold product files. The lifecycle suite requires a
@@ -161,7 +162,10 @@ defers all-user package removal to its checked commit action, after MSI file
 removal has succeeded; only best-effort marker cleanup follows it. A failed
 transaction therefore does not remove another existing user's registration,
 and rollback does not clean-reprovision identity when the prior provisioning
-is already intact.
+is already intact. Snapshotting fails closed before mutation if the invoking
+user's registered identity version differs from the device-provisioned
+version, because a single-version rollback marker cannot safely restore both
+states.
 
 Before either machine staging or invoking-user registration, the custom action
 requires exact SHA-256 matches for the installed desktop, vault-agent,

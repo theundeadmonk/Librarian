@@ -896,6 +896,21 @@ namespace
             fail(
                 L"Setup refused ambiguous existing identity package state.");
         }
+        if (!invoking_user_packages.empty() &&
+            !provisioned_packages.empty() &&
+            comparable_version(
+                invoking_user_packages.front().Id().Version()) !=
+                comparable_version(
+                    provisioned_packages.front().Id().Version()))
+        {
+            // The compact rollback marker can restore one package version.
+            // Continuing from divergent per-user and all-user state would
+            // discard one half of the snapshot and could remove a package
+            // that existed before this transaction.
+            fail(
+                L"Setup refused divergent registered and provisioned "
+                L"identity package state.");
+        }
 
         Package package{nullptr};
         if (!invoking_user_packages.empty())

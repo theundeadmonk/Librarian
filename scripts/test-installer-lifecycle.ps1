@@ -264,6 +264,36 @@ exit 0
     }
 }
 
+function Register-CurrentUserIdentity {
+    param(
+        [Parameter(Mandatory)]
+        [string]$PackagePath,
+
+        [Parameter(Mandatory)]
+        [string]$ExternalLocation,
+
+        [Parameter(Mandatory)]
+        [ValidatePattern("^\d+\.\d+\.\d+\.\d+$")]
+        [string]$ExpectedVersion
+    )
+
+    Add-AppxPackage `
+        -Path $PackagePath `
+        -ExternalLocation $ExternalLocation `
+        -ForceUpdateFromAnyVersion
+    $versions = @(
+        Get-LibrarianCurrentUserPackages |
+            ForEach-Object { $_.Version.ToString() } |
+            Sort-Object -Unique
+    )
+    Assert-True (
+        $versions.Count -eq 1 -and $versions[0] -eq $ExpectedVersion
+    ) (
+        "The invoking user could not register Librarian identity version " +
+        "'$ExpectedVersion'."
+    )
+}
+
 function Get-VisibleArpEntries {
     $entries = @()
     foreach ($root in @(
@@ -1041,6 +1071,51 @@ try {
         $coexistingVersions -contains $LowVersion -and
         $coexistingVersions -contains $HighVersion
     ) "The secondary-user fixture did not create two package versions."
+    Register-CurrentUserIdentity `
+        -PackagePath $resolvedSignedLowIdentity `
+        -ExternalLocation $installFolder `
+        -ExpectedVersion $LowVersion
+    $provisionedBeforeRejectedRepair = @(
+        Get-LibrarianProvisionedPackages |
+            ForEach-Object { $_.Version.ToString() } |
+            Sort-Object -Unique
+    )
+    Assert-True (
+        $provisionedBeforeRejectedRepair.Count -eq 1 -and
+        $provisionedBeforeRejectedRepair[0] -eq $HighVersion
+    ) "The divergent-state fixture did not preserve high provisioning."
+    Invoke-FailingProcess `
+        -Label "Reject repair from divergent identity state" `
+        -FilePath $msiexec `
+        -Arguments @(
+            "/fa",
+            $resolvedSignedHighMsi,
+            "ADDLOCAL=Core,ChromeIntegration,EdgeIntegration",
+            "/qn",
+            "/norestart",
+            "/l*v",
+            (Join-Path $resolvedLogDirectory "07a-divergent-state-rejected.log")
+        )
+    $currentUserAfterRejectedRepair = @(
+        Get-LibrarianCurrentUserPackages |
+            ForEach-Object { $_.Version.ToString() } |
+            Sort-Object -Unique
+    )
+    $provisionedAfterRejectedRepair = @(
+        Get-LibrarianProvisionedPackages |
+            ForEach-Object { $_.Version.ToString() } |
+            Sort-Object -Unique
+    )
+    Assert-True (
+        $currentUserAfterRejectedRepair.Count -eq 1 -and
+        $currentUserAfterRejectedRepair[0] -eq $LowVersion -and
+        $provisionedAfterRejectedRepair.Count -eq 1 -and
+        $provisionedAfterRejectedRepair[0] -eq $HighVersion
+    ) "The rejected divergent-state repair changed identity state."
+    Register-CurrentUserIdentity `
+        -PackagePath (Join-Path $installFolder "Librarian.Identity.msix") `
+        -ExternalLocation $installFolder `
+        -ExpectedVersion $HighVersion
     Invoke-SuccessfulProcess `
         -Label "Repair with a retained secondary-user identity" `
         -FilePath $msiexec `
