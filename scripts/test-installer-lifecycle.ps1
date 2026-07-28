@@ -204,7 +204,9 @@ function Invoke-DisposableUserPowerShell {
                 $standardError.Trim(),
                 $standardOutput.Trim()
             ) | Where-Object { $_ }
-            $diagnostic = ($diagnostic -join [Environment]::NewLine)
+            $diagnostic = [string](
+                $diagnostic -join [Environment]::NewLine
+            )
             if ($diagnostic.Length -gt 2048) {
                 $diagnostic = $diagnostic.Substring(0, 2048) + "..."
             }
