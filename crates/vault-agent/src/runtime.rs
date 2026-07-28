@@ -328,6 +328,35 @@ impl OwnershipLease {
         Ok(())
     }
 
+    fn bind_windows_hello_state(
+        &self,
+        registry: &mut BTreeMap<u64, RuntimeOwnership>,
+        path: &Path,
+    ) -> Result<(), DispatchError> {
+        let record = ownership_record(path).map_err(|_| DispatchError::Internal)?;
+        if registry
+            .iter()
+            .any(|(token, existing)| *token != self.token && existing.conflicts_with(&record))
+        {
+            return Err(DispatchError::Internal);
+        }
+        let current = registry
+            .get_mut(&self.token)
+            .ok_or(DispatchError::Internal)?;
+        if current.vault.conflicts_with(&record) {
+            return Err(DispatchError::Internal);
+        }
+        let state = current
+            .windows_hello_state
+            .as_mut()
+            .ok_or(DispatchError::Internal)?;
+        if state.normalized_path != record.normalized_path {
+            return Err(DispatchError::Internal);
+        }
+        *state = record;
+        Ok(())
+    }
+
     fn bind_authenticated(
         &self,
         registry: &mut BTreeMap<u64, RuntimeOwnership>,
@@ -1208,10 +1237,10 @@ impl AgentRuntime {
             };
             (permit, binding)
         };
-        let mut previous = match state_store.load() {
+        let mut previous = match self.load_windows_hello_state(state_store) {
             Ok(state) => Some(state),
             Err(WindowsHelloStateError::NotFound) => {
-                if !Self::ensure_absent_windows_hello_state(state_store) {
+                if !self.ensure_absent_windows_hello_state(state_store) {
                     return Ok(ExecutionOutcome::retryable_failure());
                 }
                 None
@@ -1226,7 +1255,7 @@ impl AgentRuntime {
             .as_ref()
             .is_some_and(|state| state.pending_removal_credential_id().is_some());
         if let Some(state) = previous.as_mut()
-            && !Self::retry_persisted_windows_hello_retirement(provider, state_store, state)
+            && !self.retry_persisted_windows_hello_retirement(provider, state_store, state)
         {
             return Ok(ExecutionOutcome::retryable_failure());
         }
@@ -1375,7 +1404,7 @@ impl AgentRuntime {
                 outcome,
             );
         }
-        match state_store.save(&local_state) {
+        match self.save_windows_hello_state(state_store, &local_state) {
             Ok(()) => {}
             Err(WindowsHelloStateError::Published) => {
                 // Publication selected the new credential before a later
@@ -1433,7 +1462,7 @@ impl AgentRuntime {
             if !local_state.clear_pending_removal_credential_id() {
                 return Err(DispatchError::Internal);
             }
-            match state_store.save(&local_state) {
+            match self.save_windows_hello_state(state_store, &local_state) {
                 Ok(()) | Err(WindowsHelloStateError::Published) => {}
                 Err(
                     WindowsHelloStateError::NotFound
@@ -1476,10 +1505,10 @@ impl AgentRuntime {
             return Ok(ExecutionOutcome::busy());
         };
         let _hello_gate = lock(&self.windows_hello_gate)?;
-        let mut local_state = match state_store.load() {
+        let mut local_state = match self.load_windows_hello_state(state_store) {
             Ok(state) => state,
             Err(WindowsHelloStateError::NotFound) => {
-                return if Self::ensure_absent_windows_hello_state(state_store) {
+                return if self.ensure_absent_windows_hello_state(state_store) {
                     Ok(ExecutionOutcome::failed())
                 } else {
                     Ok(ExecutionOutcome::retryable_failure())
@@ -1491,8 +1520,7 @@ impl AgentRuntime {
                 | WindowsHelloStateError::Published,
             ) => return Ok(ExecutionOutcome::failed()),
         };
-        if !Self::retry_persisted_windows_hello_retirement(provider, state_store, &mut local_state)
-        {
+        if !self.retry_persisted_windows_hello_retirement(provider, state_store, &mut local_state) {
             return Ok(ExecutionOutcome::retryable_failure());
         }
         let (Some(credential_id), Some(prf_salt)) =
@@ -1624,10 +1652,10 @@ impl AgentRuntime {
             return Ok(ExecutionOutcome::busy());
         };
         let _hello_gate = lock(&self.windows_hello_gate)?;
-        let mut local_state = match state_store.load() {
+        let mut local_state = match self.load_windows_hello_state(state_store) {
             Ok(state) => state,
             Err(WindowsHelloStateError::NotFound) => {
-                return if Self::ensure_absent_windows_hello_state(state_store) {
+                return if self.ensure_absent_windows_hello_state(state_store) {
                     Ok(ExecutionOutcome::success(encode_empty_result()?))
                 } else {
                     Ok(ExecutionOutcome::retryable_failure())
@@ -1641,8 +1669,7 @@ impl AgentRuntime {
                 return Ok(ExecutionOutcome::failed());
             }
         };
-        if !Self::retry_persisted_windows_hello_retirement(provider, state_store, &mut local_state)
-        {
+        if !self.retry_persisted_windows_hello_retirement(provider, state_store, &mut local_state) {
             return Ok(ExecutionOutcome::retryable_failure());
         }
         let Some(binding) = local_state.vault_binding() else {
@@ -1673,7 +1700,7 @@ impl AgentRuntime {
         if provider.remove(&credential_id).is_err() {
             return Ok(ExecutionOutcome::retryable_failure());
         }
-        match state_store.remove() {
+        match self.remove_windows_hello_state(state_store) {
             Ok(()) | Err(WindowsHelloStateError::NotFound) => {
                 Ok(ExecutionOutcome::success(encode_empty_result()?).commit_point())
             }
@@ -1759,14 +1786,85 @@ impl AgentRuntime {
         if provider.remove(credential_id).is_ok() {
             return Ok(outcome);
         }
-        if Self::persist_windows_hello_cleanup(state_store, previous, credential_id) {
+        if self.persist_windows_hello_cleanup(state_store, previous, credential_id) {
             Ok(ExecutionOutcome::retryable_failure())
         } else {
             Ok(ExecutionOutcome::failed())
         }
     }
 
+    fn load_windows_hello_state(
+        &self,
+        state_store: &dyn WindowsHelloStateRepository,
+    ) -> Result<WindowsHelloLocalState, WindowsHelloStateError> {
+        let Some(path) = state_store.ownership_path() else {
+            return state_store.load();
+        };
+        let mut owned = owned_vaults()
+            .lock()
+            .map_err(|_| WindowsHelloStateError::Failed)?;
+        self.ownership
+            .bind_windows_hello_state(&mut owned, path)
+            .map_err(|_| WindowsHelloStateError::Failed)?;
+        let result = state_store.load();
+        self.ownership
+            .bind_windows_hello_state(&mut owned, path)
+            .map_err(|_| WindowsHelloStateError::Failed)?;
+        result
+    }
+
+    fn save_windows_hello_state(
+        &self,
+        state_store: &dyn WindowsHelloStateRepository,
+        state: &WindowsHelloLocalState,
+    ) -> Result<(), WindowsHelloStateError> {
+        let Some(path) = state_store.ownership_path() else {
+            return state_store.save(state);
+        };
+        let mut owned = owned_vaults()
+            .lock()
+            .map_err(|_| WindowsHelloStateError::Failed)?;
+        self.ownership
+            .bind_windows_hello_state(&mut owned, path)
+            .map_err(|_| WindowsHelloStateError::Failed)?;
+        let result = state_store.save(state);
+        let published = matches!(result, Ok(()) | Err(WindowsHelloStateError::Published));
+        if self
+            .ownership
+            .bind_windows_hello_state(&mut owned, path)
+            .is_err()
+        {
+            return Err(if published {
+                WindowsHelloStateError::Published
+            } else {
+                WindowsHelloStateError::Failed
+            });
+        }
+        result
+    }
+
+    fn remove_windows_hello_state(
+        &self,
+        state_store: &dyn WindowsHelloStateRepository,
+    ) -> Result<(), WindowsHelloStateError> {
+        let Some(path) = state_store.ownership_path() else {
+            return state_store.remove();
+        };
+        let mut owned = owned_vaults()
+            .lock()
+            .map_err(|_| WindowsHelloStateError::Failed)?;
+        self.ownership
+            .bind_windows_hello_state(&mut owned, path)
+            .map_err(|_| WindowsHelloStateError::Failed)?;
+        let result = state_store.remove();
+        self.ownership
+            .bind_windows_hello_state(&mut owned, path)
+            .map_err(|_| WindowsHelloStateError::Failed)?;
+        result
+    }
+
     fn persist_windows_hello_cleanup(
+        &self,
         state_store: &dyn WindowsHelloStateRepository,
         previous: Option<&mut WindowsHelloLocalState>,
         credential_id: &[u8],
@@ -1781,7 +1879,7 @@ impl AgentRuntime {
                 return false;
             }
             return matches!(
-                state_store.save(previous),
+                self.save_windows_hello_state(state_store, previous),
                 Ok(()) | Err(WindowsHelloStateError::Published)
             );
         }
@@ -1789,19 +1887,23 @@ impl AgentRuntime {
             return false;
         };
         matches!(
-            state_store.save(&pending),
+            self.save_windows_hello_state(state_store, &pending),
             Ok(()) | Err(WindowsHelloStateError::Published)
         )
     }
 
-    fn ensure_absent_windows_hello_state(state_store: &dyn WindowsHelloStateRepository) -> bool {
+    fn ensure_absent_windows_hello_state(
+        &self,
+        state_store: &dyn WindowsHelloStateRepository,
+    ) -> bool {
         matches!(
-            state_store.remove(),
+            self.remove_windows_hello_state(state_store),
             Ok(()) | Err(WindowsHelloStateError::NotFound)
         )
     }
 
     fn retry_persisted_windows_hello_retirement(
+        &self,
         provider: &dyn WindowsHelloProvider,
         state_store: &dyn WindowsHelloStateRepository,
         state: &mut WindowsHelloLocalState,
@@ -1814,11 +1916,11 @@ impl AgentRuntime {
         }
         if state.clear_pending_removal_credential_id() {
             matches!(
-                state_store.save(state),
+                self.save_windows_hello_state(state_store, state),
                 Ok(()) | Err(WindowsHelloStateError::Published)
             )
         } else {
-            Self::ensure_absent_windows_hello_state(state_store)
+            self.ensure_absent_windows_hello_state(state_store)
         }
     }
 
@@ -1837,7 +1939,7 @@ impl AgentRuntime {
         if previous_credential_id == replacement_credential_id {
             return Ok(ExecutionOutcome::failed());
         }
-        match state_store.save(previous) {
+        match self.save_windows_hello_state(state_store, previous) {
             Ok(()) | Err(WindowsHelloStateError::Published) => {}
             Err(
                 WindowsHelloStateError::NotFound
@@ -3042,6 +3144,56 @@ mod tests {
         }
     }
 
+    struct PathPublishingWindowsHelloStateRepository {
+        path: PathBuf,
+        state: TestWindowsHelloStateRepository,
+    }
+
+    impl PathPublishingWindowsHelloStateRepository {
+        fn new(path: PathBuf) -> Self {
+            Self {
+                path,
+                state: TestWindowsHelloStateRepository::default(),
+            }
+        }
+
+        fn replace_identity(&self) -> Result<(), WindowsHelloStateError> {
+            let replacement = self.path.with_extension("replacement");
+            fs::write(&replacement, b"disposable protected-state identity")
+                .map_err(|_| WindowsHelloStateError::Failed)?;
+            match fs::remove_file(&self.path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(_) => return Err(WindowsHelloStateError::Failed),
+            }
+            fs::rename(&replacement, &self.path).map_err(|_| WindowsHelloStateError::Failed)
+        }
+    }
+
+    impl WindowsHelloStateRepository for PathPublishingWindowsHelloStateRepository {
+        fn load(&self) -> Result<WindowsHelloLocalState, WindowsHelloStateError> {
+            self.state.load()
+        }
+
+        fn save(&self, state: &WindowsHelloLocalState) -> Result<(), WindowsHelloStateError> {
+            self.replace_identity()?;
+            self.state.save(state)
+        }
+
+        fn remove(&self) -> Result<(), WindowsHelloStateError> {
+            match fs::remove_file(&self.path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(_) => return Err(WindowsHelloStateError::Failed),
+            }
+            self.state.remove()
+        }
+
+        fn ownership_path(&self) -> Option<&Path> {
+            Some(&self.path)
+        }
+    }
+
     struct CancellingWindowsHelloProvider {
         started: AtomicBool,
         cancelled: Mutex<BTreeSet<[u8; 16]>>,
@@ -3294,6 +3446,53 @@ mod tests {
         );
 
         drop(first);
+    }
+
+    #[test]
+    fn windows_hello_state_ownership_tracks_replaced_file_identity() {
+        let directory = TestDirectory::new();
+        let first_vault = directory.0.join("first.sqlite3");
+        let second_vault = directory.0.join("second.sqlite3");
+        let protected_state = directory.0.join("windows-hello.dat");
+        let alias = directory.0.join("windows-hello-alias.dat");
+        let provider = Arc::new(TestWindowsHelloProvider::new());
+        let state = Arc::new(PathPublishingWindowsHelloStateRepository::new(
+            protected_state.clone(),
+        ));
+        let runtime = AgentRuntime::start_with_components_and_state_path(
+            &first_vault,
+            Some(provider),
+            Some(state),
+            Some(&protected_state),
+        )
+        .expect("protected-state owner");
+        create_test_vault(&runtime, "disposable protected-state ownership password");
+
+        for marker in [0xB7, 0xB8] {
+            let registration = test_registration(&runtime, marker);
+            let outcome = runtime
+                .enroll_windows_hello(
+                    0x1234,
+                    17,
+                    runtime.unlock_epoch(),
+                    &registration,
+                    Instant::now() + Duration::from_secs(10),
+                )
+                .expect("Windows Hello enrollment");
+            assert_eq!(outcome.error, None);
+        }
+
+        fs::hard_link(&protected_state, &alias).expect("protected-state identity alias");
+        assert_eq!(
+            AgentRuntime::start_with_components_and_state_path(
+                &second_vault,
+                Some(Arc::new(TestWindowsHelloProvider::new())),
+                Some(Arc::new(TestWindowsHelloStateRepository::default())),
+                Some(&alias),
+            )
+            .err(),
+            Some(RuntimeStartError::AlreadyOwned)
+        );
     }
 
     #[test]

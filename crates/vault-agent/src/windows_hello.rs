@@ -1,10 +1,11 @@
 #[cfg(any(windows, test))]
 use std::io::Read;
+use std::path::Path;
 #[cfg(windows)]
 use std::{
     fmt::Write as _,
     io::{Seek, SeekFrom, Write},
-    path::{Path, PathBuf},
+    path::PathBuf,
 };
 
 use librarian_vault_core::{WindowsHelloInstallationKey, WindowsHelloPrfOutput};
@@ -112,6 +113,10 @@ pub(crate) trait WindowsHelloStateRepository: Send + Sync {
     fn load(&self) -> Result<WindowsHelloLocalState, WindowsHelloStateError>;
     fn save(&self, state: &WindowsHelloLocalState) -> Result<(), WindowsHelloStateError>;
     fn remove(&self) -> Result<(), WindowsHelloStateError>;
+
+    fn ownership_path(&self) -> Option<&Path> {
+        None
+    }
 }
 
 #[cfg(windows)]
@@ -754,6 +759,10 @@ impl WindowsHelloStateRepository for WindowsHelloStateStore {
 
     fn remove(&self) -> Result<(), WindowsHelloStateError> {
         Self::remove(self)
+    }
+
+    fn ownership_path(&self) -> Option<&Path> {
+        Some(&self.path)
     }
 }
 
