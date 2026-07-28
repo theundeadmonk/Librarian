@@ -301,10 +301,7 @@ function Register-DisposableUserIdentity {
         $escapedExternalLocation = $ExternalLocation.Replace("'", "''")
         $probe = @"
 `$ErrorActionPreference = "Stop"
-Add-AppxPackage `
-    -Path '$escapedPackagePath' `
-    -ExternalLocation '$escapedExternalLocation' `
-    -ForceUpdateFromAnyVersion
+Add-AppxPackage -Path '$escapedPackagePath' -ExternalLocation '$escapedExternalLocation' -ForceUpdateFromAnyVersion
 `$versions = @(
     Get-AppxPackage -Name "TheUndeadMonk.Librarian.Development" |
         ForEach-Object { `$_.Version.ToString() } |
