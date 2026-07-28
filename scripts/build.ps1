@@ -86,6 +86,10 @@ $toolchain = & (Join-Path $PSScriptRoot "bootstrap.ps1") -PassThru
 $repoRoot = $toolchain.RepoRoot
 $artifacts = Join-Path $repoRoot "artifacts"
 $logs = Join-Path $artifacts "logs"
+$powerShellHost = (Get-Process -Id $PID).Path
+if (-not $powerShellHost -or -not (Test-Path -LiteralPath $powerShellHost -PathType Leaf)) {
+    throw "The current PowerShell host executable could not be resolved."
+}
 New-Item -ItemType Directory -Path $logs -Force | Out-Null
 $env:Path = "$(Split-Path $toolchain.Node -Parent);$env:Path"
 
@@ -258,7 +262,7 @@ if ($Configuration -eq "Release") {
     $manifestTool = Join-Path $windowsSdkBin "mt.exe"
     Invoke-CheckedProcess `
         -Label "Release binary package-identity validation" `
-        -FilePath (Join-Path $PSHOME "powershell.exe") `
+        -FilePath $powerShellHost `
         -Arguments @(
             "-NoProfile"
             "-ExecutionPolicy"
@@ -282,7 +286,7 @@ if (-not (Test-Path $makeAppx)) {
 
 Invoke-CheckedProcess `
     -Label "Unsigned identity package fixture" `
-    -FilePath (Join-Path $PSHOME "powershell.exe") `
+    -FilePath $powerShellHost `
     -Arguments @(
         "-NoProfile"
         "-ExecutionPolicy"
