@@ -45,6 +45,8 @@ namespace
         L"Librarian.PasskeyProvider.exe"};
     constexpr std::wstring_view snapshot_name{
         L"Librarian.Identity.msix.state"};
+    constexpr std::wstring_view payload_hash_manifest_name{
+        L"Librarian.PayloadHashes"};
     using sha256_digest = std::array<std::uint8_t, 32>;
 
     struct identity_snapshot
@@ -529,6 +531,102 @@ namespace
         verify_file_hash(package_path, hashes.identity_package);
     }
 
+    payload_hashes read_payload_hashes(
+        std::filesystem::path const& manifest_path,
+        std::filesystem::path const& install_folder,
+        sha256_digest const& expected_manifest_hash)
+    {
+        validate_install_folder(install_folder);
+        if (!paths_equal(manifest_path.parent_path(), install_folder) ||
+            manifest_path.filename().native() != payload_hash_manifest_name ||
+            !std::filesystem::is_regular_file(manifest_path))
+        {
+            fail(L"Setup refused an invalid payload hash manifest path.");
+        }
+        reject_reparse_chain(
+            manifest_path,
+            false,
+            L"Setup refused a redirected payload hash manifest.");
+
+        file_handle manifest;
+        manifest.value = CreateFileW(
+            manifest_path.c_str(),
+            GENERIC_READ,
+            FILE_SHARE_READ,
+            nullptr,
+            OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN,
+            nullptr);
+        if (manifest.value == INVALID_HANDLE_VALUE)
+        {
+            fail(L"Setup could not read the payload hash manifest.");
+        }
+
+        LARGE_INTEGER manifest_size{};
+        if (!GetFileSizeEx(manifest.value, &manifest_size) ||
+            manifest_size.QuadPart <= 0 ||
+            manifest_size.QuadPart > 384)
+        {
+            fail(L"Setup refused an invalid payload hash manifest size.");
+        }
+
+        std::string contents(
+            static_cast<std::size_t>(manifest_size.QuadPart),
+            '\0');
+        DWORD bytes_read = 0;
+        if (!ReadFile(
+                manifest.value,
+                contents.data(),
+                static_cast<DWORD>(contents.size()),
+                &bytes_read,
+                nullptr) ||
+            bytes_read != static_cast<DWORD>(contents.size()))
+        {
+            fail(L"Setup could not read the payload hash manifest.");
+        }
+
+        bcrypt_algorithm_handle algorithm;
+        check_bcrypt(BCryptOpenAlgorithmProvider(
+            &algorithm.value,
+            BCRYPT_SHA256_ALGORITHM,
+            nullptr,
+            0));
+        sha256_digest actual_manifest_hash{};
+        check_bcrypt(BCryptHash(
+            algorithm.value,
+            nullptr,
+            0,
+            reinterpret_cast<PUCHAR>(contents.data()),
+            static_cast<ULONG>(contents.size()),
+            reinterpret_cast<PUCHAR>(actual_manifest_hash.data()),
+            static_cast<ULONG>(actual_manifest_hash.size())));
+        if (actual_manifest_hash != expected_manifest_hash)
+        {
+            fail(L"Setup refused a mismatched payload hash manifest.");
+        }
+
+        if (std::ranges::any_of(contents, [](unsigned char value) {
+                return value < 0x20U || value > 0x7EU;
+            }))
+        {
+            fail(L"Setup refused a non-ASCII payload hash manifest.");
+        }
+
+        std::wstring const wide_contents(contents.begin(), contents.end());
+        auto const fields = split_data(wide_contents, 5);
+        if (fields[0] != L"v1")
+        {
+            fail(L"Setup received an unsupported payload hash manifest.");
+        }
+
+        return payload_hashes{
+            .desktop = parse_sha256(fields[1]),
+            .vault_agent = parse_sha256(fields[2]),
+            .native_host = parse_sha256(fields[3]),
+            .identity_package = parse_sha256(fields[4]),
+        };
+    }
+
     PackageVersion parse_version(std::wstring_view text)
     {
         std::array<std::uint16_t, 4> parts{};
@@ -562,6 +660,35 @@ namespace
             .Minor = parts[1],
             .Build = parts[2],
             .Revision = parts[3],
+        };
+    }
+
+    struct identity_action_data
+    {
+        std::filesystem::path package_path;
+        std::filesystem::path install_folder;
+        PackageVersion version;
+        payload_hashes hashes;
+    };
+
+    identity_action_data read_identity_action_data(MSIHANDLE installer)
+    {
+        auto const fields =
+            split_data(get_property(installer, L"CustomActionData"), 3);
+        std::filesystem::path const install_folder = absolute_path(fields[0]);
+        std::filesystem::path const package_path =
+            install_folder / L"Librarian.Identity.msix";
+        std::filesystem::path const manifest_path =
+            install_folder / payload_hash_manifest_name;
+
+        return identity_action_data{
+            .package_path = package_path,
+            .install_folder = install_folder,
+            .version = parse_version(fields[1]),
+            .hashes = read_payload_hashes(
+                manifest_path,
+                install_folder,
+                parse_sha256(fields[2])),
         };
     }
 
@@ -1152,26 +1279,18 @@ extern "C" __declspec(dllexport) UINT __stdcall RegisterIdentity(
     MSIHANDLE installer)
 {
     return run_action(installer, L"identity staging", [&] {
-        auto const fields =
-            split_data(get_property(installer, L"CustomActionData"), 7);
-        std::filesystem::path const package_path = absolute_path(fields[0]);
-        std::filesystem::path const install_folder = absolute_path(fields[1]);
-        PackageVersion const version = parse_version(fields[2]);
-        payload_hashes const hashes{
-            .desktop = parse_sha256(fields[3]),
-            .vault_agent = parse_sha256(fields[4]),
-            .native_host = parse_sha256(fields[5]),
-            .identity_package = parse_sha256(fields[6]),
-        };
-
-        validate_release_payload(package_path, install_folder, hashes);
+        identity_action_data const data = read_identity_action_data(installer);
+        validate_release_payload(
+            data.package_path,
+            data.install_folder,
+            data.hashes);
         PackageManager const manager;
-        reject_newer_packages(manager, version);
+        reject_newer_packages(manager, data.version);
         static_cast<void>(ensure_package_staged(
             manager,
-            version,
-            package_path,
-            install_folder));
+            data.version,
+            data.package_path,
+            data.install_folder));
     });
 }
 
@@ -1179,27 +1298,19 @@ extern "C" __declspec(dllexport) UINT __stdcall RegisterCurrentUserIdentity(
     MSIHANDLE installer)
 {
     return run_action(installer, L"invoking-user identity registration", [&] {
-        auto const fields =
-            split_data(get_property(installer, L"CustomActionData"), 7);
-        std::filesystem::path const package_path = absolute_path(fields[0]);
-        std::filesystem::path const install_folder = absolute_path(fields[1]);
-        PackageVersion const version = parse_version(fields[2]);
-        payload_hashes const hashes{
-            .desktop = parse_sha256(fields[3]),
-            .vault_agent = parse_sha256(fields[4]),
-            .native_host = parse_sha256(fields[5]),
-            .identity_package = parse_sha256(fields[6]),
-        };
-
-        validate_release_payload(package_path, install_folder, hashes);
+        identity_action_data const data = read_identity_action_data(installer);
+        validate_release_payload(
+            data.package_path,
+            data.install_folder,
+            data.hashes);
         PackageManager const manager;
         register_package_for_current_user(
             manager,
-            version,
-            package_path,
-            install_folder);
-        Package const package = find_exact_package(manager, version);
-        validate_external_location(package, install_folder);
+            data.version,
+            data.package_path,
+            data.install_folder);
+        Package const package = find_exact_package(manager, data.version);
+        validate_external_location(package, data.install_folder);
     });
 }
 
@@ -1207,23 +1318,15 @@ extern "C" __declspec(dllexport) UINT __stdcall ProvisionIdentity(
     MSIHANDLE installer)
 {
     return run_action(installer, L"identity provisioning", [&] {
-        auto const fields =
-            split_data(get_property(installer, L"CustomActionData"), 7);
-        std::filesystem::path const package_path = absolute_path(fields[0]);
-        std::filesystem::path const install_folder = absolute_path(fields[1]);
-        PackageVersion const version = parse_version(fields[2]);
-        payload_hashes const hashes{
-            .desktop = parse_sha256(fields[3]),
-            .vault_agent = parse_sha256(fields[4]),
-            .native_host = parse_sha256(fields[5]),
-            .identity_package = parse_sha256(fields[6]),
-        };
-
-        validate_release_payload(package_path, install_folder, hashes);
+        identity_action_data const data = read_identity_action_data(installer);
+        validate_release_payload(
+            data.package_path,
+            data.install_folder,
+            data.hashes);
         PackageManager const manager;
-        reject_newer_packages(manager, version);
-        Package const package = find_exact_package(manager, version);
-        validate_external_location(package, install_folder);
+        reject_newer_packages(manager, data.version);
+        Package const package = find_exact_package(manager, data.version);
+        validate_external_location(package, data.install_folder);
         DeploymentResult const provisioned =
             manager
                 .ProvisionPackageForAllUsersAsync(package.Id().FamilyName())

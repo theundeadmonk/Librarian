@@ -251,6 +251,86 @@ function Get-MsiSequence {
     }
 }
 
+function Get-MsiFileLanguageMetadata {
+    param(
+        [Parameter(Mandatory)]
+        [string]$DatabasePath
+    )
+
+    $installer = $null
+    $database = $null
+    $view = $null
+    $record = $null
+    $rows = @()
+    try {
+        $installer = New-Object -ComObject WindowsInstaller.Installer
+        $database = $installer.GetType().InvokeMember(
+            "OpenDatabase",
+            "InvokeMethod",
+            $null,
+            $installer,
+            @($DatabasePath, 0)
+        )
+        $query = "SELECT ``FileName``, ``Language`` FROM ``File``"
+        $view = $database.GetType().InvokeMember(
+            "OpenView",
+            "InvokeMethod",
+            $null,
+            $database,
+            @($query)
+        )
+        $view.GetType().InvokeMember(
+            "Execute",
+            "InvokeMethod",
+            $null,
+            $view,
+            $null
+        ) | Out-Null
+
+        while ($true) {
+            $record = $view.GetType().InvokeMember(
+                "Fetch",
+                "InvokeMethod",
+                $null,
+                $view,
+                $null
+            )
+            if ($null -eq $record) {
+                break
+            }
+            $fileName = [string]$record.GetType().InvokeMember(
+                "StringData",
+                "GetProperty",
+                $null,
+                $record,
+                1
+            )
+            $language = [string]$record.GetType().InvokeMember(
+                "StringData",
+                "GetProperty",
+                $null,
+                $record,
+                2
+            )
+            $rows += [PSCustomObject]@{
+                FileName = ($fileName -split '\|', 2)[-1]
+                Language = $language
+            }
+            [Runtime.InteropServices.Marshal]::FinalReleaseComObject($record) |
+                Out-Null
+            $record = $null
+        }
+        return $rows
+    } finally {
+        foreach ($value in @($record, $view, $database, $installer)) {
+            if ($null -ne $value) {
+                [Runtime.InteropServices.Marshal]::FinalReleaseComObject($value) |
+                    Out-Null
+            }
+        }
+    }
+}
+
 $repoRoot = Split-Path $PSScriptRoot -Parent
 $artifactsRoot = Join-Path $repoRoot "artifacts"
 $installerRoot = Join-Path $artifactsRoot "installer"
@@ -302,6 +382,42 @@ $identityExtractRoot = Join-Path $inspectionRoot "identity"
 New-Item -ItemType Directory -Path $inspectionRoot | Out-Null
 
 try {
+    $fileLanguageMetadata = @(
+        Get-MsiFileLanguageMetadata -DatabasePath $resolvedMsi
+    )
+    $legacyIceLanguageRows = @(
+        $fileLanguageMetadata |
+            Where-Object { $_.Language -in @("1152", "1153", "1169") }
+    )
+    Assert-True (
+        $legacyIceLanguageRows.Count -eq 0
+    ) "The MSI still contains legacy ICE-incompatible WinUI language metadata."
+    $overflowLanguageRows = @(
+        $fileLanguageMetadata |
+            Where-Object { $_.Language.Length -gt 20 }
+    )
+    Assert-True (
+        $overflowLanguageRows.Count -eq 0
+    ) "The MSI still contains File.Language values that exceed the schema limit."
+    $neutralWinUiRows = @(
+        $fileLanguageMetadata |
+            Where-Object {
+                $_.Language -eq "0" -and
+                $_.FileName -in @(
+                    "Microsoft.UI.Xaml.Phone.dll",
+                    "Microsoft.UI.Xaml.Phone.dll.mui",
+                    "Microsoft.ui.xaml.dll",
+                    "Microsoft.ui.xaml.dll.mui"
+                )
+            }
+    )
+    Assert-True (
+        $neutralWinUiRows.Count -eq 8
+    ) (
+        "Expected eight language-neutral pinned Windows App SDK rows; found " +
+        "$($neutralWinUiRows.Count)."
+    )
+
     if ($SkipIceValidation) {
         Write-Host (
             "==> MSI ICE validation skipped because enforced Windows App " +
@@ -813,6 +929,21 @@ try {
         $expectedComponentRoles |
             ForEach-Object { $releaseHashes[$_] }
     ) -join "|"
+    $payloadHashManifestPath = Get-ExtractedMsiFile `
+        -DecompiledMsi $decompiled `
+        -ExtractRoot $msiExtractRoot `
+        -Name "Librarian.PayloadHashes"
+    $expectedPayloadHashManifest = "v1|$expectedHashData"
+    Assert-True (
+        [IO.File]::ReadAllText($payloadHashManifestPath) -ceq
+            $expectedPayloadHashManifest
+    ) "The MSI payload hash manifest does not bind every release component."
+    $payloadHashManifestSha256 = (
+        Get-FileHash -LiteralPath $payloadHashManifestPath -Algorithm SHA256
+    ).Hash
+    $expectedIdentityActionData = (
+        "[INSTALLFOLDER]|[ProductVersion]|$payloadHashManifestSha256"
+    )
     foreach ($actionId in @(
         "SetRegisterIdentity",
         "SetRegisterCurrentUserIdentity",
@@ -821,15 +952,22 @@ try {
         $hashPropertyAction = $decompiled.SelectSingleNode(
             "//*[local-name()='CustomAction' and @Id='$actionId']"
         )
+        $actionValue = if ($null -eq $hashPropertyAction) {
+            ""
+        } else {
+            $hashPropertyAction.GetAttribute("Value")
+        }
         Assert-True (
-            $null -ne $hashPropertyAction -and
-            $hashPropertyAction.GetAttribute("Value").EndsWith(
-                "|$expectedHashData",
-                [StringComparison]::Ordinal
-            )
+            $actionValue -ceq $expectedIdentityActionData
         ) (
-            "Identity registration action '$actionId' is not bound to every " +
-            "release payload hash."
+            "Identity registration action '$actionId' is not bound to the " +
+            "release payload hash manifest."
+        )
+        Assert-True (
+            $actionValue.Length -le 255
+        ) (
+            "Identity registration action '$actionId' exceeds the MSI " +
+            "CustomAction.Target limit."
         )
     }
 

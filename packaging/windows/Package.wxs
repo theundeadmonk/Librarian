@@ -111,6 +111,12 @@
           Source="$(var.PayloadDir)\Librarian.Identity.msix"
           KeyPath="yes" />
       </Component>
+      <Component Id="PayloadHashManifestComponent" Directory="INSTALLFOLDER" Guid="*">
+        <File
+          Id="PayloadHashManifest"
+          Source="$(var.PayloadDir)\Librarian.PayloadHashes"
+          KeyPath="yes" />
+      </Component>
       <Files
         Include="$(var.PayloadDir)\**"
         Directory="INSTALLFOLDER">
@@ -118,6 +124,7 @@
         <Exclude Files="$(var.PayloadDir)\Librarian.VaultAgent.exe" />
         <Exclude Files="$(var.PayloadDir)\Librarian.ChromiumNativeHost.exe" />
         <Exclude Files="$(var.PayloadDir)\Librarian.Identity.msix" />
+        <Exclude Files="$(var.PayloadDir)\Librarian.PayloadHashes" />
       </Files>
     </Feature>
 
@@ -312,19 +319,19 @@
       Condition="NOT (REMOVE~=&quot;ALL&quot;)" />
     <SetProperty
       Id="RegisterIdentity"
-      Value="[#IdentityMsix]|[INSTALLFOLDER]|[ProductVersion]|$(var.DesktopSha256)|$(var.VaultAgentSha256)|$(var.ChromiumNativeHostSha256)|$(var.IdentityPackageSha256)"
+      Value="[INSTALLFOLDER]|[ProductVersion]|$(var.PayloadHashManifestSha256)"
       Before="RegisterIdentity"
       Sequence="execute"
       Condition="NOT (REMOVE~=&quot;ALL&quot;)" />
     <SetProperty
       Id="RegisterCurrentUserIdentity"
-      Value="[#IdentityMsix]|[INSTALLFOLDER]|[ProductVersion]|$(var.DesktopSha256)|$(var.VaultAgentSha256)|$(var.ChromiumNativeHostSha256)|$(var.IdentityPackageSha256)"
+      Value="[INSTALLFOLDER]|[ProductVersion]|$(var.PayloadHashManifestSha256)"
       Before="RegisterCurrentUserIdentity"
       Sequence="execute"
       Condition="NOT (REMOVE~=&quot;ALL&quot;)" />
     <SetProperty
       Id="ProvisionIdentity"
-      Value="[#IdentityMsix]|[INSTALLFOLDER]|[ProductVersion]|$(var.DesktopSha256)|$(var.VaultAgentSha256)|$(var.ChromiumNativeHostSha256)|$(var.IdentityPackageSha256)"
+      Value="[INSTALLFOLDER]|[ProductVersion]|$(var.PayloadHashManifestSha256)"
       Before="ProvisionIdentity"
       Sequence="execute"
       Condition="NOT (REMOVE~=&quot;ALL&quot;)" />

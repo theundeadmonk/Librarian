@@ -84,6 +84,252 @@ function Invoke-CheckedProcess {
     }
 }
 
+function Get-WixExecutable {
+    param(
+        [Parameter(Mandatory)]
+        [string]$RepoRoot
+    )
+
+    [xml]$project = Get-Content -LiteralPath (
+        Join-Path $RepoRoot "packaging\windows\Librarian.Package.wixproj"
+    ) -Raw
+    $sdk = $project.Project.Sdk
+    $sdkMatch = [regex]::Match(
+        $sdk,
+        '^WixToolset\.Sdk/(?<version>\d+\.\d+\.\d+)$'
+    )
+    if (-not $sdkMatch.Success) {
+        throw "The WiX project must pin an exact WixToolset.Sdk version."
+    }
+
+    $nugetPackages = if ($env:NUGET_PACKAGES) {
+        $env:NUGET_PACKAGES
+    } else {
+        Join-Path $env:USERPROFILE ".nuget\packages"
+    }
+    $wix = Join-Path $nugetPackages (
+        "wixtoolset.sdk\$($sdkMatch.Groups["version"].Value)" +
+        "\tools\net472\x64\wix.exe"
+    )
+    if (-not (Test-Path -LiteralPath $wix -PathType Leaf)) {
+        throw "The locked WiX executable is missing at '$wix'."
+    }
+    return $wix
+}
+
+function Release-ComReference {
+    param(
+        [AllowNull()]
+        [object]$Value
+    )
+
+    if ($null -ne $Value -and
+        [Runtime.InteropServices.Marshal]::IsComObject($Value)) {
+        [Runtime.InteropServices.Marshal]::FinalReleaseComObject($Value) |
+            Out-Null
+    }
+}
+
+function Normalize-WindowsAppSdkMsiLanguages {
+    param(
+        [Parameter(Mandatory)]
+        [string]$MsiPath
+    )
+
+    # Windows App SDK 2.3.1 ships valid modern resource cultures whose LCIDs
+    # are not accepted by the legacy Windows Installer ICE language catalog.
+    # Preserve the files and their paths, but mark only these pinned vendor
+    # resources language-neutral in the MSI File table before validation.
+    $legacyIceLanguageIds = @("1152", "1153", "1169")
+    $expectedMuiFileNames = @(
+        "Microsoft.UI.Xaml.Phone.dll.mui",
+        "Microsoft.ui.xaml.dll.mui"
+    )
+    $expectedOverflowFileNames = @(
+        "Microsoft.UI.Xaml.Phone.dll",
+        "Microsoft.ui.xaml.dll"
+    )
+    $resolvedMsi = (Resolve-Path -LiteralPath $MsiPath).Path
+    $installer = $null
+    $database = $null
+    $view = $null
+    $record = $null
+    $rows = @()
+
+    try {
+        $installer = New-Object -ComObject WindowsInstaller.Installer
+        $database = $installer.GetType().InvokeMember(
+            "OpenDatabase",
+            "InvokeMethod",
+            $null,
+            $installer,
+            [object[]]@($resolvedMsi, [int]1)
+        )
+
+        $query = (
+            "SELECT ``File``, ``FileName``, ``Language`` FROM ``File`` " +
+            "WHERE ``Language`` IS NOT NULL"
+        )
+        $view = $database.GetType().InvokeMember(
+            "OpenView",
+            "InvokeMethod",
+            $null,
+            $database,
+            [object[]]@($query)
+        )
+        $view.GetType().InvokeMember(
+            "Execute",
+            "InvokeMethod",
+            $null,
+            $view,
+            $null
+        ) | Out-Null
+
+        while ($true) {
+            $record = $view.GetType().InvokeMember(
+                "Fetch",
+                "InvokeMethod",
+                $null,
+                $view,
+                $null
+            )
+            if ($null -eq $record) {
+                break
+            }
+
+            $fileId = [string]$record.GetType().InvokeMember(
+                "StringData",
+                "GetProperty",
+                $null,
+                $record,
+                1
+            )
+            $fileName = [string]$record.GetType().InvokeMember(
+                "StringData",
+                "GetProperty",
+                $null,
+                $record,
+                2
+            )
+            $language = [string]$record.GetType().InvokeMember(
+                "StringData",
+                "GetProperty",
+                $null,
+                $record,
+                3
+            )
+            $rows += [PSCustomObject]@{
+                FileId = $fileId
+                FileName = ($fileName -split '\|', 2)[-1]
+                Language = $language
+            }
+            Release-ComReference -Value $record
+            $record = $null
+        }
+        Release-ComReference -Value $view
+        $view = $null
+
+        $legacyIceRows = @(
+            $rows |
+                Where-Object { $_.Language -in $legacyIceLanguageIds }
+        )
+        if ($legacyIceRows.Count -ne 6) {
+            throw (
+                "Expected exactly six pinned Windows App SDK MUI rows with " +
+                "legacy ICE-incompatible LCIDs; found $($legacyIceRows.Count)."
+            )
+        }
+        foreach ($languageId in $legacyIceLanguageIds) {
+            $actualNames = @(
+                $legacyIceRows |
+                    Where-Object { $_.Language -eq $languageId } |
+                    ForEach-Object { $_.FileName } |
+                    Sort-Object
+            )
+            $expectedNames = @($expectedMuiFileNames | Sort-Object)
+            if (($actualNames -join "`n") -ne ($expectedNames -join "`n")) {
+                throw (
+                    "Unexpected MSI files use legacy ICE-incompatible " +
+                    "language '$languageId': " +
+                    (($actualNames | ForEach-Object { "'$_'" }) -join ", ")
+                )
+            }
+        }
+
+        $overflowRows = @(
+            $rows |
+                Where-Object { $_.Language.Length -gt 20 }
+        )
+        $actualOverflowNames = @(
+            $overflowRows |
+                ForEach-Object { $_.FileName } |
+                Sort-Object
+        )
+        $expectedOverflowNames = @($expectedOverflowFileNames | Sort-Object)
+        if (($actualOverflowNames -join "`n") -ne
+            ($expectedOverflowNames -join "`n")) {
+            throw (
+                "Unexpected MSI files exceed the File.Language limit: " +
+                (($actualOverflowNames | ForEach-Object { "'$_'" }) -join ", ")
+            )
+        }
+        foreach ($row in $overflowRows) {
+            if ($row.Language -notmatch '^\d+(,\d+)+$') {
+                throw (
+                    "Unexpected language-list format for '$($row.FileName)'."
+                )
+            }
+        }
+
+        $normalizationRows = @($legacyIceRows) + @($overflowRows)
+        if (@($normalizationRows.FileId | Sort-Object -Unique).Count -ne 8) {
+            throw "Expected eight distinct Windows App SDK language rows."
+        }
+        foreach ($row in $normalizationRows) {
+            if ($row.FileId -notmatch '^[A-Za-z0-9_.]+$') {
+                throw "Unsafe MSI File identifier '$($row.FileId)'."
+            }
+            $query = (
+                "UPDATE ``File`` SET ``Language`` = '0' " +
+                "WHERE ``File`` = '$($row.FileId)'"
+            )
+            $view = $database.GetType().InvokeMember(
+                "OpenView",
+                "InvokeMethod",
+                $null,
+                $database,
+                [object[]]@($query)
+            )
+            $view.GetType().InvokeMember(
+                "Execute",
+                "InvokeMethod",
+                $null,
+                $view,
+                $null
+            ) | Out-Null
+            Release-ComReference -Value $view
+            $view = $null
+        }
+
+        $database.GetType().InvokeMember(
+            "Commit",
+            "InvokeMethod",
+            $null,
+            $database,
+            $null
+        ) | Out-Null
+    } finally {
+        foreach ($value in @($record, $view, $database, $installer)) {
+            Release-ComReference -Value $value
+        }
+    }
+
+    Write-Host (
+        "Normalized eight pinned Windows App SDK language rows for " +
+        "legacy MSI ICE compatibility."
+    )
+}
+
 function Reset-ArtifactDirectory {
     param(
         [Parameter(Mandatory)]
@@ -559,6 +805,21 @@ $components = foreach ($entry in $componentPaths.GetEnumerator()) {
         sha256 = $componentHash
     }
 }
+$payloadHashManifestPath = Join-Path (
+    $payloadDirectory
+) "Librarian.PayloadHashes"
+$payloadHashManifest = (
+    "v1|" +
+    (($componentPaths.Keys | ForEach-Object { $componentHashes[$_] }) -join "|")
+)
+[IO.File]::WriteAllText(
+    $payloadHashManifestPath,
+    $payloadHashManifest,
+    (New-Object Text.UTF8Encoding($false))
+)
+$payloadHashManifestSha256 = (
+    Get-FileHash -LiteralPath $payloadHashManifestPath -Algorithm SHA256
+).Hash
 $releaseManifest = [ordered]@{
     schemaVersion = 1
     productVersion = $ProductVersion
@@ -604,14 +865,12 @@ $packageBuildArguments = @(
         "-p:CustomActionPath=" +
         (Join-Path $customActionInputDirectory "Librarian.Setup.CustomActions.dll")
     ),
-    "-p:DesktopSha256=$($componentHashes.Desktop)",
-    "-p:VaultAgentSha256=$($componentHashes.VaultAgent)",
-    "-p:ChromiumNativeHostSha256=$($componentHashes.ChromiumNativeHost)",
-    "-p:IdentityPackageSha256=$($componentHashes.IdentityPackage)",
+    "-p:PayloadHashManifestSha256=$payloadHashManifestSha256",
     "-p:LicenseRtfPath=$licenseRtf",
     "-p:OutputPath=$msiOutputDirectory\",
     "-p:IntermediateOutputPath=$intermediateDirectory\package\"
 )
+$packageBuildArguments += "-p:SuppressValidation=true"
 if ($SuppressMsiValidation) {
     Write-Host ""
     Write-Host (
@@ -619,7 +878,12 @@ if ($SuppressMsiValidation) {
         "scripts\test-installer.ps1 must either run ICE separately or record " +
         "that local App Control enforcement prevents it."
     )
-    $packageBuildArguments += "-p:SuppressValidation=true"
+} else {
+    Write-Host ""
+    Write-Host (
+        "WiX ICE validation is deferred until pinned Windows App SDK language " +
+        "metadata is normalized."
+    )
 }
 
 Invoke-CheckedProcess `
@@ -636,6 +900,21 @@ Invoke-CheckedProcess `
 $msiPath = Join-Path $msiOutputDirectory "Librarian.Package.msi"
 if (-not (Test-Path -LiteralPath $msiPath -PathType Leaf)) {
     throw "The MSI was not created at '$msiPath'."
+}
+Normalize-WindowsAppSdkMsiLanguages -MsiPath $msiPath
+if (-not $SuppressMsiValidation) {
+    $wix = Get-WixExecutable -RepoRoot $repoRoot
+    Invoke-CheckedProcess `
+        -Label "Librarian MSI ICE validation" `
+        -FilePath $wix `
+        -Arguments @(
+            "msi",
+            "validate",
+            $msiPath,
+            "--acceptEula",
+            "wix7"
+        ) `
+        -WorkingDirectory $repoRoot
 }
 if ($signingIdentity) {
     Invoke-Sign `

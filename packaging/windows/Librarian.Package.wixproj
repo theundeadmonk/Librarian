@@ -14,10 +14,7 @@
       PayloadDir=$(PayloadDir);
       BrowserManifestDir=$(BrowserManifestDir);
       CustomActionPath=$(CustomActionPath);
-      DesktopSha256=$(DesktopSha256);
-      VaultAgentSha256=$(VaultAgentSha256);
-      ChromiumNativeHostSha256=$(ChromiumNativeHostSha256);
-      IdentityPackageSha256=$(IdentityPackageSha256);
+      PayloadHashManifestSha256=$(PayloadHashManifestSha256);
       LicenseRtfPath=$(LicenseRtfPath)
     </DefineConstants>
   </PropertyGroup>

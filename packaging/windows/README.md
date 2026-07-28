@@ -90,6 +90,21 @@ build detects enforcement, records the local skip, and still runs the structural
 suite. GitHub's Windows build must run ICE validation and fails if WiX reports
 that validation did not start.
 
+Windows App SDK 2.3.1 includes valid `gd-GB`, `mi-NZ`, and `ug-CN` WinUI MUI
+resources whose modern LCIDs are rejected by the legacy MSI ICE language
+catalog. Its two base WinUI DLLs also carry comma-separated language lists that
+exceed the MSI `File.Language` field. Installer authoring preserves every
+localized file and fail-closed normalizes only these eight pinned Microsoft
+`File.Language` cells to language-neutral before running the complete ICE
+suite. Structural validation requires all eight normalized rows, rejects the
+original LCIDs and overlong values, and never globally suppresses ICE03.
+
+The four security-critical payload hashes live in a fixed-format manifest
+installed beside the binaries. Only that manifest's SHA-256 is passed through
+the bounded deferred custom-action data. Each identity action validates the
+protected manifest path, rejects reparse points, verifies the manifest hash,
+and then verifies every identity-bound payload before changing package state.
+
 The same disposable Windows runner then executes
 `scripts\test-installer-ci.ps1`. That entry point refuses to run anywhere
 except GitHub Actions, creates a short-lived non-exportable development
