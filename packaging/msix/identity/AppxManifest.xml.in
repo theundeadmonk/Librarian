@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <Package
-  IgnorableNamespaces="uap uap10"
+  IgnorableNamespaces="uap uap10 rescap"
   xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
   xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
   xmlns:uap10="http://schemas.microsoft.com/appx/manifest/uap/windows10/10"

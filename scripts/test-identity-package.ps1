@@ -36,6 +36,19 @@ $namespaceManager.AddNamespace(
     "http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
 )
 
+$package = $manifest.SelectSingleNode("/foundation:Package", $namespaceManager)
+$ignorableNamespaces = @(
+    $package.GetAttribute("IgnorableNamespaces").Split(
+        [char[]]@(" ", "`t", "`r", "`n"),
+        [StringSplitOptions]::RemoveEmptyEntries
+    )
+)
+foreach ($namespace in @("uap", "uap10", "rescap")) {
+    if ($namespace -notin $ignorableNamespaces) {
+        throw "Identity package must mark '$namespace' as an ignorable namespace."
+    }
+}
+
 $identity = $manifest.SelectSingleNode(
     "/foundation:Package/foundation:Identity",
     $namespaceManager
