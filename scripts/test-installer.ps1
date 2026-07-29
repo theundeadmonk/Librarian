@@ -860,9 +860,9 @@ try {
         $snapshotIdentity -gt $createFolders -and
         $snapshotIdentity -lt $installFiles -and
         $rollbackSnapshotCleanup -gt $installFiles -and
-        $rollbackIdentity -gt $rollbackSnapshotCleanup -and
-        $rollbackCurrentUserIdentity -gt $rollbackIdentity -and
-        $rollbackCurrentUserIdentity -lt $registerCurrentUserIdentity
+        $rollbackCurrentUserIdentity -gt $rollbackSnapshotCleanup -and
+        $rollbackIdentity -gt $rollbackCurrentUserIdentity -and
+        $rollbackIdentity -lt $registerCurrentUserIdentity
     ) (
         "Identity state must be preserved before InstallFiles. Rollback " +
         "actions must then be queued before registration so reverse execution " +
@@ -871,11 +871,11 @@ try {
     Assert-True (
         $snapshotUnregisterIdentity -lt $removeFiles -and
         $rollbackUnregisterSnapshotCleanup -gt $removeFiles -and
-        $rollbackUnregisterIdentity -gt
-            $rollbackUnregisterSnapshotCleanup -and
         $rollbackUnregisterCurrentUserIdentity -gt
-            $rollbackUnregisterIdentity -and
-        $rollbackUnregisterCurrentUserIdentity -lt $unregisterIdentity
+            $rollbackUnregisterSnapshotCleanup -and
+        $rollbackUnregisterIdentity -gt
+            $rollbackUnregisterCurrentUserIdentity -and
+        $rollbackUnregisterIdentity -lt $unregisterIdentity
     ) (
         "Uninstall identity state must be preserved before RemoveFiles. " +
         "Rollback actions must be queued afterward and before commit removal."

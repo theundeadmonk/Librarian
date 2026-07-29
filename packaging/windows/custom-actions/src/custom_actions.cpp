@@ -41,6 +41,11 @@ namespace
         L"Librarian.VaultAgent.exe",
         L"Librarian.ChromiumNativeHost.exe",
     };
+    constexpr std::array<std::wstring_view, 3> rollback_executables{
+        L"Librarian.Windows.rollback.exe",
+        L"Librarian.VaultAgent.rollback.exe",
+        L"Librarian.ChromiumNativeHost.rollback.exe",
+    };
     constexpr std::wstring_view forbidden_provider{
         L"Librarian.PasskeyProvider.exe"};
     constexpr std::wstring_view snapshot_name{
@@ -59,6 +64,7 @@ namespace
         PackageVersion package_version{};
         bool provisioned{};
         bool invoking_user_registered{};
+        std::array<bool, required_executables.size()> executable_present{};
     };
 
     struct payload_hashes
@@ -513,6 +519,43 @@ namespace
         }
     }
 
+    std::filesystem::path rollback_executable_path(
+        std::filesystem::path const& install_folder,
+        std::size_t index)
+    {
+        return install_folder / rollback_executables[index];
+    }
+
+    void validate_rollback_executable_path(
+        std::filesystem::path const& executable_path,
+        std::filesystem::path const& install_folder,
+        std::size_t index,
+        bool allow_missing)
+    {
+        validate_install_folder(install_folder);
+        if (index >= rollback_executables.size() ||
+            !paths_equal(executable_path.parent_path(), install_folder) ||
+            executable_path.filename().native() !=
+                rollback_executables[index])
+        {
+            fail(L"Setup refused an unsafe executable rollback path.");
+        }
+        reject_reparse_chain(
+            executable_path,
+            allow_missing,
+            L"Setup refused a redirected executable rollback file.");
+        if (std::filesystem::exists(executable_path) &&
+            !std::filesystem::is_regular_file(executable_path))
+        {
+            fail(L"Setup refused an invalid executable rollback file.");
+        }
+        if (!allow_missing &&
+            !std::filesystem::is_regular_file(executable_path))
+        {
+            fail(L"Setup could not read an executable rollback file.");
+        }
+    }
+
     void validate_identity_package_file(
         std::filesystem::path const& package_path,
         std::filesystem::path const& install_folder,
@@ -558,6 +601,35 @@ namespace
             fail(
                 L"Setup refused an unexpected passkey provider before issue #18.");
         }
+    }
+
+    std::array<bool, required_executables.size()>
+    capture_executable_state(
+        std::filesystem::path const& install_folder)
+    {
+        validate_install_folder(install_folder);
+        std::array<bool, required_executables.size()> present{};
+        for (std::size_t index = 0U;
+             index < required_executables.size();
+             ++index)
+        {
+            std::filesystem::path const executable =
+                install_folder / required_executables[index];
+            if (!std::filesystem::exists(executable))
+            {
+                continue;
+            }
+            if (!std::filesystem::is_regular_file(executable))
+            {
+                fail(L"Setup refused an invalid installed executable.");
+            }
+            reject_reparse_chain(
+                executable,
+                false,
+                L"Setup refused a redirected installed executable.");
+            present[index] = true;
+        }
+        return present;
     }
 
     void validate_payload(
@@ -1277,13 +1349,17 @@ namespace
         {
             fail(L"Setup could not create its identity rollback marker.");
         }
-        stream << "v1|" << (snapshot.package_present ? '1' : '0') << '|'
+        stream << "v2|" << (snapshot.package_present ? '1' : '0') << '|'
                << snapshot.package_version.Major << '.'
                << snapshot.package_version.Minor << '.'
                << snapshot.package_version.Build << '.'
                << snapshot.package_version.Revision << '|'
                << (snapshot.provisioned ? '1' : '0') << '|'
                << (snapshot.invoking_user_registered ? '1' : '0');
+        for (bool const present : snapshot.executable_present)
+        {
+            stream << '|' << (present ? '1' : '0');
+        }
         stream.flush();
         if (!stream)
         {
@@ -1306,32 +1382,95 @@ namespace
         {
             fail(L"Setup found a stale identity rollback package.");
         }
-
-        if (snapshot.package_present)
+        for (std::size_t index = 0U;
+             index < rollback_executables.size();
+             ++index)
         {
-            std::filesystem::path const installed_package =
-                install_folder / L"Librarian.Identity.msix";
-            validate_identity_package_file(
-                installed_package,
+            std::filesystem::path const rollback_executable =
+                rollback_executable_path(install_folder, index);
+            validate_rollback_executable_path(
+                rollback_executable,
                 install_folder,
-                L"Librarian.Identity.msix");
-            if (!CopyFileW(
-                    installed_package.c_str(),
-                    rollback_package.c_str(),
-                    TRUE))
+                index,
+                true);
+            if (std::filesystem::exists(rollback_executable))
             {
-                fail(L"Setup could not preserve its identity rollback package.");
+                fail(L"Setup found a stale executable rollback file.");
             }
         }
 
+        auto const remove_partial_snapshot = [&] {
+            static_cast<void>(DeleteFileW(rollback_package.c_str()));
+            for (std::size_t index = 0U;
+                 index < rollback_executables.size();
+                 ++index)
+            {
+                std::filesystem::path const rollback_executable =
+                    rollback_executable_path(install_folder, index);
+                static_cast<void>(
+                    DeleteFileW(rollback_executable.c_str()));
+            }
+            static_cast<void>(DeleteFileW(marker.c_str()));
+        };
+
         try
         {
+            if (snapshot.package_present)
+            {
+                std::filesystem::path const installed_package =
+                    install_folder / L"Librarian.Identity.msix";
+                validate_identity_package_file(
+                    installed_package,
+                    install_folder,
+                    L"Librarian.Identity.msix");
+                if (!CopyFileW(
+                        installed_package.c_str(),
+                        rollback_package.c_str(),
+                        TRUE))
+                {
+                    fail(
+                        L"Setup could not preserve its identity rollback "
+                        L"package.");
+                }
+            }
+            for (std::size_t index = 0U;
+                 index < required_executables.size();
+                 ++index)
+            {
+                if (!snapshot.executable_present[index])
+                {
+                    continue;
+                }
+                std::filesystem::path const installed_executable =
+                    install_folder / required_executables[index];
+                if (!std::filesystem::is_regular_file(
+                        installed_executable))
+                {
+                    fail(
+                        L"Setup could not preserve a missing installed "
+                        L"executable.");
+                }
+                reject_reparse_chain(
+                    installed_executable,
+                    false,
+                    L"Setup refused a redirected installed executable.");
+                std::filesystem::path const rollback_executable =
+                    rollback_executable_path(install_folder, index);
+                if (!CopyFileW(
+                        installed_executable.c_str(),
+                        rollback_executable.c_str(),
+                        TRUE))
+                {
+                    fail(
+                        L"Setup could not preserve an executable for "
+                        L"rollback.");
+                }
+            }
             write_snapshot(marker, snapshot);
         }
         catch (...)
         {
-            static_cast<void>(DeleteFileW(rollback_package.c_str()));
-            static_cast<void>(DeleteFileW(marker.c_str()));
+            remove_partial_snapshot();
             throw;
         }
     }
@@ -1364,8 +1503,8 @@ namespace
         }
 
         std::wstring const text{serialized.begin(), serialized.end()};
-        auto const fields = split_data(text, 5);
-        if (fields[0] != L"v1")
+        auto const fields = split_data(text, 8);
+        if (fields[0] != L"v2")
         {
             fail(L"Setup found an unsupported identity rollback marker.");
         }
@@ -1376,6 +1515,11 @@ namespace
             .provisioned = parse_snapshot_boolean(fields[3]),
             .invoking_user_registered =
                 parse_snapshot_boolean(fields[4]),
+            .executable_present = {
+                parse_snapshot_boolean(fields[5]),
+                parse_snapshot_boolean(fields[6]),
+                parse_snapshot_boolean(fields[7]),
+            },
         };
         if (!snapshot.package_present &&
             (comparable_version(snapshot.package_version) != 0U ||
@@ -1403,6 +1547,25 @@ namespace
         if (error)
         {
             fail(L"Setup could not remove its identity rollback package.");
+        }
+        for (std::size_t index = 0U;
+             index < rollback_executables.size();
+             ++index)
+        {
+            std::filesystem::path const rollback_executable =
+                rollback_executable_path(install_folder, index);
+            validate_rollback_executable_path(
+                rollback_executable,
+                install_folder,
+                index,
+                true);
+            error.clear();
+            static_cast<void>(
+                std::filesystem::remove(rollback_executable, error));
+            if (error)
+            {
+                fail(L"Setup could not remove an executable rollback file.");
+            }
         }
         error.clear();
         static_cast<void>(std::filesystem::remove(marker, error));
@@ -1445,6 +1608,70 @@ namespace
         fail(L"Setup could not remove the incoming identity package.");
     }
 
+    void restore_external_payload(
+        identity_snapshot const& snapshot,
+        std::filesystem::path const& install_folder)
+    {
+        validate_install_folder(install_folder);
+        for (std::size_t index = 0U;
+             index < required_executables.size();
+             ++index)
+        {
+            std::filesystem::path const installed_executable =
+                install_folder / required_executables[index];
+            reject_reparse_chain(
+                installed_executable,
+                true,
+                L"Setup refused a redirected installed executable.");
+            if (std::filesystem::exists(installed_executable) &&
+                !std::filesystem::is_regular_file(installed_executable))
+            {
+                fail(L"Setup refused an invalid installed executable.");
+            }
+
+            std::filesystem::path const rollback_executable =
+                rollback_executable_path(install_folder, index);
+            validate_rollback_executable_path(
+                rollback_executable,
+                install_folder,
+                index,
+                !snapshot.executable_present[index]);
+            if (!snapshot.executable_present[index])
+            {
+                if (std::filesystem::exists(rollback_executable))
+                {
+                    fail(
+                        L"Setup found inconsistent executable rollback state.");
+                }
+                std::error_code error;
+                static_cast<void>(
+                    std::filesystem::remove(installed_executable, error));
+                if (error)
+                {
+                    fail(
+                        L"Setup could not restore an absent executable.");
+                }
+                continue;
+            }
+
+            if (!CopyFileW(
+                    rollback_executable.c_str(),
+                    installed_executable.c_str(),
+                    FALSE))
+            {
+                fail(L"Setup could not restore an installed executable.");
+            }
+            if (!std::filesystem::is_regular_file(installed_executable))
+            {
+                fail(L"Setup restored an invalid installed executable.");
+            }
+            reject_reparse_chain(
+                installed_executable,
+                false,
+                L"Setup restored a redirected installed executable.");
+        }
+    }
+
     void restore_system_identity(
         PackageManager const& manager,
         identity_snapshot const& snapshot,
@@ -1455,15 +1682,20 @@ namespace
         if (!snapshot.package_present)
         {
             remove_exact_package(manager, incoming_version);
+            restore_external_payload(snapshot, install_folder);
             return;
         }
 
         if (comparable_version(snapshot.package_version) !=
             comparable_version(incoming_version))
         {
+            // Keep the incoming external payload intact until its identity is
+            // removed. Replacing those files first can make Windows package
+            // deployment lose the external-location package during removal.
             remove_exact_package(manager, incoming_version);
         }
 
+        restore_external_payload(snapshot, install_folder);
         Package const previous = ensure_package_staged(
             manager,
             snapshot.package_version,
@@ -1567,11 +1799,13 @@ extern "C" __declspec(dllexport) UINT __stdcall SnapshotIdentity(
             fail(L"Setup found a stale identity rollback marker.");
         }
         PackageManager const manager;
-        identity_snapshot const snapshot = capture_snapshot(
+        identity_snapshot snapshot = capture_snapshot(
             manager,
             version,
             install_folder,
             user_sid);
+        snapshot.executable_present =
+            capture_executable_state(install_folder);
         write_snapshot_package(marker, install_folder, snapshot);
     });
 }

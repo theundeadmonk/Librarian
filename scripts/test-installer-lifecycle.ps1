@@ -24,7 +24,9 @@ param(
     [Parameter(Mandatory)]
     [string]$LogDirectory,
 
-    [switch]$SkipInteractiveDesktopLaunch
+    [switch]$SkipInteractiveDesktopLaunch,
+
+    [switch]$ConfirmDisposableVm
 )
 
 Set-StrictMode -Version Latest
@@ -182,7 +184,6 @@ function Invoke-DisposableUserPowerShell {
             ) `
             -Credential $Credential `
             -LoadUserProfile `
-            -UseNewEnvironment `
             -WorkingDirectory $env:SystemRoot `
             -WindowStyle Hidden `
             -RedirectStandardOutput $standardOutputPath `
@@ -428,6 +429,25 @@ function Get-RegistryDefaultValue {
     return (Get-Item -LiteralPath $Path).GetValue($null)
 }
 
+function Assert-NoInstallerRollbackArtifacts {
+    param(
+        [Parameter(Mandatory)]
+        [string]$InstallFolder
+    )
+
+    foreach ($name in @(
+        "Librarian.Identity.msix.state",
+        "Librarian.Identity.rollback.msix",
+        "Librarian.Windows.rollback.exe",
+        "Librarian.VaultAgent.rollback.exe",
+        "Librarian.ChromiumNativeHost.rollback.exe"
+    )) {
+        Assert-True (
+            -not (Test-Path -LiteralPath (Join-Path $InstallFolder $name))
+        ) "Installer rollback artifact '$name' survived the transaction."
+    }
+}
+
 function Assert-BrowserState {
     param(
         [Parameter(Mandatory)]
@@ -605,6 +625,7 @@ function Assert-Installed {
         -InstallFolder $InstallFolder `
         -ChromeRegistryPath $ChromeRegistryPath `
         -EdgeRegistryPath $EdgeRegistryPath
+    Assert-NoInstallerRollbackArtifacts -InstallFolder $InstallFolder
 }
 
 function Assert-ProductAbsent {
@@ -695,6 +716,7 @@ function Assert-InstalledWithoutIdentity {
         -InstallFolder $InstallFolder `
         -ChromeRegistryPath $ChromeRegistryPath `
         -EdgeRegistryPath $EdgeRegistryPath
+    Assert-NoInstallerRollbackArtifacts -InstallFolder $InstallFolder
     Assert-True (
         @(Get-LibrarianPackages).Count -eq 0 -and
         @(Get-LibrarianCurrentUserPackages).Count -eq 0 -and
@@ -822,16 +844,37 @@ function Assert-Sentinel {
     ) "The disposable user-data sentinel was not preserved."
 }
 
-if ($env:GITHUB_ACTIONS -ne "true" -or
-    $env:CI -ne "true" -or
-    $env:RUNNER_ENVIRONMENT -ne "github-hosted" -or
-    $env:RUNNER_OS -ne "Windows" -or
-    $env:RUNNER_ARCH -ne "X64" -or
-    $env:GITHUB_REPOSITORY -ne "theundeadmonk/Librarian") {
-    throw (
-        "The installer lifecycle suite is destructive and may run only on a " +
-        "disposable GitHub Actions runner."
+$isGitHubHostedRunner = (
+    $env:GITHUB_ACTIONS -eq "true" -and
+    $env:CI -eq "true" -and
+    $env:RUNNER_ENVIRONMENT -eq "github-hosted" -and
+    $env:RUNNER_OS -eq "Windows" -and
+    $env:RUNNER_ARCH -eq "X64" -and
+    $env:GITHUB_REPOSITORY -eq "theundeadmonk/Librarian"
+)
+$isDisposableLocalVm = $false
+if ($ConfirmDisposableVm) {
+    $computerSystem = Get-CimInstance Win32_ComputerSystem
+    $operatingSystem = Get-CimInstance Win32_OperatingSystem
+    $isDisposableLocalVm = (
+        ($computerSystem.Manufacturer -match "VMware" -or
+            $computerSystem.Model -match "VMware") -and
+        $operatingSystem.Caption -match "Windows 11 Enterprise Evaluation" -and
+        $env:USERNAME -eq "librarian-test"
     )
+}
+if (-not $isGitHubHostedRunner -and -not $isDisposableLocalVm) {
+    throw (
+        "The installer lifecycle suite is destructive and may run only on " +
+        "the disposable GitHub-hosted runner or an explicitly confirmed " +
+        "Windows 11 Enterprise Evaluation VMware guest using the " +
+        "'librarian-test' account."
+    )
+}
+if ($isDisposableLocalVm) {
+    Write-Host "Runner mode: disposable local VMware guest"
+} else {
+    Write-Host "Runner mode: disposable GitHub-hosted runner"
 }
 Assert-True (
     [Environment]::Is64BitProcess
@@ -1437,10 +1480,14 @@ try {
     $failure = $_
     Write-Host ""
     Write-Host "Installer lifecycle failure: $($_.Exception.Message)"
-    foreach ($log in Get-ChildItem `
-        -LiteralPath $resolvedLogDirectory `
-        -Filter "*.log" `
-        -ErrorAction SilentlyContinue) {
+    $diagnosticLogs = @(
+        Get-ChildItem `
+            -LiteralPath $resolvedLogDirectory `
+            -Filter "*.log" `
+            -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -ne "lifecycle-console.log" }
+    )
+    foreach ($log in $diagnosticLogs) {
         Write-Host ""
         Write-Host "--- Tail: $($log.Name) ---"
         Get-Content -LiteralPath $log.FullName -Tail 80 -ErrorAction Continue
