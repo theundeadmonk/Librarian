@@ -459,10 +459,14 @@ function Assert-BrowserState {
     )) {
         $manifestPath = Join-Path $InstallFolder $browser.Manifest
         if ($Expected) {
+            $actualRegistryValue = Get-RegistryDefaultValue `
+                -Path $browser.RegistryPath
             Assert-True (
-                (Get-RegistryDefaultValue -Path $browser.RegistryPath) -eq
-                    $manifestPath
-            ) "$($browser.Name) native-messaging registration is incorrect."
+                $actualRegistryValue -eq $manifestPath
+            ) (
+                "$($browser.Name) native-messaging registration is incorrect. " +
+                "Expected '$manifestPath'; found '$actualRegistryValue'."
+            )
             Assert-True (
                 (Test-Path -LiteralPath $manifestPath -PathType Leaf)
             ) "$($browser.Name) native-messaging manifest is missing."
@@ -1059,8 +1063,10 @@ try {
         -Label "Repair files and registrations" `
         -FilePath $msiexec `
         -Arguments @(
-            "/fa",
+            "/i",
             $resolvedSignedLowMsi,
+            "REINSTALL=ALL",
+            "REINSTALLMODE=amus",
             "ADDLOCAL=Core,ChromeIntegration,EdgeIntegration",
             "/qn",
             "/norestart",
@@ -1080,8 +1086,10 @@ try {
         -Label "Rollback interrupted same-version repair" `
         -FilePath $msiexec `
         -Arguments @(
-            "/fa",
+            "/i",
             $resolvedSignedLowMsi,
+            "REINSTALL=ALL",
+            "REINSTALLMODE=amus",
             "ADDLOCAL=Core,ChromeIntegration,EdgeIntegration",
             "WIXFAILWHENDEFERRED=1",
             "/qn",
@@ -1164,8 +1172,10 @@ try {
         -Label "Reject repair over another user's incoming identity" `
         -FilePath $msiexec `
         -Arguments @(
-            "/fa",
+            "/i",
             $resolvedSignedHighMsi,
+            "REINSTALL=ALL",
+            "REINSTALLMODE=amus",
             "ADDLOCAL=Core,ChromeIntegration,EdgeIntegration",
             "/qn",
             "/norestart",
@@ -1193,8 +1203,10 @@ try {
         -Label "Restore provisioning after retained-user rejection" `
         -FilePath $msiexec `
         -Arguments @(
-            "/fa",
+            "/i",
             $resolvedSignedHighMsi,
+            "REINSTALL=ALL",
+            "REINSTALLMODE=amus",
             "ADDLOCAL=Core,ChromeIntegration,EdgeIntegration",
             "/qn",
             "/norestart",
@@ -1244,8 +1256,10 @@ try {
         -Label "Reject repair from divergent identity state" `
         -FilePath $msiexec `
         -Arguments @(
-            "/fa",
+            "/i",
             $resolvedSignedHighMsi,
+            "REINSTALL=ALL",
+            "REINSTALLMODE=amus",
             "ADDLOCAL=Core,ChromeIntegration,EdgeIntegration",
             "/qn",
             "/norestart",
@@ -1276,8 +1290,10 @@ try {
         -Label "Repair with a retained secondary-user identity" `
         -FilePath $msiexec `
         -Arguments @(
-            "/fa",
+            "/i",
             $resolvedSignedHighMsi,
+            "REINSTALL=ALL",
+            "REINSTALLMODE=amus",
             "ADDLOCAL=Core,ChromeIntegration,EdgeIntegration",
             "/qn",
             "/norestart",
@@ -1346,8 +1362,10 @@ try {
         -Label "Repair identity after external package-state damage" `
         -FilePath $msiexec `
         -Arguments @(
-            "/fa",
+            "/i",
             $resolvedSignedHighMsi,
+            "REINSTALL=ALL",
+            "REINSTALLMODE=amus",
             "ADDLOCAL=Core,ChromeIntegration,EdgeIntegration",
             "/qn",
             "/norestart",
