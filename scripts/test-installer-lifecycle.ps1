@@ -988,9 +988,16 @@ try {
         Start-Sleep -Seconds 3
         $desktopProcess.Refresh()
         if ($desktopProcess.HasExited) {
+            $desktopExitCode = $desktopProcess.ExitCode
+            $desktopExitCodeHex = "0x{0:X8}" -f (
+                [int64]$desktopExitCode -band 0xFFFFFFFFL
+            )
             Assert-True (
-                $desktopProcess.ExitCode -eq 0
-            ) "The installed desktop executable exited with an error."
+                $desktopExitCode -eq 0
+            ) (
+                "The installed desktop executable exited with code " +
+                "$desktopExitCode ($desktopExitCodeHex)."
+            )
         }
     } finally {
         if (-not $desktopProcess.HasExited) {
