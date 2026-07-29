@@ -45,6 +45,8 @@ namespace
         L"Librarian.PasskeyProvider.exe"};
     constexpr std::wstring_view snapshot_name{
         L"Librarian.Identity.msix.state"};
+    constexpr std::wstring_view rollback_package_name{
+        L"Librarian.Identity.rollback.msix"};
     constexpr std::wstring_view payload_hash_manifest_name{
         L"Librarian.PayloadHashes"};
     constexpr unsigned package_removal_attempts{40U};
@@ -479,13 +481,46 @@ namespace
             L"Setup refused a redirected identity rollback marker.");
     }
 
-    void validate_payload(
-        std::filesystem::path const& package_path,
+    std::filesystem::path rollback_package_path(
         std::filesystem::path const& install_folder)
+    {
+        return install_folder / rollback_package_name;
+    }
+
+    void validate_rollback_package_path(
+        std::filesystem::path const& package_path,
+        std::filesystem::path const& install_folder,
+        bool allow_missing)
     {
         validate_install_folder(install_folder);
         if (!paths_equal(package_path.parent_path(), install_folder) ||
-            package_path.filename().native() != L"Librarian.Identity.msix" ||
+            package_path.filename().native() != rollback_package_name)
+        {
+            fail(L"Setup refused an unsafe identity rollback package path.");
+        }
+        reject_reparse_chain(
+            package_path,
+            allow_missing,
+            L"Setup refused a redirected identity rollback package.");
+        if (std::filesystem::exists(package_path) &&
+            !std::filesystem::is_regular_file(package_path))
+        {
+            fail(L"Setup refused an invalid identity rollback package.");
+        }
+        if (!allow_missing && !std::filesystem::is_regular_file(package_path))
+        {
+            fail(L"Setup could not read its identity rollback package.");
+        }
+    }
+
+    void validate_payload_path(
+        std::filesystem::path const& package_path,
+        std::filesystem::path const& install_folder,
+        std::wstring_view expected_name)
+    {
+        validate_install_folder(install_folder);
+        if (!paths_equal(package_path.parent_path(), install_folder) ||
+            package_path.filename().native() != expected_name ||
             !std::filesystem::is_regular_file(package_path))
         {
             fail(L"Setup refused an invalid identity package path.");
@@ -513,6 +548,26 @@ namespace
             fail(
                 L"Setup refused an unexpected passkey provider before issue #18.");
         }
+    }
+
+    void validate_payload(
+        std::filesystem::path const& package_path,
+        std::filesystem::path const& install_folder)
+    {
+        validate_payload_path(
+            package_path,
+            install_folder,
+            L"Librarian.Identity.msix");
+    }
+
+    void validate_rollback_payload(
+        std::filesystem::path const& package_path,
+        std::filesystem::path const& install_folder)
+    {
+        validate_payload_path(
+            package_path,
+            install_folder,
+            rollback_package_name);
     }
 
     void validate_release_payload(
@@ -1051,11 +1106,19 @@ namespace
         PackageManager const& manager,
         PackageVersion const& version,
         std::filesystem::path const& package_path,
-        std::filesystem::path const& install_folder)
+        std::filesystem::path const& install_folder,
+        bool rollback_source = false)
     {
         if (!exact_package_exists(manager, version))
         {
-            validate_payload(package_path, install_folder);
+            if (rollback_source)
+            {
+                validate_rollback_payload(package_path, install_folder);
+            }
+            else
+            {
+                validate_payload(package_path, install_folder);
+            }
             StagePackageOptions const options;
             options.ExternalLocationUri(Uri{install_folder.c_str()});
             DeploymentResult const staged =
@@ -1106,6 +1169,43 @@ namespace
             fail(
                 L"Identity package registration did not become visible "
                 L"for the invoking user.");
+        }
+    }
+
+    void register_rollback_package_for_current_user(
+        PackageManager const& manager,
+        PackageVersion const& version,
+        std::filesystem::path const& package_path,
+        std::filesystem::path const& install_folder)
+    {
+        validate_rollback_payload(package_path, install_folder);
+        if (exact_package_exists(manager, version))
+        {
+            Package const existing = find_exact_package(manager, version);
+            validate_external_location(existing, install_folder);
+            if (package_is_registered_for_user(manager, existing, L""))
+            {
+                return;
+            }
+        }
+
+        AddPackageOptions const options;
+        options.ExternalLocationUri(Uri{install_folder.c_str()});
+        DeploymentResult const registered =
+            manager.AddPackageByUriAsync(
+                Uri{package_path.c_str()},
+                options).get();
+        check_deployment_result(
+            registered,
+            L"Previous invoking-user identity registration");
+
+        Package const package = find_exact_package(manager, version);
+        validate_external_location(package, install_folder);
+        if (!package_is_registered_for_user(manager, package, L""))
+        {
+            fail(
+                L"Previous identity package registration did not become "
+                L"visible for the invoking user.");
         }
     }
 
@@ -1181,6 +1281,48 @@ namespace
         }
     }
 
+    void write_snapshot_package(
+        std::filesystem::path const& marker,
+        std::filesystem::path const& install_folder,
+        identity_snapshot const& snapshot)
+    {
+        std::filesystem::path const rollback_package =
+            rollback_package_path(install_folder);
+        validate_rollback_package_path(
+            rollback_package,
+            install_folder,
+            true);
+        if (std::filesystem::exists(rollback_package))
+        {
+            fail(L"Setup found a stale identity rollback package.");
+        }
+
+        if (snapshot.package_present)
+        {
+            std::filesystem::path const installed_package =
+                install_folder / L"Librarian.Identity.msix";
+            validate_payload(installed_package, install_folder);
+            if (!CopyFileW(
+                    installed_package.c_str(),
+                    rollback_package.c_str(),
+                    TRUE))
+            {
+                fail(L"Setup could not preserve its identity rollback package.");
+            }
+        }
+
+        try
+        {
+            write_snapshot(marker, snapshot);
+        }
+        catch (...)
+        {
+            static_cast<void>(DeleteFileW(rollback_package.c_str()));
+            static_cast<void>(DeleteFileW(marker.c_str()));
+            throw;
+        }
+    }
+
     bool parse_snapshot_boolean(std::wstring const& value)
     {
         if (value == L"0")
@@ -1232,9 +1374,24 @@ namespace
         return snapshot;
     }
 
-    void remove_snapshot(std::filesystem::path const& marker)
+    void remove_snapshot(
+        std::filesystem::path const& marker,
+        std::filesystem::path const& install_folder)
     {
+        std::filesystem::path const rollback_package =
+            rollback_package_path(install_folder);
+        validate_rollback_package_path(
+            rollback_package,
+            install_folder,
+            true);
         std::error_code error;
+        static_cast<void>(
+            std::filesystem::remove(rollback_package, error));
+        if (error)
+        {
+            fail(L"Setup could not remove its identity rollback package.");
+        }
+        error.clear();
         static_cast<void>(std::filesystem::remove(marker, error));
         if (error)
         {
@@ -1298,7 +1455,8 @@ namespace
             manager,
             snapshot.package_version,
             package_path,
-            install_folder);
+            install_folder,
+            true);
         if (snapshot.provisioned &&
             !package_is_provisioned(manager, previous))
         {
@@ -1371,7 +1529,7 @@ namespace
         if (snapshot.package_present &&
             snapshot.invoking_user_registered)
         {
-            register_package_for_current_user(
+            register_rollback_package_for_current_user(
                 manager,
                 snapshot.package_version,
                 package_path,
@@ -1391,14 +1549,17 @@ extern "C" __declspec(dllexport) UINT __stdcall SnapshotIdentity(
         PackageVersion const version = parse_version(fields[2]);
         std::wstring const user_sid = validate_user_sid(fields[3]);
         validate_snapshot_path(marker, install_folder, true);
+        if (std::filesystem::exists(marker))
+        {
+            fail(L"Setup found a stale identity rollback marker.");
+        }
         PackageManager const manager;
-        write_snapshot(
-            marker,
-            capture_snapshot(
-                manager,
-                version,
-                install_folder,
-                user_sid));
+        identity_snapshot const snapshot = capture_snapshot(
+            manager,
+            version,
+            install_folder,
+            user_sid);
+        write_snapshot_package(marker, install_folder, snapshot);
     });
 }
 
@@ -1528,7 +1689,7 @@ extern "C" __declspec(dllexport) UINT __stdcall CleanupIdentitySnapshot(
         std::filesystem::path const marker = absolute_path(fields[0]);
         std::filesystem::path const install_folder = absolute_path(fields[1]);
         validate_snapshot_path(marker, install_folder, false);
-        remove_snapshot(marker);
+        remove_snapshot(marker, install_folder);
     });
 }
 

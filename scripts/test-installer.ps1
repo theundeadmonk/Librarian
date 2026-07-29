@@ -714,6 +714,26 @@ try {
             "installer-owned directory."
         )
     }
+    foreach ($rollbackActionId in @(
+        "SetRollbackCurrentUserIdentity",
+        "SetRollbackIdentity",
+        "SetRollbackUnregisterCurrentUserIdentity",
+        "SetRollbackUnregisterIdentity"
+    )) {
+        $rollbackAction = $decompiled.SelectSingleNode(
+            "//*[local-name()='CustomAction' and @Id='$rollbackActionId']"
+        )
+        Assert-True (
+            $null -ne $rollbackAction -and
+            $rollbackAction.GetAttribute("Value") -match
+                '\[INSTALLFOLDER\]Librarian\.Identity\.rollback\.msix' -and
+            $rollbackAction.GetAttribute("Value") -notmatch
+                '\[#IdentityMsix\]'
+        ) (
+            "Rollback identity restoration must use the package preserved " +
+            "before product files are replaced or removed."
+        )
+    }
 
     $unsafeCustomActions = @(
         $decompiled.SelectNodes("//*[local-name()='CustomAction']") |
@@ -838,26 +858,27 @@ try {
     )
     Assert-True (
         $snapshotIdentity -gt $createFolders -and
-        $rollbackSnapshotCleanup -gt $snapshotIdentity -and
+        $snapshotIdentity -lt $installFiles -and
+        $rollbackSnapshotCleanup -gt $installFiles -and
         $rollbackIdentity -gt $rollbackSnapshotCleanup -and
         $rollbackCurrentUserIdentity -gt $rollbackIdentity -and
-        $rollbackCurrentUserIdentity -lt $installFiles
+        $rollbackCurrentUserIdentity -lt $registerCurrentUserIdentity
     ) (
-        "Identity snapshot and rollback actions must run in order after the " +
-        "protected directory exists. Reverse execution must restore the " +
-        "invoking user before the final system-wide identity state."
+        "Identity state must be preserved before InstallFiles. Rollback " +
+        "actions must then be queued before registration so reverse execution " +
+        "restores identity before product files roll back."
     )
     Assert-True (
-        $rollbackUnregisterSnapshotCleanup -gt
-            $snapshotUnregisterIdentity -and
+        $snapshotUnregisterIdentity -lt $removeFiles -and
+        $rollbackUnregisterSnapshotCleanup -gt $removeFiles -and
         $rollbackUnregisterIdentity -gt
             $rollbackUnregisterSnapshotCleanup -and
         $rollbackUnregisterCurrentUserIdentity -gt
             $rollbackUnregisterIdentity -and
         $rollbackUnregisterCurrentUserIdentity -lt $unregisterIdentity
     ) (
-        "Uninstall rollback actions must restore the invoking user before " +
-        "the final system-wide identity state and snapshot cleanup."
+        "Uninstall identity state must be preserved before RemoveFiles. " +
+        "Rollback actions must be queued afterward and before commit removal."
     )
     Assert-True (
         $provisionIdentity -gt $registerCurrentUserIdentity -and

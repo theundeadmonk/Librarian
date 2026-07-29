@@ -307,13 +307,13 @@
       Condition="NOT (REMOVE~=&quot;ALL&quot;)" />
     <SetProperty
       Id="RollbackCurrentUserIdentity"
-      Value="[INSTALLFOLDER]Librarian.Identity.msix.state|[#IdentityMsix]|[INSTALLFOLDER]|[ProductVersion]"
+      Value="[INSTALLFOLDER]Librarian.Identity.msix.state|[INSTALLFOLDER]Librarian.Identity.rollback.msix|[INSTALLFOLDER]|[ProductVersion]"
       Before="RollbackCurrentUserIdentity"
       Sequence="execute"
       Condition="NOT (REMOVE~=&quot;ALL&quot;)" />
     <SetProperty
       Id="RollbackIdentity"
-      Value="[INSTALLFOLDER]Librarian.Identity.msix.state|[#IdentityMsix]|[INSTALLFOLDER]|[ProductVersion]"
+      Value="[INSTALLFOLDER]Librarian.Identity.msix.state|[INSTALLFOLDER]Librarian.Identity.rollback.msix|[INSTALLFOLDER]|[ProductVersion]"
       Before="RollbackIdentity"
       Sequence="execute"
       Condition="NOT (REMOVE~=&quot;ALL&quot;)" />
@@ -355,13 +355,13 @@
       Condition="REMOVE~=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
     <SetProperty
       Id="RollbackUnregisterCurrentUserIdentity"
-      Value="[INSTALLFOLDER]Librarian.Identity.msix.state|[#IdentityMsix]|[INSTALLFOLDER]|[ProductVersion]"
+      Value="[INSTALLFOLDER]Librarian.Identity.msix.state|[INSTALLFOLDER]Librarian.Identity.rollback.msix|[INSTALLFOLDER]|[ProductVersion]"
       Before="RollbackUnregisterCurrentUserIdentity"
       Sequence="execute"
       Condition="REMOVE~=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
     <SetProperty
       Id="RollbackUnregisterIdentity"
-      Value="[INSTALLFOLDER]Librarian.Identity.msix.state|[#IdentityMsix]|[INSTALLFOLDER]|[ProductVersion]"
+      Value="[INSTALLFOLDER]Librarian.Identity.msix.state|[INSTALLFOLDER]Librarian.Identity.rollback.msix|[INSTALLFOLDER]|[ProductVersion]"
       Before="RollbackUnregisterIdentity"
       Sequence="execute"
       Condition="REMOVE~=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
@@ -377,24 +377,24 @@
         Action="SnapshotIdentity"
         After="CreateFolders"
         Condition="NOT (REMOVE~=&quot;ALL&quot;)" />
-      <!-- Rollback actions execute in reverse sequence. Queue the system-wide
-           restore before the impersonated restore so it runs last and removes
-           any incoming package state the per-user operation can expose. -->
+      <!-- Rollback actions execute in reverse sequence. Queue them after
+           InstallFiles so they restore identity from the preserved package
+           before Windows Installer rolls product files back. -->
       <Custom
         Action="RollbackIdentitySnapshotCleanup"
-        Before="RollbackIdentity"
+        After="InstallFiles"
         Condition="NOT (REMOVE~=&quot;ALL&quot;)" />
       <Custom
         Action="RollbackIdentity"
-        Before="RollbackCurrentUserIdentity"
+        After="RollbackIdentitySnapshotCleanup"
         Condition="NOT (REMOVE~=&quot;ALL&quot;)" />
       <Custom
         Action="RollbackCurrentUserIdentity"
-        Before="InstallFiles"
+        After="RollbackIdentity"
         Condition="NOT (REMOVE~=&quot;ALL&quot;)" />
       <Custom
         Action="RegisterIdentity"
-        After="InstallFiles"
+        After="RollbackCurrentUserIdentity"
         Condition="NOT (REMOVE~=&quot;ALL&quot;)" />
       <Custom
         Action="RegisterCurrentUserIdentity"
@@ -406,25 +406,25 @@
         Condition="NOT (REMOVE~=&quot;ALL&quot;)" />
       <Custom
         Action="SnapshotUnregisterIdentity"
-        Before="RollbackUnregisterSnapshotCleanup"
+        Before="RemoveFiles"
         Condition="REMOVE~=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
-      <!-- Preserve the same per-user-then-system rollback execution order for
-           explicit uninstall transactions. -->
+      <!-- Preserve the installed package before RemoveFiles, then queue the
+           restore actions after it so they execute before file rollback. -->
       <Custom
         Action="RollbackUnregisterSnapshotCleanup"
-        Before="RollbackUnregisterIdentity"
+        After="RemoveFiles"
         Condition="REMOVE~=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
       <Custom
         Action="RollbackUnregisterIdentity"
-        Before="RollbackUnregisterCurrentUserIdentity"
+        After="RollbackUnregisterSnapshotCleanup"
         Condition="REMOVE~=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
       <Custom
         Action="RollbackUnregisterCurrentUserIdentity"
-        Before="UnregisterIdentity"
+        After="RollbackUnregisterIdentity"
         Condition="REMOVE~=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
       <Custom
         Action="UnregisterIdentity"
-        After="RemoveFiles"
+        After="RollbackUnregisterCurrentUserIdentity"
         Condition="REMOVE~=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
       <Custom
         Action="CleanupIdentitySnapshot"
