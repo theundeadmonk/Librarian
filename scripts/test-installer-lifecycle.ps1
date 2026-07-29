@@ -1444,6 +1444,23 @@ try {
         Write-Host ""
         Write-Host "--- Tail: $($log.Name) ---"
         Get-Content -LiteralPath $log.FullName -Tail 80 -ErrorAction Continue
+        if ($log.Name -match "interrupted|rollback") {
+            Write-Host ""
+            Write-Host "--- Rollback actions: $($log.Name) ---"
+            Select-String `
+                -LiteralPath $log.FullName `
+                -Pattern (
+                    "Librarian setup:|" +
+                    "Action (start|ended).*" +
+                    "(SnapshotIdentity|RollbackIdentity|" +
+                    "RollbackCurrentUserIdentity|" +
+                    "RollbackIdentitySnapshotCleanup|" +
+                    "RegisterIdentity|RegisterCurrentUserIdentity|" +
+                    "ProvisionIdentity|WixFailWhenDeferred)"
+                ) `
+                -ErrorAction Continue |
+                ForEach-Object { Write-Host $_.Line }
+        }
     }
 } finally {
     try {

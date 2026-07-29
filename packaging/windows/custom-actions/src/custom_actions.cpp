@@ -47,6 +47,8 @@ namespace
         L"Librarian.Identity.msix.state"};
     constexpr std::wstring_view payload_hash_manifest_name{
         L"Librarian.PayloadHashes"};
+    constexpr unsigned package_removal_attempts{40U};
+    constexpr DWORD package_removal_retry_delay_ms{250U};
     using sha256_digest = std::array<std::uint8_t, 32>;
 
     struct identity_snapshot
@@ -1244,14 +1246,33 @@ namespace
         PackageManager const& manager,
         PackageVersion const& version)
     {
-        for (Package const& package : matching_packages(manager))
+        for (unsigned attempt = 0U;
+             attempt < package_removal_attempts;
+             ++attempt)
         {
-            if (comparable_version(package.Id().Version()) ==
-                comparable_version(version))
+            for (Package const& package : matching_packages(manager))
             {
-                remove_package(manager, package);
+                if (comparable_version(package.Id().Version()) ==
+                    comparable_version(version))
+                {
+                    remove_package(manager, package);
+                }
+            }
+
+            // Package deployment completion and cross-user enumeration can
+            // converge at different times. Do not reprovision the family
+            // while the incoming version is still visible, or Windows can
+            // select that higher version again.
+            if (!exact_package_exists(manager, version))
+            {
+                return;
+            }
+            if (attempt + 1U < package_removal_attempts)
+            {
+                Sleep(package_removal_retry_delay_ms);
             }
         }
+        fail(L"Setup could not remove the incoming identity package.");
     }
 
     void restore_system_identity(
