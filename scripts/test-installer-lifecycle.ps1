@@ -1444,7 +1444,7 @@ try {
         Write-Host ""
         Write-Host "--- Tail: $($log.Name) ---"
         Get-Content -LiteralPath $log.FullName -Tail 80 -ErrorAction Continue
-        if ($log.Name -match "interrupted|rollback") {
+        if ($log.Name -match "repair|upgrade|rollback|uninstall") {
             Write-Host ""
             Write-Host "--- Rollback actions: $($log.Name) ---"
             Select-String `

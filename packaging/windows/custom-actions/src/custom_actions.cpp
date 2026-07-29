@@ -513,7 +513,7 @@ namespace
         }
     }
 
-    void validate_payload_path(
+    void validate_identity_package_file(
         std::filesystem::path const& package_path,
         std::filesystem::path const& install_folder,
         std::wstring_view expected_name)
@@ -529,7 +529,17 @@ namespace
             package_path,
             false,
             L"Setup refused a redirected identity package.");
+    }
 
+    void validate_payload_path(
+        std::filesystem::path const& package_path,
+        std::filesystem::path const& install_folder,
+        std::wstring_view expected_name)
+    {
+        validate_identity_package_file(
+            package_path,
+            install_folder,
+            expected_name);
         for (std::wstring_view const name : required_executables)
         {
             std::filesystem::path const executable = install_folder / name;
@@ -1301,7 +1311,10 @@ namespace
         {
             std::filesystem::path const installed_package =
                 install_folder / L"Librarian.Identity.msix";
-            validate_payload(installed_package, install_folder);
+            validate_identity_package_file(
+                installed_package,
+                install_folder,
+                L"Librarian.Identity.msix");
             if (!CopyFileW(
                     installed_package.c_str(),
                     rollback_package.c_str(),
