@@ -796,6 +796,18 @@ try {
     $rollbackIdentity = Get-MsiSequence `
         -DatabasePath $resolvedMsi `
         -Action "RollbackIdentity"
+    $snapshotUnregisterIdentity = Get-MsiSequence `
+        -DatabasePath $resolvedMsi `
+        -Action "SnapshotUnregisterIdentity"
+    $rollbackUnregisterSnapshotCleanup = Get-MsiSequence `
+        -DatabasePath $resolvedMsi `
+        -Action "RollbackUnregisterSnapshotCleanup"
+    $rollbackUnregisterIdentity = Get-MsiSequence `
+        -DatabasePath $resolvedMsi `
+        -Action "RollbackUnregisterIdentity"
+    $rollbackUnregisterCurrentUserIdentity = Get-MsiSequence `
+        -DatabasePath $resolvedMsi `
+        -Action "RollbackUnregisterCurrentUserIdentity"
     $installFiles = Get-MsiSequence `
         -DatabasePath $resolvedMsi `
         -Action "InstallFiles"
@@ -827,12 +839,25 @@ try {
     Assert-True (
         $snapshotIdentity -gt $createFolders -and
         $rollbackSnapshotCleanup -gt $snapshotIdentity -and
-        $rollbackCurrentUserIdentity -gt $rollbackSnapshotCleanup -and
-        $rollbackIdentity -gt $rollbackCurrentUserIdentity -and
-        $rollbackIdentity -lt $installFiles
+        $rollbackIdentity -gt $rollbackSnapshotCleanup -and
+        $rollbackCurrentUserIdentity -gt $rollbackIdentity -and
+        $rollbackCurrentUserIdentity -lt $installFiles
     ) (
         "Identity snapshot and rollback actions must run in order after the " +
-        "protected directory exists and before product files are installed."
+        "protected directory exists. Reverse execution must restore the " +
+        "invoking user before the final system-wide identity state."
+    )
+    Assert-True (
+        $rollbackUnregisterSnapshotCleanup -gt
+            $snapshotUnregisterIdentity -and
+        $rollbackUnregisterIdentity -gt
+            $rollbackUnregisterSnapshotCleanup -and
+        $rollbackUnregisterCurrentUserIdentity -gt
+            $rollbackUnregisterIdentity -and
+        $rollbackUnregisterCurrentUserIdentity -lt $unregisterIdentity
+    ) (
+        "Uninstall rollback actions must restore the invoking user before " +
+        "the final system-wide identity state and snapshot cleanup."
     )
     Assert-True (
         $provisionIdentity -gt $registerCurrentUserIdentity -and

@@ -377,16 +377,19 @@
         Action="SnapshotIdentity"
         After="CreateFolders"
         Condition="NOT (REMOVE~=&quot;ALL&quot;)" />
+      <!-- Rollback actions execute in reverse sequence. Queue the system-wide
+           restore before the impersonated restore so it runs last and removes
+           any incoming package state the per-user operation can expose. -->
       <Custom
         Action="RollbackIdentitySnapshotCleanup"
-        Before="RollbackCurrentUserIdentity"
-        Condition="NOT (REMOVE~=&quot;ALL&quot;)" />
-      <Custom
-        Action="RollbackCurrentUserIdentity"
         Before="RollbackIdentity"
         Condition="NOT (REMOVE~=&quot;ALL&quot;)" />
       <Custom
         Action="RollbackIdentity"
+        Before="RollbackCurrentUserIdentity"
+        Condition="NOT (REMOVE~=&quot;ALL&quot;)" />
+      <Custom
+        Action="RollbackCurrentUserIdentity"
         Before="InstallFiles"
         Condition="NOT (REMOVE~=&quot;ALL&quot;)" />
       <Custom
@@ -405,16 +408,18 @@
         Action="SnapshotUnregisterIdentity"
         Before="RollbackUnregisterSnapshotCleanup"
         Condition="REMOVE~=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
+      <!-- Preserve the same per-user-then-system rollback execution order for
+           explicit uninstall transactions. -->
       <Custom
         Action="RollbackUnregisterSnapshotCleanup"
-        Before="RollbackUnregisterCurrentUserIdentity"
-        Condition="REMOVE~=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
-      <Custom
-        Action="RollbackUnregisterCurrentUserIdentity"
         Before="RollbackUnregisterIdentity"
         Condition="REMOVE~=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
       <Custom
         Action="RollbackUnregisterIdentity"
+        Before="RollbackUnregisterCurrentUserIdentity"
+        Condition="REMOVE~=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
+      <Custom
+        Action="RollbackUnregisterCurrentUserIdentity"
         Before="UnregisterIdentity"
         Condition="REMOVE~=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
       <Custom
