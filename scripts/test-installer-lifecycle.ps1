@@ -22,7 +22,9 @@ param(
     [string]$HighVersion = "0.2.0.0",
 
     [Parameter(Mandatory)]
-    [string]$LogDirectory
+    [string]$LogDirectory,
+
+    [switch]$SkipInteractiveDesktopLaunch
 )
 
 Set-StrictMode -Version Latest
@@ -980,31 +982,41 @@ try {
         -ExternalLocation $installFolder `
         -ExpectedVersion $LowVersion
 
-    $desktopProcess = Start-Process `
-        -FilePath (Join-Path $installFolder "Librarian.Windows.exe") `
-        -WorkingDirectory $installFolder `
-        -PassThru
-    try {
-        Start-Sleep -Seconds 3
-        $desktopProcess.Refresh()
-        if ($desktopProcess.HasExited) {
-            $desktopExitCode = $desktopProcess.ExitCode
-            $desktopExitCodeHex = "0x{0:X8}" -f (
-                [int64]$desktopExitCode -band 0xFFFFFFFFL
-            )
-            Assert-True (
-                $desktopExitCode -eq 0
-            ) (
-                "The installed desktop executable exited with code " +
-                "$desktopExitCode ($desktopExitCodeHex)."
+    if (-not $SkipInteractiveDesktopLaunch) {
+        if (-not [Environment]::UserInteractive) {
+            throw (
+                "Desktop launch validation requires an interactive Windows session. " +
+                "Use -SkipInteractiveDesktopLaunch only when a separate interactive " +
+                "Windows shell smoke test is required by the validation workflow."
             )
         }
-    } finally {
-        if (-not $desktopProcess.HasExited) {
-            Stop-Process -Id $desktopProcess.Id -Force
-            Wait-Process -Id $desktopProcess.Id -ErrorAction SilentlyContinue
+
+        $desktopProcess = Start-Process `
+            -FilePath (Join-Path $installFolder "Librarian.Windows.exe") `
+            -WorkingDirectory $installFolder `
+            -PassThru
+        try {
+            Start-Sleep -Seconds 3
+            $desktopProcess.Refresh()
+            if ($desktopProcess.HasExited) {
+                $desktopExitCode = $desktopProcess.ExitCode
+                $desktopExitCodeHex = "0x{0:X8}" -f (
+                    [int64]$desktopExitCode -band 0xFFFFFFFFL
+                )
+                Assert-True (
+                    $desktopExitCode -eq 0
+                ) (
+                    "The installed desktop executable exited with code " +
+                    "$desktopExitCode ($desktopExitCodeHex)."
+                )
+            }
+        } finally {
+            if (-not $desktopProcess.HasExited) {
+                Stop-Process -Id $desktopProcess.Id -Force
+                Wait-Process -Id $desktopProcess.Id -ErrorAction SilentlyContinue
+            }
+            $desktopProcess.Dispose()
         }
-        $desktopProcess.Dispose()
     }
 
     New-Item -ItemType Directory -Path $sentinelDirectory -Force | Out-Null
@@ -1467,7 +1479,13 @@ if ($null -ne $failure) {
 Write-Host ""
 Write-Host "Installer lifecycle validation passed."
 Write-Host "Unsigned and unexpected-provider installs: rejected"
-Write-Host "Clean install and launch: passed"
+Write-Host "Clean install: passed"
+if ($SkipInteractiveDesktopLaunch) {
+    Write-Host "Interactive desktop launch: delegated to test-windows-shell-ui.ps1"
+}
+else {
+    Write-Host "Interactive desktop launch: passed"
+}
 Write-Host "Browser opt-in and repair: passed"
 Write-Host "Interrupted repair and upgrade rollback: passed"
 Write-Host "Secondary-user identity upgrade retirement: passed"

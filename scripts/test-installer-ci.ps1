@@ -280,7 +280,8 @@ try {
         ) `
         -LowVersion $LowVersion `
         -HighVersion $HighVersion `
-        -LogDirectory $logRoot
+        -LogDirectory $logRoot `
+        -SkipInteractiveDesktopLaunch
 } catch {
     $failure = $_
 } finally {

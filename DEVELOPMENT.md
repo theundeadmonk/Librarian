@@ -82,6 +82,13 @@ development package registered from another location. If it creates the loose
 registration, it removes that registration when the test finishes; an existing
 registration for the same build layout is preserved.
 
+This interactive test is the authoritative desktop-launch check. GitHub-hosted
+Windows jobs exercise the signed MSI lifecycle in a disposable machine but do
+not own an interactive desktop session suitable for WinUI automation. Together,
+the local smoke test and CI lifecycle cover package-identity activation plus
+clean install, upgrade, repair, rollback, and removal without treating a
+developer workstation as disposable.
+
 Developer Mode and the matching Windows App Runtime are required. The official
 runtime installer is available from the
 [Windows App SDK downloads](https://learn.microsoft.com/windows/apps/windows-app-sdk/downloads)

@@ -116,15 +116,18 @@ certificate, trusts only its public certificate for the duration of the test,
 builds two signed versions, and removes both certificate-store entries in a
 `finally` block. It does not export a PFX or private key.
 
-The lifecycle suite rejects unsigned and unexpected-provider installs, launches
+The lifecycle suite rejects unsigned and unexpected-provider installs, validates
 a clean installation, opts into and repairs both browser registrations, rolls
 back injected repair and upgrade failures, upgrades a disposable secondary
 Windows account's provisioned identity, proves divergent registered and
 provisioned versions fail closed without state loss, rejects a downgrade,
 uninstalls, reinstalls, and confirms that a disposable per-user data sentinel
-survives every repair, update, and removal. The suite may mutate Program Files,
-HKLM, local accounts, package provisioning, and test profiles, so its CI guard
-must not be removed or bypassed for developer machines.
+survives every repair, update, and removal. The hosted runner deliberately
+delegates the interactive WinUI launch assertion to
+`scripts\test-windows-shell-ui.ps1`, which must run in an interactive Windows
+desktop after the Release build. The suite may mutate Program Files, HKLM,
+local accounts, package provisioning, and test profiles, so its CI guard must
+not be removed or bypassed for developer machines.
 
 Windows Installer Restart Manager remains enabled so repair and upgrade can
 coordinate processes that hold product files. The lifecycle suite requires a
