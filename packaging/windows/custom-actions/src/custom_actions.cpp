@@ -1155,8 +1155,11 @@ namespace
         PackageManager const& manager,
         Package const& package)
     {
-        winrt::hstring const family_name = package.Id().FamilyName();
-        deprovision_package_family(manager, family_name);
+        if (package_is_provisioned(manager, package))
+        {
+            winrt::hstring const family_name = package.Id().FamilyName();
+            deprovision_package_family(manager, family_name);
+        }
         remove_package_for_all_users(
             manager,
             package,
