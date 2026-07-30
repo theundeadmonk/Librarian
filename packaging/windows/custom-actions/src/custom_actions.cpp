@@ -54,8 +54,8 @@ namespace
         L"Librarian.Identity.rollback.msix"};
     constexpr std::wstring_view payload_hash_manifest_name{
         L"Librarian.PayloadHashes"};
-    constexpr unsigned package_removal_attempts{40U};
-    constexpr DWORD package_removal_retry_delay_ms{250U};
+    constexpr unsigned package_state_convergence_attempts{40U};
+    constexpr DWORD package_state_retry_delay_ms{250U};
     using sha256_digest = std::array<std::uint8_t, 32>;
 
     struct identity_snapshot
@@ -982,6 +982,37 @@ namespace
             });
     }
 
+    void ensure_package_provisioned(
+        PackageManager const& manager,
+        Package const& package,
+        std::wstring_view operation)
+    {
+        for (unsigned attempt = 0U;
+             attempt < package_state_convergence_attempts;
+             ++attempt)
+        {
+            if (package_is_provisioned(manager, package))
+            {
+                return;
+            }
+            DeploymentResult const provisioned =
+                manager
+                    .ProvisionPackageForAllUsersAsync(
+                        package.Id().FamilyName())
+                    .get();
+            check_deployment_result(provisioned, operation);
+            if (package_is_provisioned(manager, package))
+            {
+                return;
+            }
+            if (attempt + 1U < package_state_convergence_attempts)
+            {
+                Sleep(package_state_retry_delay_ms);
+            }
+        }
+        fail(L"Setup could not verify identity package provisioning.");
+    }
+
     bool package_is_registered_for_user(
         PackageManager const& manager,
         Package const& package,
@@ -1601,7 +1632,7 @@ namespace
         PackageVersion const& version)
     {
         for (unsigned attempt = 0U;
-             attempt < package_removal_attempts;
+             attempt < package_state_convergence_attempts;
              ++attempt)
         {
             for (Package const& package : matching_packages(manager))
@@ -1621,9 +1652,9 @@ namespace
             {
                 return;
             }
-            if (attempt + 1U < package_removal_attempts)
+            if (attempt + 1U < package_state_convergence_attempts)
             {
-                Sleep(package_removal_retry_delay_ms);
+                Sleep(package_state_retry_delay_ms);
             }
         }
         fail(L"Setup could not remove the incoming identity package.");
@@ -1726,13 +1757,9 @@ namespace
         if (snapshot.provisioned &&
             !package_is_provisioned(manager, previous))
         {
-            DeploymentResult const provisioned =
-                manager
-                    .ProvisionPackageForAllUsersAsync(
-                        previous.Id().FamilyName())
-                    .get();
-            check_deployment_result(
-                provisioned,
+            ensure_package_provisioned(
+                manager,
+                previous,
                 L"Previous identity package provisioning");
         }
         else if (!snapshot.provisioned &&
@@ -1750,9 +1777,24 @@ namespace
     {
         std::uint64_t const installed =
             comparable_version(installed_version);
-        for (Package const& package : matching_packages(manager))
+        std::vector<Package> const packages = matching_packages(manager);
+        auto const superseded = [installed](Package const& package) {
+            return comparable_version(package.Id().Version()) < installed;
+        };
+        auto const provisioned_superseded =
+            [&manager, &superseded](Package const& package) {
+                return superseded(package) &&
+                       package_is_provisioned(manager, package);
+            };
+        if (std::ranges::any_of(packages, provisioned_superseded))
         {
-            if (comparable_version(package.Id().Version()) < installed)
+            deprovision_package_family(
+                manager,
+                packages.front().Id().FamilyName());
+        }
+        for (Package const& package : packages)
+        {
+            if (superseded(package))
             {
                 // The incoming package is already staged and registered for
                 // the invoking user. Retire older registrations only in the
@@ -1884,12 +1926,9 @@ extern "C" __declspec(dllexport) UINT __stdcall ProvisionIdentity(
         Package const package = find_exact_package(manager, data.version);
         validate_external_location(package, data.install_folder);
         retire_superseded_packages(manager, data.version);
-        DeploymentResult const provisioned =
-            manager
-                .ProvisionPackageForAllUsersAsync(package.Id().FamilyName())
-                .get();
-        check_deployment_result(
-            provisioned,
+        ensure_package_provisioned(
+            manager,
+            package,
             L"Identity package provisioning");
     });
 }

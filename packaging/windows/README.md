@@ -104,10 +104,12 @@ installed beside the binaries. Only that manifest's SHA-256 is passed through
 the bounded deferred custom-action data. Each identity action validates the
 protected manifest path, rejects reparse points, verifies the manifest hash,
 and then verifies every identity-bound payload before changing package state.
-After an upgrade commits and provisions the incoming identity, setup retires
-superseded all-user registrations so a later repair never encounters multiple
-versions of the same package family. Users who were not running setup receive
-the already-provisioned incoming version at their next sign-in.
+After an upgrade commits, setup explicitly deprovisions the old identity
+family, retires superseded all-user registrations, provisions the incoming
+identity, and verifies that Windows exposes the expected provisioning record.
+A bounded retry handles deployment-enumeration convergence. This keeps later
+repairs single-versioned, and users who were not running setup receive the
+already-provisioned incoming version at their next sign-in.
 
 The same disposable Windows runner then executes
 `scripts\test-installer-ci.ps1`. That entry point refuses to run anywhere
