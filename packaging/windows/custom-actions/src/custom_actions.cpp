@@ -879,13 +879,15 @@ namespace
 
     Package find_exact_package(
         PackageManager const& manager,
-        PackageVersion const& expected)
+        PackageVersion const& expected,
+        bool allow_newer = false)
     {
         Package exact{nullptr};
         for (Package const& package : matching_packages(manager))
         {
             PackageVersion const actual = package.Id().Version();
-            if (comparable_version(actual) > comparable_version(expected))
+            if (!allow_newer &&
+                comparable_version(actual) > comparable_version(expected))
             {
                 fail(
                     L"Setup refused to replace a newer identity package.");
@@ -1220,7 +1222,8 @@ namespace
             check_deployment_result(staged, L"Identity package staging");
         }
 
-        Package const package = find_exact_package(manager, version);
+        Package const package =
+            find_exact_package(manager, version, rollback_source);
         validate_external_location(package, install_folder);
         return package;
     }
@@ -1271,7 +1274,8 @@ namespace
         validate_rollback_payload(package_path, install_folder);
         if (exact_package_exists(manager, version))
         {
-            Package const existing = find_exact_package(manager, version);
+            Package const existing =
+                find_exact_package(manager, version, true);
             validate_external_location(existing, install_folder);
             if (package_is_registered_for_user(manager, existing, L""))
             {
@@ -1290,7 +1294,7 @@ namespace
             registered,
             L"Previous invoking-user identity registration");
 
-        Package const package = find_exact_package(manager, version);
+        Package const package = find_exact_package(manager, version, true);
         validate_external_location(package, install_folder);
         if (!package_is_registered_for_user(manager, package, L""))
         {
