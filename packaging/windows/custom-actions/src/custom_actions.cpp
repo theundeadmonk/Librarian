@@ -75,6 +75,11 @@ namespace
         sha256_digest identity_package{};
     };
 
+    struct validation_error
+    {
+        std::wstring message;
+    };
+
     void log_message(
         MSIHANDLE installer,
         INSTALLMESSAGE kind,
@@ -95,8 +100,7 @@ namespace
 
     [[noreturn]] void fail(std::wstring_view message)
     {
-        throw std::runtime_error(
-            std::filesystem::path{message}.string());
+        throw validation_error{std::wstring{message}};
     }
 
     struct file_handle
@@ -1206,6 +1210,7 @@ namespace
             }
             StagePackageOptions const options;
             options.ExternalLocationUri(Uri{install_folder.c_str()});
+            options.ForceUpdateFromAnyVersion(rollback_source);
             DeploymentResult const staged =
                 manager
                     .StagePackageByUriAsync(
@@ -1276,6 +1281,7 @@ namespace
 
         AddPackageOptions const options;
         options.ExternalLocationUri(Uri{install_folder.c_str()});
+        options.ForceUpdateFromAnyVersion(true);
         DeploymentResult const registered =
             manager.AddPackageByUriAsync(
                 Uri{package_path.c_str()},
@@ -1322,6 +1328,14 @@ namespace
                 static_cast<unsigned>(error.code().value)));
             message.append(code);
             message.append(L").");
+            log_message(installer, INSTALLMESSAGE_ERROR, message);
+        }
+        catch (validation_error const& error)
+        {
+            std::wstring message{L"Librarian setup: "};
+            message.append(label);
+            message.append(L" failed validation: ");
+            message.append(error.message);
             log_message(installer, INSTALLMESSAGE_ERROR, message);
         }
         catch (std::exception const&)
