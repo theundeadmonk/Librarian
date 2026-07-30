@@ -1973,7 +1973,21 @@ extern "C" __declspec(dllexport) UINT __stdcall UnregisterIdentity(
             split_data(get_property(installer, L"CustomActionData"), 1);
         PackageVersion const installed_version = parse_version(fields[0]);
         PackageManager const manager;
-        for (Package const& package : matching_packages(manager))
+        std::vector<Package> const packages = matching_packages(manager);
+        if (std::ranges::any_of(
+                packages,
+                [&installed_version](Package const& package) {
+                    return comparable_version(package.Id().Version()) >
+                           comparable_version(installed_version);
+                }))
+        {
+            // Burn removes the superseded bundle after the newer MSI commits.
+            // Removing any older package for all users can also clear the
+            // newer package's family provisioning, so the newer product owns
+            // all identity cleanup from this point forward.
+            return;
+        }
+        for (Package const& package : packages)
         {
             if (comparable_version(package.Id().Version()) <=
                 comparable_version(installed_version))
