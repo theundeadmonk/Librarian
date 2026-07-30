@@ -860,13 +860,13 @@ try {
         $snapshotIdentity -gt $createFolders -and
         $snapshotIdentity -lt $installFiles -and
         $rollbackSnapshotCleanup -gt $installFiles -and
-        $rollbackCurrentUserIdentity -gt $rollbackSnapshotCleanup -and
-        $rollbackIdentity -gt $rollbackCurrentUserIdentity -and
-        $rollbackIdentity -lt $registerCurrentUserIdentity
+        $rollbackIdentity -gt $rollbackSnapshotCleanup -and
+        $rollbackCurrentUserIdentity -gt $rollbackIdentity -and
+        $rollbackCurrentUserIdentity -lt $registerCurrentUserIdentity
     ) (
         "Identity state must be preserved before InstallFiles. Rollback " +
-        "actions must then be queued before registration so reverse execution " +
-        "restores identity before product files roll back."
+        "actions must remove the invoking-user upgrade registration before " +
+        "the system restore and before product files roll back."
     )
     Assert-True (
         $snapshotUnregisterIdentity -lt $removeFiles -and
