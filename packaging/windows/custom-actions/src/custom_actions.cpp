@@ -1754,10 +1754,10 @@ namespace
         {
             if (comparable_version(package.Id().Version()) < installed)
             {
-                // The incoming package is already staged, registered for the
-                // invoking user, and provisioned for every user. Retire older
-                // registrations only in the checked commit phase, after MSI
-                // rollback can no longer be required.
+                // The incoming package is already staged and registered for
+                // the invoking user. Retire older registrations only in the
+                // checked commit phase, then provision the incoming package
+                // after these family-affecting removals are complete.
                 remove_package_for_all_users(
                     manager,
                     package,
@@ -1883,6 +1883,7 @@ extern "C" __declspec(dllexport) UINT __stdcall ProvisionIdentity(
         reject_newer_packages(manager, data.version);
         Package const package = find_exact_package(manager, data.version);
         validate_external_location(package, data.install_folder);
+        retire_superseded_packages(manager, data.version);
         DeploymentResult const provisioned =
             manager
                 .ProvisionPackageForAllUsersAsync(package.Id().FamilyName())
@@ -1890,7 +1891,6 @@ extern "C" __declspec(dllexport) UINT __stdcall ProvisionIdentity(
         check_deployment_result(
             provisioned,
             L"Identity package provisioning");
-        retire_superseded_packages(manager, data.version);
     });
 }
 
