@@ -150,6 +150,31 @@ function Invoke-FailingProcess {
     ) "$Label unexpectedly succeeded."
 }
 
+function Write-MsiFailureContext {
+    param(
+        [Parameter(Mandatory)]
+        [IO.FileInfo]$Log
+    )
+
+    $lines = @(Get-Content -LiteralPath $Log.FullName -ErrorAction Continue)
+    $failureIndex = $null
+    for ($index = 0; $index -lt $lines.Count; $index++) {
+        if ($lines[$index] -match "Return value 3") {
+            $failureIndex = $index
+            break
+        }
+    }
+    if ($null -eq $failureIndex) {
+        return
+    }
+
+    $contextStart = [Math]::Max(0, $failureIndex - 40)
+    $contextEnd = [Math]::Min($lines.Count - 1, $failureIndex + 15)
+    Write-Host ""
+    Write-Host "--- MSI failure context: $($Log.Name) ---"
+    $lines[$contextStart..$contextEnd] | ForEach-Object { Write-Host $_ }
+}
+
 function Invoke-DisposableUserPowerShell {
     param(
         [Parameter(Mandatory)]
@@ -1377,6 +1402,9 @@ try {
             Where-Object { $_.Name -ne "lifecycle-console.log" }
     )
     foreach ($log in $diagnosticLogs) {
+        if ($log.Name -match "LibrarianPackage\.log$") {
+            Write-MsiFailureContext -Log $log
+        }
         Write-Host ""
         Write-Host "--- Tail: $($log.Name) ---"
         Get-Content -LiteralPath $log.FullName -Tail 80 -ErrorAction Continue
