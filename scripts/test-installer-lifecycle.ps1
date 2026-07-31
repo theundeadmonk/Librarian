@@ -316,6 +316,7 @@ function Invoke-DisposableUserIdentityProbe {
 
     $probe = @"
 `$ErrorActionPreference = "Stop"
+`$versions = @()
 `$deadline = [DateTime]::UtcNow.AddSeconds(20)
 do {
     `$versions = @(
@@ -328,6 +329,16 @@ do {
     }
     Start-Sleep -Milliseconds 500
 } while ([DateTime]::UtcNow -lt `$deadline)
+`$observedVersions = if (`$versions.Count -eq 0) {
+    "<none>"
+}
+else {
+    `$versions -join ", "
+}
+[Console]::Error.WriteLine(
+    "Timed out waiting for Librarian identity version '$ExpectedVersion'. " +
+    "Observed versions: `$observedVersions."
+)
 exit 1
 "@
     $result = Invoke-DisposableUserPowerShell `
@@ -372,19 +383,16 @@ try {
         if (-not [string]::IsNullOrWhiteSpace(`$launcherError)) {
             [Console]::Error.WriteLine(`$launcherError.TrimEnd())
         }
+        else {
+            [Console]::Error.WriteLine(
+                "The Librarian identity launcher exited with code `$launcherExitCode without a diagnostic."
+            )
+        }
         exit `$launcherExitCode
     }
 }
 finally {
     Remove-Item -LiteralPath `$launcherErrorPath -Force -ErrorAction SilentlyContinue
-}
-`$versions = @(
-    Get-AppxPackage -Name "TheUndeadMonk.Librarian.Development" |
-        ForEach-Object { `$_.Version.ToString() } |
-        Sort-Object -Unique
-)
-if (`$versions.Count -ne 1 -or `$versions[0] -ne "$ExpectedVersion") {
-    exit 1
 }
 exit 0
 "@
@@ -394,8 +402,8 @@ exit 0
     Assert-True (
         $result.ExitCode -eq 0
     ) (
-        "The disposable secondary user's Librarian identity launcher did " +
-        "not converge to version '$ExpectedVersion'. Probe error: " +
+        "The disposable secondary user's Librarian identity launcher failed " +
+        "while registering version '$ExpectedVersion'. Launcher error: " +
         $result.Diagnostic
     )
 }
@@ -1077,6 +1085,9 @@ try {
     Invoke-DisposableUserIdentityLauncher `
         -Credential $disposableUserCredential `
         -LauncherPath $identityLauncher `
+        -ExpectedVersion $LowVersion
+    Invoke-DisposableUserIdentityProbe `
+        -Credential $disposableUserCredential `
         -ExpectedVersion $LowVersion
 
     if (-not $SkipInteractiveDesktopLaunch) {
