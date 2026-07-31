@@ -36,12 +36,22 @@ namespace
         L"TheUndeadMonk.Librarian.Development"};
     constexpr std::wstring_view package_publisher{
         L"CN=Librarian Development"};
-    constexpr std::array<std::wstring_view, 5> payload_files{
+    constexpr std::array<std::wstring_view, 5> signed_payload_files{
         L"Librarian.IdentityLauncher.exe",
         L"Librarian.Windows.exe",
         L"Librarian.VaultAgent.exe",
         L"Librarian.ChromiumNativeHost.exe",
         L"Librarian.Identity.msix",
+    };
+    constexpr std::array<std::wstring_view, 8> required_payload_files{
+        L"Librarian.IdentityLauncher.exe",
+        L"Librarian.Windows.exe",
+        L"Librarian.VaultAgent.exe",
+        L"Librarian.ChromiumNativeHost.exe",
+        L"Librarian.Identity.msix",
+        L"Librarian.Release.json",
+        L"com.theundeadmonk.librarian.chrome.json",
+        L"com.theundeadmonk.librarian.edge.json",
     };
     constexpr std::wstring_view payload_hash_manifest_name{
         L"Librarian.PayloadHashes"};
@@ -688,10 +698,10 @@ namespace
         std::wstring const extension = file_name.extension().native();
         if (_wcsicmp(extension.c_str(), L".exe") != 0 &&
             _wcsicmp(extension.c_str(), L".dll") != 0 &&
-            _wcsicmp(extension.c_str(), L".msix") != 0)
+            _wcsicmp(extension.c_str(), L".msix") != 0 &&
+            _wcsicmp(extension.c_str(), L".json") != 0)
         {
-            fail(
-                L"Setup received a non-executable payload manifest entry.");
+            fail(L"Setup received an unsupported payload manifest entry.");
         }
         return file_name;
     }
@@ -876,7 +886,7 @@ namespace
                 .hash = parse_sha256(fields[4U + index * 2U]),
             });
         }
-        for (std::wstring_view const required : payload_files)
+        for (std::wstring_view const required : required_payload_files)
         {
             if (!std::ranges::any_of(
                     manifest.files,
@@ -913,7 +923,7 @@ namespace
         sha256_digest const setup_signer = trusted_signer_hash(
             current_module_path(),
             L"Setup refused an untrusted validation module.");
-        for (std::wstring_view const name : payload_files)
+        for (std::wstring_view const name : signed_payload_files)
         {
             std::filesystem::path const path =
                 data.install_folder / name;
@@ -957,12 +967,12 @@ namespace
             if (!std::filesystem::is_regular_file(path))
             {
                 fail(
-                    L"Setup refused an incomplete executable dependency "
+                    L"Setup refused an incomplete integrity-bound payload "
                     L"set.");
             }
             reject_reparse_chain(
                 path,
-                L"Setup refused a redirected executable dependency set.");
+                L"Setup refused a redirected integrity-bound payload set.");
             if (hash_file(path) != entry.hash)
             {
                 fail(

@@ -202,6 +202,37 @@ function Invoke-CurrentUserIdentityLauncher {
     )
 }
 
+function Invoke-CurrentUserNativeHostLauncher {
+    param(
+        [Parameter(Mandatory)]
+        [string]$LauncherPath,
+
+        [Parameter(Mandatory)]
+        [ValidatePattern("^chrome-extension://[a-p]{32}/$")]
+        [string]$Origin,
+
+        [Parameter(Mandatory)]
+        [ValidatePattern("^\d+\.\d+\.\d+\.\d+$")]
+        [string]$ExpectedVersion
+    )
+
+    Invoke-SuccessfulProcess `
+        -Label "Converge identity through browser native-host activation" `
+        -FilePath $LauncherPath `
+        -Arguments @($Origin, "--parent-window=0")
+    $versions = @(
+        Get-LibrarianCurrentUserPackages |
+            ForEach-Object { $_.Version.ToString() } |
+            Sort-Object -Unique
+    )
+    Assert-True (
+        $versions.Count -eq 1 -and $versions[0] -eq $ExpectedVersion
+    ) (
+        "The browser native-host launcher did not converge the invoking " +
+        "user's identity to version '$ExpectedVersion'."
+    )
+}
+
 function Get-VisibleArpEntries {
     $entries = @()
     foreach ($root in @(
@@ -317,6 +348,17 @@ function Assert-BrowserState {
         }
     )) {
         $manifestPath = Join-Path $InstallFolder $browser.Manifest
+        Assert-True (
+            (Test-Path -LiteralPath $manifestPath -PathType Leaf)
+        ) "$($browser.Name) native-messaging manifest is missing."
+        $manifest = Get-Content -LiteralPath $manifestPath -Raw |
+            ConvertFrom-Json
+        Assert-True (
+            $manifest.name -eq "com.theundeadmonk.librarian" -and
+            $manifest.path -eq "Librarian.IdentityLauncher.exe" -and
+            @($manifest.allowed_origins).Count -eq 1 -and
+            @($manifest.allowed_origins)[0] -eq $browser.Origin
+        ) "$($browser.Name) native-messaging manifest is unsafe."
         if ($Expected) {
             $actualRegistryValue = Get-RegistryDefaultValue `
                 -Path $browser.RegistryPath
@@ -326,24 +368,10 @@ function Assert-BrowserState {
                 "$($browser.Name) native-messaging registration is incorrect. " +
                 "Expected '$manifestPath'; found '$actualRegistryValue'."
             )
-            Assert-True (
-                (Test-Path -LiteralPath $manifestPath -PathType Leaf)
-            ) "$($browser.Name) native-messaging manifest is missing."
-            $manifest = Get-Content -LiteralPath $manifestPath -Raw |
-                ConvertFrom-Json
-            Assert-True (
-                $manifest.name -eq "com.theundeadmonk.librarian" -and
-                $manifest.path -eq "Librarian.ChromiumNativeHost.exe" -and
-                @($manifest.allowed_origins).Count -eq 1 -and
-                @($manifest.allowed_origins)[0] -eq $browser.Origin
-            ) "$($browser.Name) native-messaging manifest is unsafe."
         } else {
             Assert-True (
                 -not (Test-Path -LiteralPath $browser.RegistryPath)
             ) "$($browser.Name) integration was registered without opt-in."
-            Assert-True (
-                -not (Test-Path -LiteralPath $manifestPath)
-            ) "$($browser.Name) manifest was installed without opt-in."
         }
     }
 }
@@ -383,7 +411,9 @@ function Assert-Installed {
         "Librarian.ChromiumNativeHost.exe",
         "Librarian.Identity.msix",
         "Librarian.PayloadHashes",
-        "Librarian.Release.json"
+        "Librarian.Release.json",
+        "com.theundeadmonk.librarian.chrome.json",
+        "com.theundeadmonk.librarian.edge.json"
     )) {
         Assert-True (
             (Test-Path -LiteralPath (Join-Path $InstallFolder $name) -PathType Leaf)
@@ -983,8 +1013,9 @@ try {
         -ExpectedCurrentUserIdentityVersion $LowVersion
     Assert-Sentinel -Path $sentinelPath -Expected $sentinelValue
 
-    Invoke-CurrentUserIdentityLauncher `
+    Invoke-CurrentUserNativeHostLauncher `
         -LauncherPath $identityLauncher `
+        -Origin "chrome-extension://abcdefghijklmnopabcdefghijklmnop/" `
         -ExpectedVersion $HighVersion
     Invoke-SuccessfulProcess `
         -Label "Repair with current-user identity" `

@@ -139,6 +139,24 @@
           Source="$(var.PayloadDir)\Librarian.PayloadHashes"
           KeyPath="yes" />
       </Component>
+      <Component
+        Id="ChromeNativeHostManifestFile"
+        Directory="INSTALLFOLDER"
+        Guid="{568004E8-5DB4-40DB-B862-91CCD4BE29F3}">
+        <File
+          Id="ChromeNativeHostManifest"
+          Source="$(var.BrowserManifestDir)\com.theundeadmonk.librarian.chrome.json"
+          KeyPath="yes" />
+      </Component>
+      <Component
+        Id="EdgeNativeHostManifestFile"
+        Directory="INSTALLFOLDER"
+        Guid="{290C27FD-6338-48B8-9E8A-3434B4396795}">
+        <File
+          Id="EdgeNativeHostManifest"
+          Source="$(var.BrowserManifestDir)\com.theundeadmonk.librarian.edge.json"
+          KeyPath="yes" />
+      </Component>
       <Files
         Include="$(var.PayloadDir)\**"
         Directory="INSTALLFOLDER">
@@ -161,12 +179,9 @@
       Level="0">
       <Level Value="2" Condition="CHROME_MACHINE OR CHROME_USER" />
       <Component
-        Id="ChromeNativeHostManifestFile"
+        Id="ChromeNativeHostRegistration"
         Directory="INSTALLFOLDER"
-        Guid="{568004E8-5DB4-40DB-B862-91CCD4BE29F3}">
-        <File
-          Id="ChromeNativeHostManifest"
-          Source="$(var.BrowserManifestDir)\com.theundeadmonk.librarian.chrome.json" />
+        Guid="*">
         <RegistryValue
           Root="HKLM"
           Key="SOFTWARE\Google\Chrome\NativeMessagingHosts\com.theundeadmonk.librarian"
@@ -186,12 +201,9 @@
       Level="0">
       <Level Value="2" Condition="EDGE_MACHINE OR EDGE_USER" />
       <Component
-        Id="EdgeNativeHostManifestFile"
+        Id="EdgeNativeHostRegistration"
         Directory="INSTALLFOLDER"
-        Guid="{290C27FD-6338-48B8-9E8A-3434B4396795}">
-        <File
-          Id="EdgeNativeHostManifest"
-          Source="$(var.BrowserManifestDir)\com.theundeadmonk.librarian.edge.json" />
+        Guid="*">
         <RegistryValue
           Root="HKLM"
           Key="SOFTWARE\Microsoft\Edge\NativeMessagingHosts\com.theundeadmonk.librarian"

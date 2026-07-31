@@ -33,12 +33,22 @@ namespace
         L"TheUndeadMonk.Librarian.Development"};
     constexpr std::wstring_view package_publisher{
         L"CN=Librarian Development"};
-    constexpr std::array<std::wstring_view, 5> payload_files{
+    constexpr std::array<std::wstring_view, 5> signed_payload_files{
         L"Librarian.IdentityLauncher.exe",
         L"Librarian.Windows.exe",
         L"Librarian.VaultAgent.exe",
         L"Librarian.ChromiumNativeHost.exe",
         L"Librarian.Identity.msix",
+    };
+    constexpr std::array<std::wstring_view, 8> required_payload_files{
+        L"Librarian.IdentityLauncher.exe",
+        L"Librarian.Windows.exe",
+        L"Librarian.VaultAgent.exe",
+        L"Librarian.ChromiumNativeHost.exe",
+        L"Librarian.Identity.msix",
+        L"Librarian.Release.json",
+        L"com.theundeadmonk.librarian.chrome.json",
+        L"com.theundeadmonk.librarian.edge.json",
     };
     constexpr std::wstring_view payload_manifest_name{
         L"Librarian.PayloadHashes"};
@@ -56,10 +66,13 @@ namespace
         HANDLE value{INVALID_HANDLE_VALUE};
 
         file_handle() = default;
+        explicit file_handle(HANDLE initial) : value(initial)
+        {
+        }
 
         ~file_handle()
         {
-            if (value != INVALID_HANDLE_VALUE)
+            if (value != nullptr && value != INVALID_HANDLE_VALUE)
             {
                 CloseHandle(value);
             }
@@ -224,7 +237,7 @@ namespace
         std::filesystem::path const install_folder =
             launcher.parent_path();
         if (!paths_equal(install_folder, required_install_folder()) ||
-            launcher.filename().native() != payload_files[0] ||
+            launcher.filename().native() != signed_payload_files[0] ||
             !std::filesystem::is_directory(install_folder))
         {
             fail(
@@ -233,7 +246,7 @@ namespace
         }
         reject_reparse_chain(install_folder);
 
-        for (std::wstring_view const name : payload_files)
+        for (std::wstring_view const name : required_payload_files)
         {
             std::filesystem::path const path = install_folder / name;
             if (!std::filesystem::is_regular_file(path))
@@ -331,10 +344,10 @@ namespace
         std::wstring const extension = file_name.extension().native();
         if (_wcsicmp(extension.c_str(), L".exe") != 0 &&
             _wcsicmp(extension.c_str(), L".dll") != 0 &&
-            _wcsicmp(extension.c_str(), L".msix") != 0)
+            _wcsicmp(extension.c_str(), L".msix") != 0 &&
+            _wcsicmp(extension.c_str(), L".json") != 0)
         {
-            fail(
-                L"Librarian found a non-executable payload manifest entry.");
+            fail(L"Librarian found an unsupported payload manifest entry.");
         }
         return file_name;
     }
@@ -468,7 +481,7 @@ namespace
                 .hash = parse_sha256(fields[4U + index * 2U]),
             });
         }
-        for (std::wstring_view const required : payload_files)
+        for (std::wstring_view const required : required_payload_files)
         {
             if (!std::ranges::any_of(
                     manifest.files,
@@ -577,7 +590,7 @@ namespace
             if (!std::filesystem::is_regular_file(path))
             {
                 fail(
-                    L"Librarian found an incomplete executable dependency "
+                    L"Librarian found an incomplete integrity-bound payload "
                     L"set.");
             }
             reject_reparse_chain(path);
@@ -762,14 +775,137 @@ namespace
         }
     }
 
+    bool is_native_messaging_origin(std::wstring_view value)
+    {
+        constexpr std::wstring_view prefix{L"chrome-extension://"};
+        if (!value.starts_with(prefix) ||
+            value.size() != prefix.size() + 32U + 1U ||
+            value.back() != L'/')
+        {
+            return false;
+        }
+        std::wstring_view const extension_id =
+            value.substr(prefix.size(), 32U);
+        return std::ranges::all_of(
+            extension_id,
+            [](wchar_t character) {
+                return character >= L'a' && character <= L'p';
+            });
+    }
+
+    bool is_parent_window_argument(std::wstring_view value)
+    {
+        constexpr std::wstring_view prefix{L"--parent-window="};
+        if (!value.starts_with(prefix))
+        {
+            return false;
+        }
+        std::wstring_view const handle = value.substr(prefix.size());
+        return !handle.empty() && handle.size() <= 20U &&
+               std::ranges::all_of(
+                   handle,
+                   [](wchar_t character) {
+                       return character >= L'0' && character <= L'9';
+                   });
+    }
+
+    std::wstring quote_argument(std::wstring_view value)
+    {
+        if (value.empty() || value.find(L'"') != std::wstring_view::npos)
+        {
+            fail(L"Librarian refused an unsafe native-host argument.");
+        }
+        std::wstring quoted{L"\""};
+        quoted.append(value);
+        quoted.push_back(L'"');
+        return quoted;
+    }
+
+    int launch_native_host(
+        std::filesystem::path const& install_folder,
+        std::vector<std::wstring> const& arguments)
+    {
+        if (arguments.size() != 2U)
+        {
+            fail(L"Librarian received an invalid native-host request.");
+        }
+        for (DWORD const standard_handle_id : {
+                 STD_INPUT_HANDLE,
+                 STD_OUTPUT_HANDLE})
+        {
+            HANDLE const standard_handle =
+                GetStdHandle(standard_handle_id);
+            if (standard_handle == nullptr ||
+                standard_handle == INVALID_HANDLE_VALUE ||
+                !SetHandleInformation(
+                    standard_handle,
+                    HANDLE_FLAG_INHERIT,
+                    HANDLE_FLAG_INHERIT))
+            {
+                fail(
+                    L"Librarian could not preserve the browser messaging "
+                    L"channel.");
+            }
+        }
+
+        std::filesystem::path const host =
+            install_folder / L"Librarian.ChromiumNativeHost.exe";
+        std::wstring command_line = quote_argument(host.native());
+        for (std::wstring const& argument : arguments)
+        {
+            command_line.push_back(L' ');
+            command_line.append(quote_argument(argument));
+        }
+
+        STARTUPINFOW startup{};
+        startup.cb = sizeof(startup);
+        PROCESS_INFORMATION information{};
+        if (!CreateProcessW(
+                host.c_str(),
+                command_line.data(),
+                nullptr,
+                nullptr,
+                TRUE,
+                CREATE_NO_WINDOW,
+                nullptr,
+                install_folder.c_str(),
+                &startup,
+                &information))
+        {
+            fail(L"Librarian could not start its browser bridge.");
+        }
+        file_handle const process{information.hProcess};
+        file_handle const thread{information.hThread};
+
+        if (WaitForSingleObject(process.value, INFINITE) != WAIT_OBJECT_0)
+        {
+            fail(L"Librarian could not wait for its browser bridge.");
+        }
+        DWORD exit_code = 0U;
+        if (!GetExitCodeProcess(process.value, &exit_code))
+        {
+            fail(L"Librarian could not read its browser bridge result.");
+        }
+        return exit_code <= static_cast<DWORD>(INT_MAX) ?
+                   static_cast<int>(exit_code) :
+                   1;
+    }
+
     enum class operation
     {
         launch,
         register_only,
         unregister,
+        native_host,
     };
 
-    operation parse_operation()
+    struct launch_request
+    {
+        operation requested{operation::launch};
+        std::vector<std::wstring> native_host_arguments;
+    };
+
+    launch_request parse_request()
     {
         int argument_count = 0;
         LPWSTR* arguments = CommandLineToArgvW(
@@ -790,17 +926,29 @@ namespace
 
         if (argument_count == 1)
         {
-            return operation::launch;
+            return {};
         }
         if (argument_count == 2 &&
             wcscmp(arguments[1], L"--register-only") == 0)
         {
-            return operation::register_only;
+            return {.requested = operation::register_only};
         }
         if (argument_count == 2 &&
             wcscmp(arguments[1], L"--unregister") == 0)
         {
-            return operation::unregister;
+            return {.requested = operation::unregister};
+        }
+        if (argument_count == 3 &&
+            is_native_messaging_origin(arguments[1]) &&
+            is_parent_window_argument(arguments[2]))
+        {
+            return {
+                .requested = operation::native_host,
+                .native_host_arguments = {
+                    arguments[1],
+                    arguments[2],
+                },
+            };
         }
         fail(L"Librarian received an unsupported launcher argument.");
     }
@@ -889,7 +1037,8 @@ int WINAPI wWinMain(
     try
     {
         winrt::init_apartment(winrt::apartment_type::multi_threaded);
-        requested = parse_operation();
+        launch_request const request = parse_request();
+        requested = request.requested;
         if (requested == operation::unregister)
         {
             remove_current_user_identity();
@@ -906,6 +1055,12 @@ int WINAPI wWinMain(
         if (requested == operation::launch)
         {
             launch_desktop(install_folder);
+        }
+        else if (requested == operation::native_host)
+        {
+            return launch_native_host(
+                install_folder,
+                request.native_host_arguments);
         }
         return 0;
     }

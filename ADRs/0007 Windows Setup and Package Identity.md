@@ -124,6 +124,14 @@ payload version. The first successful desktop launch therefore registers all
 application identities declared by the package without a second download, an
 administrator prompt, PowerShell, or manual package-management step.
 
+The browser manifests also target `Librarian.IdentityLauncher.exe`. A
+browser-first activation uses a narrow headless mode that accepts only the
+documented Chromium origin and parent-window argument shapes, performs the same
+payload validation and current-user identity convergence, and then starts
+`Librarian.ChromiumNativeHost.exe` with the inherited standard-input/output
+channel and original browser arguments. Browser use therefore cannot bypass the
+first-launch or post-upgrade identity boundary.
+
 The MSI deliberately does not provision the package for all users or ask a
 System-context custom action to inspect another user's package projection.
 Each user converges independently at first launch. An upgrade leaves dormant
@@ -162,13 +170,15 @@ installed supported browsers and offers only the applicable integrations. The
 user can decline them and can add or remove them later through Librarian
 settings or setup maintenance mode.
 
-For a selected browser, the MSI owns only Librarian's native-messaging host
-manifest and registry registration. The extension itself is acquired from that
-browser's official extension store through the browser's user-confirmed
-installation flow. Librarian does not bundle a CRX, silently install an
-extension, or use enterprise force-install policy on consumer devices.
-Removing Librarian removes its native-host registrations but does not override
-the user's independent browser-extension choices.
+The MSI always installs both inert native-messaging manifests as hash-bound core
+payload files. For a selected browser, its optional feature publishes only the
+machine registry value that lets the browser discover the corresponding
+manifest. The extension itself is acquired from that browser's official
+extension store through the browser's user-confirmed installation flow.
+Librarian does not bundle a CRX, silently install an extension, or use
+enterprise force-install policy on consumer devices. Removing Librarian removes
+its native-host registrations but does not override the user's independent
+browser-extension choices.
 
 ### Security and servicing rules
 
@@ -245,9 +255,9 @@ CI builds a workspace-version fixture and a strictly higher
 fixture whose first three Windows Installer version fields differ. It then
 executes unsigned and wrong-component rejection, clean install and
 current-user registration, browser opt-in, repair, interrupted-upgrade
-rollback, current-user upgrade convergence, downgrade rejection, invoking-user
-uninstall cleanup, reinstall, and retained disposable user-data checks. The
-multi-user lifecycle remains a disposable interactive-VM boundary under issue
-#39 rather than a credential-only GitHub-hosted simulation.
+rollback, browser-first current-user upgrade convergence, downgrade rejection,
+invoking-user uninstall cleanup, reinstall, and retained disposable user-data
+checks. The multi-user lifecycle remains a disposable interactive-VM boundary
+under issue #39 rather than a credential-only GitHub-hosted simulation.
 The harness refuses to run on a developer or self-hosted machine and never
 exports a PFX or private key.

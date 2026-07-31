@@ -601,9 +601,19 @@ try {
 
     $expectedRegistryKeys = [ordered]@{
         "SOFTWARE\Google\Chrome\NativeMessagingHosts\com.theundeadmonk.librarian" =
-            "ChromeNativeHostManifest"
+            [PSCustomObject]@{
+                Feature = "ChromeIntegration"
+                Manifest = "ChromeNativeHostManifest"
+                ManifestComponent = "ChromeNativeHostManifestFile"
+                RegistrationComponent = "ChromeNativeHostRegistration"
+            }
         "SOFTWARE\Microsoft\Edge\NativeMessagingHosts\com.theundeadmonk.librarian" =
-            "EdgeNativeHostManifest"
+            [PSCustomObject]@{
+                Feature = "EdgeIntegration"
+                Manifest = "EdgeNativeHostManifest"
+                ManifestComponent = "EdgeNativeHostManifestFile"
+                RegistrationComponent = "EdgeNativeHostRegistration"
+            }
     }
     foreach ($entry in $expectedRegistryKeys.GetEnumerator()) {
         $key = $entry.Key
@@ -618,15 +628,42 @@ try {
             $registryValue.Count -eq 1
         ) "Expected one machine-level native-messaging registration for '$key'."
         $component = $registryValue[0].ParentNode
-        $manifestFile = $component.SelectSingleNode(
-            "*[local-name()='File' and @Id='$($entry.Value)']"
+        $manifestFile = $coreFeature.SelectSingleNode(
+            (
+                "//*[local-name()='File' and " +
+                "@Id='$($entry.Value.Manifest)']"
+            )
+        )
+        $coreManifestReference = $coreFeature.SelectSingleNode(
+            (
+                "*[local-name()='ComponentRef' and " +
+                "@Id='$($entry.Value.ManifestComponent)']"
+            )
+        )
+        $browserFeature = $decompiled.SelectSingleNode(
+            "//*[local-name()='Feature' and @Id='$($entry.Value.Feature)']"
+        )
+        $registrationReference = $browserFeature.SelectSingleNode(
+            (
+                "*[local-name()='ComponentRef' and " +
+                "@Id='$($entry.Value.RegistrationComponent)']"
+            )
         )
         Assert-True (
+            $component.GetAttribute("Id") -eq
+                $entry.Value.RegistrationComponent -and
             $registryValue[0].GetAttribute("KeyPath") -eq "yes" -and
-            $null -ne $manifestFile
+            $registryValue[0].GetAttribute("Value") -eq
+                "[#$($entry.Value.Manifest)]" -and
+            $null -ne $manifestFile -and
+            $manifestFile.ParentNode.GetAttribute("Id") -eq
+                $entry.Value.ManifestComponent -and
+            $null -ne $coreManifestReference -and
+            $null -ne $registrationReference -and
+            $null -eq $component.SelectSingleNode("*[local-name()='File']")
         ) (
-            "Browser manifest and registration '$key' must share one " +
-            "registry-keyed repair component."
+            "Browser manifest '$key' must be integrity-bound by Core while " +
+            "its registry publication remains optional."
         )
     }
 
@@ -869,7 +906,7 @@ try {
         Assert-True (
             $browserManifest.name -eq "com.theundeadmonk.librarian" -and
             $browserManifest.type -eq "stdio" -and
-            $browserManifest.path -eq "Librarian.ChromiumNativeHost.exe"
+            $browserManifest.path -eq "Librarian.IdentityLauncher.exe"
         ) "A native-messaging manifest has an unsafe host definition."
         $origins = @($browserManifest.allowed_origins)
         Assert-True (
@@ -937,7 +974,7 @@ try {
         $fileName = $payloadHashFields[3 + (2 * $index)]
         $expectedHash = $payloadHashFields[4 + (2 * $index)]
         Assert-True (
-            $fileName -match '^[A-Za-z0-9_.-]+\.(?i:exe|dll|msix)$' -and
+            $fileName -match '^[A-Za-z0-9_.-]+\.(?i:exe|dll|msix|json)$' -and
             $expectedHash -match '^[0-9A-F]{64}$' -and
             -not $payloadManifestHashes.Contains($fileName)
         ) "The MSI payload hash manifest has an invalid or duplicate entry."
@@ -958,13 +995,17 @@ try {
         $decompiled.SelectNodes("//*[local-name()='File']") |
             ForEach-Object { $_.GetAttribute("Name") } |
             Where-Object {
-                [IO.Path]::GetExtension($_) -in @(".exe", ".dll", ".msix")
+                [IO.Path]::GetExtension($_) -in
+                    @(".exe", ".dll", ".msix", ".json")
             } |
             Sort-Object -Unique
     )
     Assert-True (
         $payloadManifestHashes.Count -eq $expectedBoundPayloads.Count
-    ) "The MSI payload hash manifest does not bind every executable dependency."
+    ) (
+        "The MSI payload hash manifest does not bind every executable or " +
+        "JSON dependency."
+    )
     foreach ($fileName in $expectedBoundPayloads) {
         Assert-True (
             $payloadManifestHashes.Contains($fileName)

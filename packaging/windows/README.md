@@ -19,7 +19,11 @@ It also installs the narrow support executable
 optional post-install launch target this executable. It is not a fourth product
 role or separate user-facing application: it validates the installed payload,
 reconciles external-location package identity for the current user, and then
-opens `Librarian.Windows.exe`.
+opens `Librarian.Windows.exe`. Chrome and Edge also start this launcher through
+their native-messaging manifests. In that headless mode it performs the same
+identity convergence, preserves the browser's standard-input/output channel
+and documented origin/parent-window arguments, and waits for
+`Librarian.ChromiumNativeHost.exe`.
 
 The passkey-provider role is reserved for issue
 [#18](https://github.com/theundeadmonk/Librarian/issues/18). This installer
@@ -34,15 +38,19 @@ helper, not a fourth Librarian product role or package identity.
 
 Chrome and Edge native-messaging registrations are separate optional MSI
 features. They are offered only when the corresponding browser is detected.
-Each manifest allows one exact extension origin. Setup never bundles,
-force-installs, or trusts a browser extension; issue
+The inert, colocated manifests are always installed and included in the
+MSI-bound payload hashes; the optional features publish only their machine
+registry keys, so an unselected browser cannot discover the host. Each manifest
+allows one exact extension origin. Setup never bundles, force-installs, or
+trusts a browser extension; issue
 [#16](https://github.com/theundeadmonk/Librarian/issues/16) owns the real store
 IDs and browser connection.
 
-The host executable path remains relative to each colocated manifest. Chrome
+The identity-launcher path remains relative to each colocated manifest. Chrome
 and Edge both explicitly support a path relative to the manifest directory on
-Windows; this avoids baking one machine's Program Files drive into the MSI.
-The registry default value remains the required absolute manifest path.
+Windows; this avoids baking one machine's Program Files drive into the MSI and
+ensures browser-first activation cannot bypass identity convergence. The
+registry default value remains the required absolute manifest path.
 
 ## Tooling and license
 
@@ -155,7 +163,8 @@ accepted-signer mixed-release, and unexpected-provider installs without
 leaving product state. It then validates a clean installation, registers the
 invoking user through the launcher, opts into and repairs both browser
 registrations, and rolls back injected repair and upgrade failures. It proves
-the invoking user's identity converges after upgrade and survives repair,
+the invoking user's identity converges through browser-first activation after
+upgrade and survives repair,
 rejects a downgrade, verifies invoking-user uninstall cleanup, reinstalls, and
 confirms that a disposable per-user data sentinel survives every repair,
 update, and removal. The suite also proves setup never provisions identity for

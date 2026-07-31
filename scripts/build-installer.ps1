@@ -920,22 +920,45 @@ $releaseManifest = [ordered]@{
     (New-Object Text.UTF8Encoding($false))
 )
 
-$boundPayloadFiles = @(
-    Get-ChildItem -LiteralPath $payloadDirectory -File |
-        Where-Object { $_.Extension -in @(".exe", ".dll", ".msix") } |
+$browserManifestNames = @(
+    "com.theundeadmonk.librarian.chrome.json",
+    "com.theundeadmonk.librarian.edge.json"
+)
+$browserManifestFiles = @(
+    Get-ChildItem -LiteralPath $browserManifestDirectory -File |
         Sort-Object -Property Name
 )
-if ($boundPayloadFiles.Count -eq 0 -or $boundPayloadFiles.Count -gt 256) {
-    throw "The executable payload dependency set is empty or exceeds 256 files."
+if (($browserManifestFiles.Name -join "`n") -cne
+    (($browserManifestNames | Sort-Object) -join "`n")) {
+    throw (
+        "The rendered native-messaging manifest set is incomplete or " +
+        "unexpected. Found: $($browserManifestFiles.Name -join ', ')."
+    )
 }
-foreach ($componentPath in $componentPaths.Values) {
+$boundPayloadFiles = @(
+    @(
+        Get-ChildItem -LiteralPath $payloadDirectory -File |
+            Where-Object {
+                $_.Extension -in @(".exe", ".dll", ".msix", ".json")
+            }
+        $browserManifestFiles
+    ) | Sort-Object -Property Name
+)
+if ($boundPayloadFiles.Count -eq 0 -or $boundPayloadFiles.Count -gt 256) {
+    throw "The integrity-bound payload set is empty or exceeds 256 files."
+}
+foreach ($componentPath in @(
+    $componentPaths.Values
+    "Librarian.Release.json"
+    $browserManifestNames
+)) {
     if ($componentPath -notin $boundPayloadFiles.Name) {
-        throw "The executable payload manifest is missing '$componentPath'."
+        throw "The integrity-bound payload manifest is missing '$componentPath'."
     }
 }
 $boundPayloadFields = foreach ($file in $boundPayloadFiles) {
     if ($file.Name -notmatch '^[A-Za-z0-9_.-]+$') {
-        throw "The executable payload filename '$($file.Name)' is not manifest-safe."
+        throw "The integrity-bound filename '$($file.Name)' is not manifest-safe."
     }
     $file.Name
     (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash
