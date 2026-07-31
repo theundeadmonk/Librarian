@@ -175,239 +175,6 @@ function Write-MsiFailureContext {
     $lines[$contextStart..$contextEnd] | ForEach-Object { Write-Host $_ }
 }
 
-function Invoke-DisposableUserPowerShell {
-    param(
-        [Parameter(Mandatory)]
-        [PSCredential]$Credential,
-
-        [Parameter(Mandatory)]
-        [string]$Script
-    )
-
-    # CreateProcessWithLogonW limits its command line to 1,024 characters.
-    # Keep the generated probe out of ArgumentList and remove it after use.
-    $probeBase = Join-Path `
-        ([Environment]::GetFolderPath(
-            [Environment+SpecialFolder]::CommonApplicationData
-        )) `
-        ("LibrarianInstallerLifecycleProbe-{0}" -f [Guid]::NewGuid().ToString("N"))
-    $probePath = "$probeBase.ps1"
-    $standardOutputPath = "$probeBase.stdout.log"
-    $standardErrorPath = "$probeBase.stderr.log"
-    $environmentPreamble = @'
-$identityName = [Security.Principal.WindowsIdentity]::GetCurrent().Name
-$separator = $identityName.IndexOf("\")
-if ($separator -ge 0) {
-    $env:USERDOMAIN = $identityName.Substring(0, $separator)
-    $env:USERNAME = $identityName.Substring($separator + 1)
-}
-else {
-    $env:USERNAME = $identityName
-}
-$userProfile = [Environment]::GetFolderPath(
-    [Environment+SpecialFolder]::UserProfile
-)
-$localAppData = [Environment]::GetFolderPath(
-    [Environment+SpecialFolder]::LocalApplicationData
-)
-$roamingAppData = [Environment]::GetFolderPath(
-    [Environment+SpecialFolder]::ApplicationData
-)
-if ([string]::IsNullOrWhiteSpace($userProfile) -or
-    [string]::IsNullOrWhiteSpace($localAppData) -or
-    [string]::IsNullOrWhiteSpace($roamingAppData)) {
-    exit 125
-}
-$homeRoot = [IO.Path]::GetPathRoot($userProfile).TrimEnd("\")
-$env:USERPROFILE = $userProfile
-$env:HOME = $userProfile
-$env:HOMEDRIVE = $homeRoot
-$env:HOMEPATH = $userProfile.Substring($homeRoot.Length)
-$env:LOCALAPPDATA = $localAppData
-$env:APPDATA = $roamingAppData
-$userTemp = Join-Path $localAppData "Temp"
-New-Item -ItemType Directory -Path $userTemp -Force | Out-Null
-$env:TEMP = $userTemp
-$env:TMP = $userTemp
-'@
-    $probeScript = $environmentPreamble + [Environment]::NewLine + $Script
-    try {
-        [IO.File]::WriteAllText(
-            $probePath,
-            $probeScript,
-            (New-Object Text.UTF8Encoding($true))
-        )
-        $process = Start-Process `
-            -FilePath (
-                "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
-            ) `
-            -ArgumentList @(
-                "-NoLogo",
-                "-NoProfile",
-                "-NonInteractive",
-                "-ExecutionPolicy",
-                "Bypass",
-                "-File",
-                $probePath
-            ) `
-            -Credential $Credential `
-            -LoadUserProfile `
-            -WorkingDirectory $env:SystemRoot `
-            -WindowStyle Hidden `
-            -RedirectStandardOutput $standardOutputPath `
-            -RedirectStandardError $standardErrorPath `
-            -Wait `
-            -PassThru
-        try {
-            $standardOutput = [string](
-                @(
-                    Get-Content `
-                        -LiteralPath $standardOutputPath `
-                        -Raw `
-                        -ErrorAction SilentlyContinue
-                ) -join [Environment]::NewLine
-            )
-            $standardError = [string](
-                @(
-                    Get-Content `
-                        -LiteralPath $standardErrorPath `
-                        -Raw `
-                        -ErrorAction SilentlyContinue
-                ) -join [Environment]::NewLine
-            )
-            $diagnostic = @(
-                $standardError.Trim(),
-                $standardOutput.Trim()
-            ) | Where-Object { $_ }
-            $diagnostic = [string](
-                $diagnostic -join [Environment]::NewLine
-            )
-            if ($diagnostic.Length -gt 2048) {
-                $diagnostic = $diagnostic.Substring(0, 2048) + "..."
-            }
-            return [pscustomobject]@{
-                ExitCode = $process.ExitCode
-                Diagnostic = $diagnostic
-            }
-        } finally {
-            $process.Dispose()
-        }
-    } finally {
-        Remove-Item `
-            -LiteralPath @(
-                $probePath,
-                $standardOutputPath,
-                $standardErrorPath
-            ) `
-            -Force `
-            -ErrorAction SilentlyContinue
-    }
-}
-
-function Invoke-DisposableUserIdentityProbe {
-    param(
-        [Parameter(Mandatory)]
-        [PSCredential]$Credential,
-
-        [Parameter(Mandatory)]
-        [ValidatePattern("^\d+\.\d+\.\d+\.\d+$")]
-        [string]$ExpectedVersion
-    )
-
-    $probe = @"
-`$ErrorActionPreference = "Stop"
-`$versions = @()
-`$deadline = [DateTime]::UtcNow.AddSeconds(20)
-do {
-    `$versions = @(
-        Get-AppxPackage -Name "TheUndeadMonk.Librarian.Development" |
-            ForEach-Object { `$_.Version.ToString() } |
-            Sort-Object -Unique
-    )
-    if (`$versions.Count -eq 1 -and `$versions[0] -eq "$ExpectedVersion") {
-        exit 0
-    }
-    Start-Sleep -Milliseconds 500
-} while ([DateTime]::UtcNow -lt `$deadline)
-`$observedVersions = if (`$versions.Count -eq 0) {
-    "<none>"
-}
-else {
-    `$versions -join ", "
-}
-[Console]::Error.WriteLine(
-    "Timed out waiting for Librarian identity version '$ExpectedVersion'. " +
-    "Observed versions: `$observedVersions."
-)
-exit 1
-"@
-    $result = Invoke-DisposableUserPowerShell `
-        -Credential $Credential `
-        -Script $probe
-    Assert-True (
-        $result.ExitCode -eq 0
-    ) (
-        "The disposable secondary user did not receive Librarian identity " +
-        "version '$ExpectedVersion'. Probe error: " +
-        $result.Diagnostic
-    )
-}
-
-function Invoke-DisposableUserIdentityLauncher {
-    param(
-        [Parameter(Mandatory)]
-        [PSCredential]$Credential,
-
-        [Parameter(Mandatory)]
-        [string]$LauncherPath,
-
-        [Parameter(Mandatory)]
-        [ValidatePattern("^\d+\.\d+\.\d+\.\d+$")]
-        [string]$ExpectedVersion
-    )
-
-    $escapedLauncherPath = $LauncherPath.Replace("'", "''")
-    $probe = @"
-`$ErrorActionPreference = "Stop"
-`$launcherErrorPath = Join-Path `$env:TEMP ("LibrarianIdentityLauncher-{0}.stderr.log" -f [Guid]::NewGuid().ToString("N"))
-try {
-    `$process = Start-Process -FilePath '$escapedLauncherPath' -ArgumentList '--register-only' -RedirectStandardError `$launcherErrorPath -Wait -PassThru
-    try {
-        `$launcherExitCode = `$process.ExitCode
-    }
-    finally {
-        `$process.Dispose()
-    }
-    if (`$launcherExitCode -ne 0) {
-        `$launcherError = [string](@(Get-Content -LiteralPath `$launcherErrorPath -Raw -ErrorAction SilentlyContinue) -join [Environment]::NewLine)
-        if (-not [string]::IsNullOrWhiteSpace(`$launcherError)) {
-            [Console]::Error.WriteLine(`$launcherError.TrimEnd())
-        }
-        else {
-            [Console]::Error.WriteLine(
-                "The Librarian identity launcher exited with code `$launcherExitCode without a diagnostic."
-            )
-        }
-        exit `$launcherExitCode
-    }
-}
-finally {
-    Remove-Item -LiteralPath `$launcherErrorPath -Force -ErrorAction SilentlyContinue
-}
-exit 0
-"@
-    $result = Invoke-DisposableUserPowerShell `
-        -Credential $Credential `
-        -Script $probe
-    Assert-True (
-        $result.ExitCode -eq 0
-    ) (
-        "The disposable secondary user's Librarian identity launcher failed " +
-        "while registering version '$ExpectedVersion'. Launcher error: " +
-        $result.Diagnostic
-    )
-}
-
 function Invoke-CurrentUserIdentityLauncher {
     param(
         [Parameter(Mandatory)]
@@ -720,9 +487,7 @@ function Assert-ProductAbsent {
         [string]$EdgeRegistryPath,
 
         [Parameter(Mandatory)]
-        [string]$ProductRegistryPath,
-
-        [switch]$AllowOtherUserIdentity
+        [string]$ProductRegistryPath
     )
 
     if (Test-Path -LiteralPath $InstallFolder) {
@@ -746,11 +511,9 @@ function Assert-ProductAbsent {
     Assert-True (
         @(Get-VisibleArpEntries).Count -eq 0
     ) "A visible Librarian Programs and Features entry remains."
-    if (-not $AllowOtherUserIdentity) {
-        Assert-True (
-            @(Get-LibrarianPackages).Count -eq 0
-        ) "A Librarian identity package remains installed."
-    }
+    Assert-True (
+        @(Get-LibrarianPackages).Count -eq 0
+    ) "A Librarian identity package remains installed."
     Assert-True (
         @(Get-LibrarianCurrentUserPackages).Count -eq 0
     ) "A Librarian identity package remains registered for the invoking user."
@@ -816,17 +579,8 @@ function Remove-ProductState {
         }
     }
 
-    foreach ($provisioned in @(Get-LibrarianProvisionedPackages)) {
-        Remove-AppxProvisionedPackage `
-            -Online `
-            -AllUsers `
-            -PackageName $provisioned.PackageName `
-            -ErrorAction Continue |
-            Out-Null
-    }
-    foreach ($package in @(Get-LibrarianPackages)) {
+    foreach ($package in @(Get-LibrarianCurrentUserPackages)) {
         Remove-AppxPackage `
-            -AllUsers `
             -Package $package.PackageFullName `
             -ErrorAction Continue
     }
@@ -945,9 +699,6 @@ $sentinelDirectory = Join-Path $env:LOCALAPPDATA "Librarian\installer-lifecycle"
 $sentinelPath = Join-Path $sentinelDirectory "issue-19-ci-sentinel.txt"
 $sentinelValue = "disposable-issue-19-user-data"
 $msiexec = "$env:SystemRoot\System32\msiexec.exe"
-$disposableUserName = "LibrarianCiUser"
-$disposableUser = $null
-$disposableUserCredential = $null
 $failure = $null
 
 try {
@@ -959,27 +710,6 @@ try {
     Assert-True (
         -not (Test-Path -LiteralPath $sentinelPath)
     ) "The disposable user-data sentinel already exists."
-    Assert-True (
-        $null -eq (
-            Get-LocalUser -Name $disposableUserName -ErrorAction SilentlyContinue
-        )
-    ) "The disposable secondary installer-test user already exists."
-    $disposablePassword = ConvertTo-SecureString `
-        -String ("L1brarian-CI-only!" + [Guid]::NewGuid().ToString("N")) `
-        -AsPlainText `
-        -Force
-    $disposableUser = New-LocalUser `
-        -Name $disposableUserName `
-        -Password $disposablePassword `
-        -AccountNeverExpires `
-        -PasswordNeverExpires `
-        -UserMayNotChangePassword `
-        -Description "Disposable Librarian installer test user"
-    $disposableUserCredential = [PSCredential]::new(
-        "$env:COMPUTERNAME\$disposableUserName",
-        $disposablePassword
-    )
-
     Invoke-FailingProcess `
         -Label "Reject unsigned setup" `
         -FilePath $resolvedUnsignedSetup `
@@ -1081,13 +811,6 @@ try {
     ) "Librarian.IdentityLauncher.exe"
     Invoke-CurrentUserIdentityLauncher `
         -LauncherPath $identityLauncher `
-        -ExpectedVersion $LowVersion
-    Invoke-DisposableUserIdentityLauncher `
-        -Credential $disposableUserCredential `
-        -LauncherPath $identityLauncher `
-        -ExpectedVersion $LowVersion
-    Invoke-DisposableUserIdentityProbe `
-        -Credential $disposableUserCredential `
         -ExpectedVersion $LowVersion
 
     if (-not $SkipInteractiveDesktopLaunch) {
@@ -1258,16 +981,13 @@ try {
         -EdgeRegistryPath $edgeRegistryPath `
         -ProductRegistryPath $productRegistryPath `
         -ExpectedCurrentUserIdentityVersion $LowVersion
-    Invoke-DisposableUserIdentityProbe `
-        -Credential $disposableUserCredential `
-        -ExpectedVersion $LowVersion
     Assert-Sentinel -Path $sentinelPath -Expected $sentinelValue
 
     Invoke-CurrentUserIdentityLauncher `
         -LauncherPath $identityLauncher `
         -ExpectedVersion $HighVersion
     Invoke-SuccessfulProcess `
-        -Label "Repair with retained secondary-user identity" `
+        -Label "Repair with current-user identity" `
         -FilePath $msiexec `
         -Arguments @(
             "/i",
@@ -1278,7 +998,7 @@ try {
             "/qn",
             "/norestart",
             "/l*v",
-            (Join-Path $resolvedLogDirectory "07a-secondary-user-repair.log")
+            (Join-Path $resolvedLogDirectory "07a-current-user-repair.log")
         )
     Assert-Installed `
         -ExpectedVersion $HighVersion `
@@ -1287,17 +1007,6 @@ try {
         -ChromeRegistryPath $chromeRegistryPath `
         -EdgeRegistryPath $edgeRegistryPath `
         -ProductRegistryPath $productRegistryPath
-    Invoke-DisposableUserIdentityProbe `
-        -Credential $disposableUserCredential `
-        -ExpectedVersion $LowVersion
-    Invoke-DisposableUserIdentityLauncher `
-        -Credential $disposableUserCredential `
-        -LauncherPath $identityLauncher `
-        -ExpectedVersion $HighVersion
-    Invoke-DisposableUserIdentityProbe `
-        -Credential $disposableUserCredential `
-        -ExpectedVersion $HighVersion
-
     Assert-Sentinel -Path $sentinelPath -Expected $sentinelValue
 
     Invoke-FailingProcess `
@@ -1354,11 +1063,7 @@ try {
         -InstallFolder $installFolder `
         -ChromeRegistryPath $chromeRegistryPath `
         -EdgeRegistryPath $edgeRegistryPath `
-        -ProductRegistryPath $productRegistryPath `
-        -AllowOtherUserIdentity
-    Invoke-DisposableUserIdentityProbe `
-        -Credential $disposableUserCredential `
-        -ExpectedVersion $HighVersion
+        -ProductRegistryPath $productRegistryPath
     Assert-Sentinel -Path $sentinelPath -Expected $sentinelValue
 
     Invoke-SuccessfulProcess `
@@ -1379,9 +1084,6 @@ try {
         -EdgeRegistryPath $edgeRegistryPath `
         -ProductRegistryPath $productRegistryPath `
         -ExpectedCurrentUserIdentityVersion ""
-    Invoke-DisposableUserIdentityProbe `
-        -Credential $disposableUserCredential `
-        -ExpectedVersion $HighVersion
     $identityLauncher = Join-Path (
         $installFolder
     ) "Librarian.IdentityLauncher.exe"
@@ -1411,11 +1113,7 @@ try {
         -InstallFolder $installFolder `
         -ChromeRegistryPath $chromeRegistryPath `
         -EdgeRegistryPath $edgeRegistryPath `
-        -ProductRegistryPath $productRegistryPath `
-        -AllowOtherUserIdentity
-    Invoke-DisposableUserIdentityProbe `
-        -Credential $disposableUserCredential `
-        -ExpectedVersion $HighVersion
+        -ProductRegistryPath $productRegistryPath
     Assert-Sentinel -Path $sentinelPath -Expected $sentinelValue
 } catch {
     $failure = $_
@@ -1474,18 +1172,6 @@ try {
             Write-Warning "Lifecycle cleanup also failed: $($_.Exception.Message)"
         }
     }
-    if ($null -ne $disposableUser) {
-        $userProfile = Get-CimInstance `
-            -ClassName Win32_UserProfile `
-            -Filter "SID = '$($disposableUser.SID.Value)'" `
-            -ErrorAction SilentlyContinue
-        if ($null -ne $userProfile -and -not $userProfile.Loaded) {
-            Remove-CimInstance -InputObject $userProfile -ErrorAction Continue
-        }
-        Remove-LocalUser `
-            -Name $disposableUserName `
-            -ErrorAction Continue
-    }
     if (Test-Path -LiteralPath $sentinelPath) {
         Remove-Item -LiteralPath $sentinelPath -Force
     }
@@ -1512,6 +1198,6 @@ else {
 }
 Write-Host "Browser opt-in and repair: passed"
 Write-Host "Interrupted repair and upgrade rollback: passed"
-Write-Host "Independent current- and secondary-user identity convergence: passed"
+Write-Host "Interactive current-user identity convergence: passed"
 Write-Host "Downgrade rejection: passed"
 Write-Host "Upgrade, uninstall, reinstall, and data retention: passed"

@@ -36,6 +36,25 @@ with the documented per-user `PackageManager` registration model below.
 [Issue #39](https://github.com/theundeadmonk/Librarian/issues/39) preserves the
 evidence and owns any future return to an ideal all-user lifecycle.
 
+## 2026-07-31 amendment: user-session validation boundary
+
+Issue #19 validates identity registration and servicing in the established
+invoking user's Windows session. Its GitHub-hosted gate does not simulate
+another user's first launch by starting a credential-only, noninteractive
+process. That process does not provide the same supported package-deployment
+projection as a user who signs in and launches Librarian, so making it a release
+gate would expand the product contract beyond the user-context ownership model
+accepted above.
+
+The hosted lifecycle still proves that setup never provisions identity for all
+users or mutates another user's package state, and it exercises current-user
+registration, upgrade convergence, repair, uninstall cleanup, and reinstall.
+Disposable multi-user activation, dormant-user retention, and independent
+convergence remain explicit VM coverage owned by
+[issue #39](https://github.com/theundeadmonk/Librarian/issues/39). This boundary
+does not weaken publisher, signature, path, ACL, payload-hash, version, or
+fail-closed validation.
+
 ## Decision
 
 ### One user-facing setup
@@ -197,10 +216,11 @@ setup never creates or trusts one.
   installation ACLs, Authenticode on every executable, signed MSI and MSIX
   artifacts, payload verification, transactional repair, and fail-closed
   version checks.
-- The packaging implementation must test install, first-launch registration,
-  repair, per-user upgrade convergence, downgrade, interruption, wrong signer,
-  mixed versions, browser opt-in/out, invoking-user uninstall cleanup, inert
-  retained secondary-user registration, reinstall, and retained data.
+- The packaging implementation must test install, invoking-user first-launch
+  registration and upgrade convergence, repair, downgrade, interruption, wrong
+  signer, mixed versions, browser opt-in/out, invoking-user uninstall cleanup,
+  reinstall, and retained data. Issue #39 owns signed-in multi-user activation,
+  dormant-user retention, and independent convergence coverage.
 
 ## Validation
 
@@ -221,13 +241,13 @@ The disposable GitHub-hosted Windows runner also creates a short-lived,
 non-exportable development code-signing certificate, trusts only its public
 certificate in `TrustedPeople` and `Root` for that job, and removes both
 trust entries plus the personal certificate in a verified `finally` cleanup.
-CI builds a workspace-version
-fixture and a strictly higher
+CI builds a workspace-version fixture and a strictly higher
 fixture whose first three Windows Installer version fields differ. It then
 executes unsigned and wrong-component rejection, clean install and
-current-user registration, secondary-user first activation, browser opt-in,
-repair, interrupted-upgrade rollback, independent per-user upgrade
-convergence, downgrade rejection, invoking-user uninstall cleanup, retained
-secondary-user behavior, reinstall, and retained disposable user-data checks.
+current-user registration, browser opt-in, repair, interrupted-upgrade
+rollback, current-user upgrade convergence, downgrade rejection, invoking-user
+uninstall cleanup, reinstall, and retained disposable user-data checks. The
+multi-user lifecycle remains a disposable interactive-VM boundary under issue
+#39 rather than a credential-only GitHub-hosted simulation.
 The harness refuses to run on a developer or self-hosted machine and never
 exports a PFX or private key.

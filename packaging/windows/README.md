@@ -153,19 +153,20 @@ block. It does not export a PFX or private key.
 The lifecycle suite rejects unsigned, validly signed wrong-signer,
 accepted-signer mixed-release, and unexpected-provider installs without
 leaving product state. It then validates a clean installation, registers the
-invoking and disposable secondary users through the launcher, opts into and
-repairs both browser registrations, and rolls back injected repair and upgrade
-failures. It proves an upgraded MSI can be repaired while a dormant secondary
-user retains the old identity, then proves each user converges independently
-through the launcher. It also rejects a downgrade, verifies invoking-user
-uninstall cleanup and inert retained secondary-user identity, reinstalls, and
+invoking user through the launcher, opts into and repairs both browser
+registrations, and rolls back injected repair and upgrade failures. It proves
+the invoking user's identity converges after upgrade and survives repair,
+rejects a downgrade, verifies invoking-user uninstall cleanup, reinstalls, and
 confirms that a disposable per-user data sentinel survives every repair,
-update, and removal. The hosted runner deliberately delegates the interactive
-WinUI launch assertion to
+update, and removal. The suite also proves setup never provisions identity for
+all users. Signed-in multi-user activation and dormant-user retention are
+interactive-VM coverage owned by issue #39, not a credential-only hosted-runner
+simulation. The hosted runner deliberately delegates the interactive WinUI
+launch assertion to
 `scripts\test-windows-shell-ui.ps1`, which must run in an interactive Windows
-desktop after the Release build. The suite may mutate Program Files, HKLM,
-local accounts, package registrations, and test profiles, so its CI guard must
-not be removed or bypassed for developer machines.
+desktop after the Release build. The suite may mutate Program Files, HKLM, the
+invoking user's package registration, and disposable user data, so its CI guard
+must not be removed or bypassed for developer machines.
 
 For bounded local lifecycle diagnosis, the lower-level suite additionally
 accepts `-ConfirmDisposableVm` only inside the dedicated VMware guest whose
