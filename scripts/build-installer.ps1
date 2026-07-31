@@ -607,12 +607,19 @@ $customActionProject = Join-Path $repoRoot (
 $customActionOutput = Join-Path $repoRoot (
     "artifacts\bin\$Platform\$Configuration\Librarian.Setup.CustomActions.dll"
 )
+$identityLauncherProject = Join-Path $repoRoot (
+    "packaging\windows\identity-launcher\Librarian.IdentityLauncher.vcxproj"
+)
+$identityLauncherOutput = Join-Path $repoRoot (
+    "artifacts\bin\$Platform\$Configuration\Librarian.IdentityLauncher.exe"
+)
 
 foreach ($requiredPath in @(
     $desktopOutput,
     $vaultAgent,
     $nativeHost,
-    $customActionProject
+    $customActionProject,
+    $identityLauncherProject
 )) {
     if (-not (Test-Path -LiteralPath $requiredPath)) {
         throw "Required installer input is missing: $requiredPath"
@@ -662,7 +669,44 @@ if (-not (Test-Path -LiteralPath $customActionOutput -PathType Leaf)) {
     throw "The setup custom-action DLL was not built at '$customActionOutput'."
 }
 
+Invoke-CheckedProcess `
+    -Label "Locked identity-launcher restore" `
+    -FilePath $toolchain.MSBuild `
+    -Arguments @(
+        $identityLauncherProject,
+        "/t:Restore",
+        "/m",
+        "/nr:false",
+        "/p:Configuration=$Configuration",
+        "/p:Platform=$Platform",
+        "/p:RestoreLockedMode=true",
+        "/verbosity:minimal"
+    ) `
+    -WorkingDirectory $repoRoot
+
+Invoke-CheckedProcess `
+    -Label "Identity-launcher build" `
+    -FilePath $toolchain.MSBuild `
+    -Arguments @(
+        $identityLauncherProject,
+        "/t:Build",
+        "/m",
+        "/nr:false",
+        "/p:Configuration=$Configuration",
+        "/p:Platform=$Platform",
+        "/p:RestoreLockedMode=true",
+        "/verbosity:minimal"
+    ) `
+    -WorkingDirectory $repoRoot
+
+if (-not (Test-Path -LiteralPath $identityLauncherOutput -PathType Leaf)) {
+    throw "The identity launcher was not built at '$identityLauncherOutput'."
+}
+
 Copy-RuntimeTree -Source $desktopOutput -Destination $payloadDirectory
+Copy-Item `
+    -LiteralPath $identityLauncherOutput `
+    -Destination (Join-Path $payloadDirectory "Librarian.IdentityLauncher.exe")
 Copy-Item `
     -LiteralPath $vaultAgent `
     -Destination (Join-Path $payloadDirectory "Librarian.VaultAgent.exe")
@@ -689,6 +733,17 @@ $manifestCases = @(
         )
         Rendered = Join-Path $intermediateDirectory "Librarian.Windows.manifest"
         Executable = Join-Path $payloadDirectory "Librarian.Windows.exe"
+    },
+    [PSCustomObject]@{
+        Source = Join-Path $repoRoot (
+            "packaging\windows\identity-launcher\app.manifest"
+        )
+        Rendered = Join-Path (
+            $intermediateDirectory
+        ) "Librarian.IdentityLauncher.manifest"
+        Executable = Join-Path (
+            $payloadDirectory
+        ) "Librarian.IdentityLauncher.exe"
     },
     [PSCustomObject]@{
         Source = Join-Path $repoRoot "crates\vault-agent\app.manifest"
@@ -772,6 +827,7 @@ if ($DevelopmentCertificateThumbprint) {
         -Thumbprint $DevelopmentCertificateThumbprint
     $signingMode = "development"
     foreach ($path in @(
+        (Join-Path $payloadDirectory "Librarian.IdentityLauncher.exe"),
         (Join-Path $payloadDirectory "Librarian.Windows.exe"),
         (Join-Path $payloadDirectory "Librarian.VaultAgent.exe"),
         (Join-Path $payloadDirectory "Librarian.ChromiumNativeHost.exe"),
@@ -787,6 +843,7 @@ if ($DevelopmentCertificateThumbprint) {
 }
 
 $componentPaths = [ordered]@{
+    IdentityLauncher = "Librarian.IdentityLauncher.exe"
     Desktop = "Librarian.Windows.exe"
     VaultAgent = "Librarian.VaultAgent.exe"
     ChromiumNativeHost = "Librarian.ChromiumNativeHost.exe"
@@ -809,7 +866,7 @@ $payloadHashManifestPath = Join-Path (
     $payloadDirectory
 ) "Librarian.PayloadHashes"
 $payloadHashManifest = (
-    "v1|" +
+    "v2|$ProductVersion|" +
     (($componentPaths.Keys | ForEach-Object { $componentHashes[$_] }) -join "|")
 )
 [IO.File]::WriteAllText(

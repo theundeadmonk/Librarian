@@ -17,16 +17,16 @@
     </ProjectConfiguration>
   </ItemGroup>
   <PropertyGroup Label="Globals">
-    <ProjectGuid>{1152EBC0-113C-42F0-85AD-40B06C270DFA}</ProjectGuid>
+    <ProjectGuid>{63F826EB-E8F8-4420-BFB5-B7F670E438AF}</ProjectGuid>
     <Keyword>Win32Proj</Keyword>
-    <RootNamespace>Librarian.Setup.CustomActions</RootNamespace>
+    <RootNamespace>Librarian.IdentityLauncher</RootNamespace>
     <WindowsTargetPlatformVersion>10.0.28000.0</WindowsTargetPlatformVersion>
     <WindowsTargetPlatformMinVersion>10.0.26100.0</WindowsTargetPlatformMinVersion>
     <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
   <PropertyGroup Label="Configuration">
-    <ConfigurationType>DynamicLibrary</ConfigurationType>
+    <ConfigurationType>Application</ConfigurationType>
     <UseDebugLibraries Condition="'$(Configuration)'=='Debug'">true</UseDebugLibraries>
     <UseDebugLibraries Condition="'$(Configuration)'=='Release'">false</UseDebugLibraries>
     <PlatformToolset Condition="'$(VisualStudioVersion)' &gt;= '18.0'">v145</PlatformToolset>
@@ -45,8 +45,8 @@
   <PropertyGroup>
     <RepoRoot>$([MSBuild]::NormalizePath('$(MSBuildProjectDirectory)\..\..\..'))</RepoRoot>
     <OutDir>$(RepoRoot)\artifacts\bin\$(Platform)\$(Configuration)\</OutDir>
-    <IntDir>$(RepoRoot)\artifacts\obj\setup-custom-actions\$(Platform)\$(Configuration)\</IntDir>
-    <TargetName>Librarian.Setup.CustomActions</TargetName>
+    <IntDir>$(RepoRoot)\artifacts\obj\identity-launcher\$(Platform)\$(Configuration)\</IntDir>
+    <TargetName>Librarian.IdentityLauncher</TargetName>
   </PropertyGroup>
   <ItemDefinitionGroup>
     <ClCompile>
@@ -60,12 +60,13 @@
       <RuntimeLibrary Condition="'$(Configuration)'=='Release'">MultiThreaded</RuntimeLibrary>
     </ClCompile>
     <Link>
-      <AdditionalDependencies>Advapi32.lib;Bcrypt.lib;Crypt32.lib;Msi.lib;Shell32.lib;WindowsApp.lib;Wintrust.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>Bcrypt.lib;Shell32.lib;WindowsApp.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <SubSystem>Windows</SubSystem>
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
-    <ClCompile Include="src\custom_actions.cpp" />
+    <ClCompile Include="src\main.cpp" />
+    <Manifest Include="app.manifest" />
   </ItemGroup>
   <ItemGroup>
     <PackageReference Include="Microsoft.Windows.CppWinRT" Version="3.0.260715.1" />

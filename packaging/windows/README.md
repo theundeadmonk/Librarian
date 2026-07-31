@@ -8,11 +8,18 @@ Librarian's single Windows setup lifecycle. The implementation follows
 
 `LibrarianSetup.exe` is the only user-facing installer. Its compressed WiX Burn
 bundle owns one per-machine MSI and one Programs and Features entry. The MSI
-installs exactly the three product executables that currently exist:
+installs the three product-role executables that currently exist:
 
 - `Librarian.Windows.exe`
 - `Librarian.VaultAgent.exe`
 - `Librarian.ChromiumNativeHost.exe`
+
+It also installs the narrow support executable
+`Librarian.IdentityLauncher.exe`. The one Start-menu shortcut and setup's
+optional post-install launch target this executable. It is not a fourth product
+role or separate user-facing application: it validates the installed payload,
+reconciles external-location package identity for the current user, and then
+opens `Librarian.Windows.exe`.
 
 The passkey-provider role is reserved for issue
 [#18](https://github.com/theundeadmonk/Librarian/issues/18). This installer
@@ -78,10 +85,10 @@ values. They are not published extension identities. An unsigned fixture must
 never be installed.
 
 The structural suite decompiles the MSI, extracts the Burn bundle, checks the
-three-component scope, feature conditions, registry ownership, custom-action
-transaction modes and exports, package identity, hashes, native-messaging
-origins, signing mode, self-contained Windows App SDK payload, hybrid CRT
-linkage, and upgrade sequence. It does not execute setup.
+three product roles and launcher boundary, feature conditions, registry
+ownership, custom-action modes and exports, package identity, hashes,
+native-messaging origins, signing mode, self-contained Windows App SDK payload,
+hybrid CRT linkage, and upgrade sequence. It does not execute setup.
 
 Windows Installer ICE validation also runs unless the caller explicitly passes
 `-SkipIceValidation`. Smart App Control can block ICE's temporary unsigned MSI
@@ -99,43 +106,61 @@ localized file and fail-closed normalizes only these eight pinned Microsoft
 suite. Structural validation requires all eight normalized rows, rejects the
 original LCIDs and overlong values, and never globally suppresses ICE03.
 
-The four security-critical payload hashes live in a fixed-format manifest
-installed beside the binaries. Only that manifest's SHA-256 is passed through
-the bounded deferred custom-action data. Each identity action validates the
-protected manifest path, rejects reparse points, verifies the manifest hash,
-and then verifies every identity-bound payload before changing package state.
-After an upgrade commits, setup explicitly deprovisions the old identity
-family, retires superseded all-user registrations, provisions the incoming
-identity, and verifies that Windows exposes the expected provisioning record.
-A bounded retry handles deployment-enumeration convergence. This keeps later
-repairs single-versioned, and users who were not running setup receive the
-already-provisioned incoming version at their next sign-in.
+The five security-critical payload hashes (launcher, desktop, vault agent,
+native host, and identity package) live in a fixed-format manifest installed
+beside the binaries. Only that manifest's SHA-256 is passed through bounded
+deferred custom-action data. The System-context custom action first uses
+Windows `WinVerifyTrust` to require its own module and all five payloads to
+have a valid chain, the expected code-signing publisher, and one matching
+signer certificate. It then validates the protected manifest path, rejects
+reparse points, verifies the manifest hash, and verifies every identity-bound
+payload hash. It does not stage, provision, register, or remove package
+identity.
+
+The signed launcher repeats the path and hash checks in the interactive user's
+context. It rejects a newer identity and otherwise uses the documented
+`PackageManager.AddPackageByUriAsync` external-location flow to register the
+installed version for that user before it opens the desktop. The desktop also
+checks that its current package version matches the installed release. Users
+therefore converge independently on first launch after install or upgrade;
+repair restores the machine payload without attempting to inspect or mutate
+another Windows user's package projection.
 
 The same disposable Windows runner then executes
 `scripts\test-installer-ci.ps1`. That entry point refuses to run anywhere
 except GitHub Actions, creates a short-lived non-exportable development
 certificate, trusts only its public certificate for the duration of the test,
-builds two signed versions, and removes both certificate-store entries in a
-`finally` block. It does not export a PFX or private key.
+builds two signed versions, and verifies removal of its `TrustedPeople`, `Root`,
+and personal certificate-store entries in a `finally` block. It does not
+export a PFX or private key.
 
 The lifecycle suite rejects unsigned and unexpected-provider installs, validates
-a clean installation, opts into and repairs both browser registrations, rolls
-back injected repair and upgrade failures, upgrades a disposable secondary
-Windows account's provisioned identity, proves divergent registered and
-provisioned versions fail closed without state loss, rejects a downgrade,
-uninstalls, reinstalls, and confirms that a disposable per-user data sentinel
-survives every repair, update, and removal. The hosted runner deliberately
-delegates the interactive WinUI launch assertion to
+a clean installation, registers the invoking and disposable secondary users
+through the launcher, opts into and repairs both browser registrations, and
+rolls back injected repair and upgrade failures. It proves an upgraded MSI can
+be repaired while a dormant secondary user retains the old identity, then
+proves each user converges independently through the launcher. It also rejects
+a downgrade, verifies invoking-user uninstall cleanup and inert retained
+secondary-user identity, reinstalls, and confirms that a disposable per-user
+data sentinel survives every repair, update, and removal. The hosted runner
+deliberately delegates the interactive WinUI launch assertion to
 `scripts\test-windows-shell-ui.ps1`, which must run in an interactive Windows
 desktop after the Release build. The suite may mutate Program Files, HKLM,
-local accounts, package provisioning, and test profiles, so its CI guard must
+local accounts, package registrations, and test profiles, so its CI guard must
 not be removed or bypassed for developer machines.
+
+For bounded local lifecycle diagnosis, the lower-level suite additionally
+accepts `-ConfirmDisposableVm` only inside the dedicated VMware guest whose
+operating system is Windows 11 Enterprise Evaluation and whose user is
+`librarian-test`. This exception does not permit execution on the development
+host, a general-purpose VM, or a self-hosted CI runner. Certificate creation
+and trust remain owned by the GitHub-hosted entry point above.
 
 Windows Installer Restart Manager remains enabled so repair and upgrade can
 coordinate processes that hold product files. The lifecycle suite requires a
 zero exit code; it does not treat a restart-required result as a completed
 replacement. Identity registration independently rejects any retained
-identity-bearing file whose hash does not match the incoming MSI.
+identity-bearing file whose hash does not match the MSI-bound manifest.
 
 ## Development signing
 
@@ -155,36 +180,26 @@ commit certificates, private keys, passwords, tokens, or generated artifacts.
 
 ## Transaction boundary
 
-The identity-only MSIX is registered through an embedded native C++ custom
-action that calls the Windows package-management API. It does not invoke
-PowerShell. Deferred, rollback, and commit actions run without user
-impersonation and hide `CustomActionData` from logs. Install and uninstall
-rollback markers are disposable and contain version/state only.
+The identity-only MSIX is not mutated from the MSI service transaction.
+Installation, repair, upgrade, and rollback remain ordinary per-machine MSI
+file and registry operations. A deferred, non-impersonated native C++ custom
+action only verifies the canonical protected path and the MSI-bound SHA-256
+manifest after files are installed; it calls no package-management API and
+invokes no PowerShell.
 
-The rollback-capable script stages identity and registers only the invoking
-user. Device provisioning is a checked commit action. Uninstall similarly
-defers all-user package removal to its checked commit action, after MSI file
-removal has succeeded; only best-effort marker cleanup follows it. A failed
-transaction therefore does not remove another existing user's registration,
-and rollback does not clean-reprovision identity when the prior provisioning
-is already intact. Snapshotting fails closed before mutation if the invoking
-user's registered identity version differs from the device-provisioned
-version, because a single-version rollback marker cannot safely restore both
-states. It also fails closed if a different incoming version already exists
-for another user or as staged state, because rollback must not remove state
-that predates the transaction.
+The signed, unpackaged launcher owns current-user registration outside the MSI
+transaction, following Microsoft's external-location C++ setup sample. It
+repeats the canonical path, reparse-point, version, and hash validation before
+calling the supported package-management API. A stale or mixed-release
+identity-bearing file therefore fails closed before desktop launch.
 
-Before either machine staging or invoking-user registration, the custom action
-requires exact SHA-256 matches for the installed desktop, vault-agent,
-native-host, and identity-package files. The expected values are generated
-from the release payload and embedded in the signed MSI; a stale or
-mixed-release identity-bearing file fails closed.
-
-The MSI creates the protected installation directory before taking its
-identity-state snapshot on a clean install. Snapshot removal after transaction
-commit is best-effort: a temporary scanner lock may leave only a disposable
-version/state marker, but cannot turn an already committed product transaction
-into a reported rollback.
+Final uninstall runs one deferred impersonated native action before file
+removal. It removes only matching registrations belonging to the invoking user
+and leaves newer versions untouched. It never enumerates or mutates another
+profile. Registrations retained by other users become inert once Program Files
+is removed and can converge after reinstall and next launch. Deterministic
+all-user cleanup is intentionally deferred to
+[issue #39](https://github.com/theundeadmonk/Librarian/issues/39).
 
 The MSI owns Librarian files and registrations beneath `Program Files` and
 machine-level native-messaging keys. Vaults and backups remain outside the

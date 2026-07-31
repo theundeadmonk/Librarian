@@ -517,8 +517,17 @@ try {
     )
     Assert-True (
         $null -ne $startMenuShortcut -and
-        $startMenuShortcut.GetAttribute("Advertise") -eq "yes"
-    ) "The per-machine Start menu shortcut must be advertised."
+        $startMenuShortcut.GetAttribute("Advertise") -eq "yes" -and
+        $startMenuShortcut.ParentNode.GetAttribute("Id") -eq
+            "IdentityLauncherComponent" -and
+        $null -ne $startMenuShortcut.ParentNode.SelectSingleNode(
+            "*[local-name()='File' and " +
+            "@Id='IdentityLauncherExecutable' and @KeyPath='yes']"
+        )
+    ) (
+        "The advertised Start menu shortcut must target the unpackaged " +
+        "identity launcher."
+    )
 
     $fileNodes = @($decompiled.SelectNodes("//*[local-name()='File']"))
     $executableNames = @(
@@ -533,6 +542,7 @@ try {
     )
     $expectedProductExecutables = @(
         "Librarian.ChromiumNativeHost.exe",
+        "Librarian.IdentityLauncher.exe",
         "Librarian.VaultAgent.exe",
         "Librarian.Windows.exe"
     )
@@ -540,7 +550,8 @@ try {
         ($productExecutableNames -join "`n") -eq
             ($expectedProductExecutables -join "`n")
     ) (
-        "The MSI must contain exactly the three implemented product executables. " +
+        "The MSI must contain the three identity-bearing executables and the " +
+        "dedicated identity launcher. " +
         "Found: $($productExecutableNames -join ', ')."
     )
     $runtimeExecutableNames = @(
@@ -620,44 +631,11 @@ try {
     }
 
     $expectedCustomActions = [ordered]@{
-        SnapshotIdentity = [PSCustomObject]@{
+        ValidateIdentityPayload = [PSCustomObject]@{
             Execute = "deferred"; Impersonate = "no"
         }
-        RollbackIdentitySnapshotCleanup = [PSCustomObject]@{
-            Execute = "rollback"; Impersonate = "no"
-        }
-        RollbackCurrentUserIdentity = [PSCustomObject]@{
-            Execute = "rollback"; Impersonate = "yes"
-        }
-        RollbackIdentity = [PSCustomObject]@{
-            Execute = "rollback"; Impersonate = "no"
-        }
-        RegisterIdentity = [PSCustomObject]@{
-            Execute = "deferred"; Impersonate = "no"
-        }
-        RegisterCurrentUserIdentity = [PSCustomObject]@{
+        UnregisterCurrentUserIdentity = [PSCustomObject]@{
             Execute = "deferred"; Impersonate = "yes"
-        }
-        ProvisionIdentity = [PSCustomObject]@{
-            Execute = "commit"; Impersonate = "no"
-        }
-        SnapshotUnregisterIdentity = [PSCustomObject]@{
-            Execute = "deferred"; Impersonate = "no"
-        }
-        RollbackUnregisterSnapshotCleanup = [PSCustomObject]@{
-            Execute = "rollback"; Impersonate = "no"
-        }
-        RollbackUnregisterCurrentUserIdentity = [PSCustomObject]@{
-            Execute = "rollback"; Impersonate = "yes"
-        }
-        RollbackUnregisterIdentity = [PSCustomObject]@{
-            Execute = "rollback"; Impersonate = "no"
-        }
-        UnregisterIdentity = [PSCustomObject]@{
-            Execute = "commit"; Impersonate = "no"
-        }
-        CleanupIdentitySnapshot = [PSCustomObject]@{
-            Execute = "commit"; Impersonate = "no"
         }
     }
     foreach ($entry in $expectedCustomActions.GetEnumerator()) {
@@ -686,54 +664,26 @@ try {
         )
         Assert-True (
             $null -ne $scheduled
-        ) "Custom action '$($entry.Key)' is not transactionally scheduled."
+        ) "Custom action '$($entry.Key)' is not scheduled."
     }
 
-    foreach ($propertyActionId in @(
-        "SetSnapshotIdentity",
-        "SetRollbackIdentitySnapshotCleanup",
-        "SetRollbackCurrentUserIdentity",
-        "SetRollbackIdentity",
-        "SetCleanupIdentitySnapshot",
-        "SetSnapshotUnregisterIdentity",
-        "SetRollbackUnregisterSnapshotCleanup",
-        "SetRollbackUnregisterCurrentUserIdentity",
-        "SetRollbackUnregisterIdentity"
-    )) {
-        $propertyAction = $decompiled.SelectSingleNode(
-            "//*[local-name()='CustomAction' and @Id='$propertyActionId']"
-        )
-        Assert-True (
-            $null -ne $propertyAction -and
-            $propertyAction.GetAttribute("Value") -match
-                '\[INSTALLFOLDER\]Librarian\.Identity\.msix\.state' -and
-            $propertyAction.GetAttribute("Value") -notmatch
-                '\[(?:TempFolder|LocalAppDataFolder|AppDataFolder)\]'
-        ) (
-            "Privileged rollback state must stay inside the protected " +
-            "installer-owned directory."
-        )
-    }
-    foreach ($rollbackActionId in @(
-        "SetRollbackCurrentUserIdentity",
-        "SetRollbackIdentity",
-        "SetRollbackUnregisterCurrentUserIdentity",
-        "SetRollbackUnregisterIdentity"
-    )) {
-        $rollbackAction = $decompiled.SelectSingleNode(
-            "//*[local-name()='CustomAction' and @Id='$rollbackActionId']"
-        )
-        Assert-True (
-            $null -ne $rollbackAction -and
-            $rollbackAction.GetAttribute("Value") -match
-                '\[INSTALLFOLDER\]Librarian\.Identity\.rollback\.msix' -and
-            $rollbackAction.GetAttribute("Value") -notmatch
-                '\[#IdentityMsix\]'
-        ) (
-            "Rollback identity restoration must use the package preserved " +
-            "before product files are replaced or removed."
-        )
-    }
+    $setupBinaryActions = @(
+        $decompiled.SelectNodes("//*[local-name()='CustomAction']") |
+            Where-Object {
+                $_.GetAttribute("BinaryRef") -eq
+                    "LibrarianSetupCustomActions"
+            } |
+            ForEach-Object { $_.GetAttribute("Id") } |
+            Sort-Object
+    )
+    Assert-True (
+        ($setupBinaryActions -join "`n") -eq
+            (($expectedCustomActions.Keys | Sort-Object) -join "`n")
+    ) (
+        "The setup custom-action surface must stay limited to payload " +
+        "validation and invoking-user cleanup. Found: " +
+        "$($setupBinaryActions -join ', ')."
+    )
 
     $unsafeCustomActions = @(
         $decompiled.SelectNodes("//*[local-name()='CustomAction']") |
@@ -762,25 +712,22 @@ try {
     )
     Assert-True (
         $null -ne $coreCreateFolder
-    ) "The protected install directory must be created before identity snapshotting."
-    $commitCleanup = $decompiled.SelectSingleNode(
-        "//*[local-name()='CustomAction' and @Id='CleanupIdentitySnapshot']"
-    )
-    Assert-True (
-        $null -ne $commitCleanup -and
-        $commitCleanup.GetAttribute("Return") -eq "ignore"
-    ) "Post-commit snapshot cleanup must not report a committed install as failed."
-    foreach ($commitActionId in @("ProvisionIdentity", "UnregisterIdentity")) {
-        $commitAction = $decompiled.SelectSingleNode(
-            "//*[local-name()='CustomAction' and @Id='$commitActionId']"
-        )
+    ) "The protected install directory must be created before validation."
+    foreach ($forbiddenAction in @(
+        "SnapshotIdentity",
+        "RegisterIdentity",
+        "RegisterCurrentUserIdentity",
+        "ProvisionIdentity",
+        "RollbackIdentity",
+        "UnregisterIdentity"
+    )) {
         Assert-True (
-            $null -ne $commitAction -and
-            $commitAction.GetAttribute("Execute") -eq "commit" -and
-            $commitAction.GetAttribute("Return") -in @("", "check")
+            $null -eq $decompiled.SelectSingleNode(
+                "//*[local-name()='CustomAction' and @Id='$forbiddenAction']"
+            )
         ) (
-            "All-profile identity mutation '$commitActionId' must be a " +
-            "checked commit action."
+            "The per-user design must not retain cross-user identity action " +
+            "'$forbiddenAction'."
         )
     }
     $faultInjection = $decompiled.SelectSingleNode(
@@ -801,51 +748,18 @@ try {
     $installExecute = Get-MsiSequence `
         -DatabasePath $resolvedMsi `
         -Action "InstallExecute"
-    $createFolders = Get-MsiSequence `
-        -DatabasePath $resolvedMsi `
-        -Action "CreateFolders"
-    $snapshotIdentity = Get-MsiSequence `
-        -DatabasePath $resolvedMsi `
-        -Action "SnapshotIdentity"
-    $rollbackSnapshotCleanup = Get-MsiSequence `
-        -DatabasePath $resolvedMsi `
-        -Action "RollbackIdentitySnapshotCleanup"
-    $rollbackCurrentUserIdentity = Get-MsiSequence `
-        -DatabasePath $resolvedMsi `
-        -Action "RollbackCurrentUserIdentity"
-    $rollbackIdentity = Get-MsiSequence `
-        -DatabasePath $resolvedMsi `
-        -Action "RollbackIdentity"
-    $snapshotUnregisterIdentity = Get-MsiSequence `
-        -DatabasePath $resolvedMsi `
-        -Action "SnapshotUnregisterIdentity"
-    $rollbackUnregisterSnapshotCleanup = Get-MsiSequence `
-        -DatabasePath $resolvedMsi `
-        -Action "RollbackUnregisterSnapshotCleanup"
-    $rollbackUnregisterIdentity = Get-MsiSequence `
-        -DatabasePath $resolvedMsi `
-        -Action "RollbackUnregisterIdentity"
-    $rollbackUnregisterCurrentUserIdentity = Get-MsiSequence `
-        -DatabasePath $resolvedMsi `
-        -Action "RollbackUnregisterCurrentUserIdentity"
     $installFiles = Get-MsiSequence `
         -DatabasePath $resolvedMsi `
         -Action "InstallFiles"
-    $registerCurrentUserIdentity = Get-MsiSequence `
+    $validateIdentityPayload = Get-MsiSequence `
         -DatabasePath $resolvedMsi `
-        -Action "RegisterCurrentUserIdentity"
-    $provisionIdentity = Get-MsiSequence `
-        -DatabasePath $resolvedMsi `
-        -Action "ProvisionIdentity"
+        -Action "ValidateIdentityPayload"
     $removeFiles = Get-MsiSequence `
         -DatabasePath $resolvedMsi `
         -Action "RemoveFiles"
-    $unregisterIdentity = Get-MsiSequence `
+    $unregisterCurrentUserIdentity = Get-MsiSequence `
         -DatabasePath $resolvedMsi `
-        -Action "UnregisterIdentity"
-    $cleanupIdentitySnapshot = Get-MsiSequence `
-        -DatabasePath $resolvedMsi `
-        -Action "CleanupIdentitySnapshot"
+        -Action "UnregisterCurrentUserIdentity"
     $installFinalize = Get-MsiSequence `
         -DatabasePath $resolvedMsi `
         -Action "InstallFinalize"
@@ -857,39 +771,16 @@ try {
         "InstallFinalize so an upgrade can roll back."
     )
     Assert-True (
-        $snapshotIdentity -gt $createFolders -and
-        $snapshotIdentity -lt $installFiles -and
-        $rollbackSnapshotCleanup -gt $installFiles -and
-        $rollbackIdentity -gt $rollbackSnapshotCleanup -and
-        $rollbackCurrentUserIdentity -gt $rollbackIdentity -and
-        $rollbackCurrentUserIdentity -lt $registerCurrentUserIdentity
+        $validateIdentityPayload -gt $installFiles -and
+        $validateIdentityPayload -lt $installFinalize
     ) (
-        "Identity state must be preserved before InstallFiles. Rollback " +
-        "actions must remove the invoking-user upgrade registration before " +
-        "the system restore and before product files roll back."
+        "The installed payload must be validated after InstallFiles and " +
+        "before InstallFinalize."
     )
     Assert-True (
-        $snapshotUnregisterIdentity -lt $removeFiles -and
-        $rollbackUnregisterSnapshotCleanup -gt $removeFiles -and
-        $rollbackUnregisterCurrentUserIdentity -gt
-            $rollbackUnregisterSnapshotCleanup -and
-        $rollbackUnregisterIdentity -gt
-            $rollbackUnregisterCurrentUserIdentity -and
-        $rollbackUnregisterIdentity -lt $unregisterIdentity
+        $unregisterCurrentUserIdentity -lt $removeFiles
     ) (
-        "Uninstall identity state must be preserved before RemoveFiles. " +
-        "Rollback actions must be queued afterward and before commit removal."
-    )
-    Assert-True (
-        $provisionIdentity -gt $registerCurrentUserIdentity -and
-        $unregisterIdentity -gt $removeFiles -and
-        $provisionIdentity -lt $cleanupIdentitySnapshot -and
-        $unregisterIdentity -lt $cleanupIdentitySnapshot -and
-        $cleanupIdentitySnapshot -lt $installFinalize
-    ) (
-        "All-profile identity provisioning/removal must be queued only after " +
-        "their rollback-capable per-user or file operations and before the " +
-        "best-effort commit cleanup."
+        "Invoking-user package cleanup must run before RemoveFiles."
     )
 
     $chromeManifestPath = Get-ExtractedMsiFile `
@@ -943,12 +834,14 @@ try {
     }
 
     $expectedComponentRoles = @(
+        "IdentityLauncher",
         "Desktop",
         "VaultAgent",
         "ChromiumNativeHost",
         "IdentityPackage"
     )
     $releaseHashes = [ordered]@{}
+    $releasePaths = [ordered]@{}
     foreach ($component in @($releaseManifest.components)) {
         Assert-True (
             $component.role -in $expectedComponentRoles -and
@@ -966,6 +859,7 @@ try {
             $actualHash -eq $component.sha256
         ) "Release hash mismatch for '$($component.path)'."
         $releaseHashes[$component.role] = $component.sha256
+        $releasePaths[$component.role] = $componentPath
     }
     Assert-True (
         $releaseHashes.Count -eq $expectedComponentRoles.Count
@@ -979,7 +873,9 @@ try {
         -DecompiledMsi $decompiled `
         -ExtractRoot $msiExtractRoot `
         -Name "Librarian.PayloadHashes"
-    $expectedPayloadHashManifest = "v1|$expectedHashData"
+    $expectedPayloadHashManifest = (
+        "v2|$ExpectedProductVersion|$expectedHashData"
+    )
     Assert-True (
         [IO.File]::ReadAllText($payloadHashManifestPath) -ceq
             $expectedPayloadHashManifest
@@ -990,11 +886,7 @@ try {
     $expectedIdentityActionData = (
         "[INSTALLFOLDER]|[ProductVersion]|$payloadHashManifestSha256"
     )
-    foreach ($actionId in @(
-        "SetRegisterIdentity",
-        "SetRegisterCurrentUserIdentity",
-        "SetProvisionIdentity"
-    )) {
+    foreach ($actionId in @("SetValidateIdentityPayload")) {
         $hashPropertyAction = $decompiled.SelectSingleNode(
             "//*[local-name()='CustomAction' and @Id='$actionId']"
         )
@@ -1006,7 +898,7 @@ try {
         Assert-True (
             $actionValue -ceq $expectedIdentityActionData
         ) (
-            "Identity registration action '$actionId' is not bound to the " +
+            "Identity payload action '$actionId' is not bound to the " +
             "release payload hash manifest."
         )
         Assert-True (
@@ -1111,6 +1003,54 @@ try {
         )
     }
 
+    $identityLauncherPath = Get-ExtractedMsiFile `
+        -DecompiledMsi $decompiled `
+        -ExtractRoot $msiExtractRoot `
+        -Name "Librarian.IdentityLauncher.exe"
+    $identityLauncherManifestPath = Join-Path (
+        $inspectionRoot
+    ) "IdentityLauncher.manifest"
+    Invoke-CheckedProcess `
+        -Label "Extract identity launcher manifest" `
+        -FilePath $manifestTool `
+        -Arguments @(
+            "-nologo",
+            "-inputresource:$identityLauncherPath;#1",
+            "-out:$identityLauncherManifestPath"
+        ) `
+        -WorkingDirectory $repoRoot
+    [xml]$identityLauncherManifest = Get-Content `
+        -LiteralPath $identityLauncherManifestPath `
+        -Raw
+    $launcherNamespaces = New-Object Xml.XmlNamespaceManager(
+        $identityLauncherManifest.NameTable
+    )
+    $launcherNamespaces.AddNamespace(
+        "assembly",
+        "urn:schemas-microsoft-com:asm.v1"
+    )
+    $launcherNamespaces.AddNamespace(
+        "msix",
+        "urn:schemas-microsoft-com:msix.v1"
+    )
+    $launcherAssemblyIdentity = $identityLauncherManifest.SelectSingleNode(
+        "/assembly:assembly/assembly:assemblyIdentity",
+        $launcherNamespaces
+    )
+    $launcherPackageIdentity = $identityLauncherManifest.SelectSingleNode(
+        "/assembly:assembly/msix:msix",
+        $launcherNamespaces
+    )
+    Assert-True (
+        $null -ne $launcherAssemblyIdentity -and
+        $launcherAssemblyIdentity.GetAttribute("version") -eq
+            $ExpectedProductVersion -and
+        $null -eq $launcherPackageIdentity
+    ) (
+        "The identity launcher must embed the product version but remain " +
+        "unpackaged so it can converge stale user registrations."
+    )
+
     $identityPackage = Get-ExtractedMsiFile `
         -DecompiledMsi $decompiled `
         -ExtractRoot $msiExtractRoot `
@@ -1169,6 +1109,18 @@ try {
         "The desktop executable must use the hybrid CRT instead of requiring " +
         "a separately installed Visual C++ runtime."
     )
+    $launcherDependencies = Invoke-CapturedProcess `
+        -FilePath $dumpbinCandidates[-1] `
+        -Arguments @("/nologo", "/dependents", $identityLauncherPath) `
+        -WorkingDirectory $repoRoot
+    Assert-True (
+        $launcherDependencies.ExitCode -eq 0 -and
+        $launcherDependencies.StandardOutput -notmatch
+            '(?im)^\s*(MSVCP|VCRUNTIME)\d+(?:_\d+)?(?:D)?\.dll\s*$'
+    ) (
+        "The identity launcher must remain self-contained and must not " +
+        "require a separately installed Visual C++ runtime."
+    )
     $dumpbinResult = Invoke-CapturedProcess `
         -FilePath $dumpbinCandidates[-1] `
         -Arguments @("/nologo", "/exports", $customActionBinary) `
@@ -1177,14 +1129,8 @@ try {
         $dumpbinResult.ExitCode -eq 0
     ) "dumpbin failed to inspect the embedded custom-action DLL."
     $expectedExports = @(
-        "CleanupIdentitySnapshot",
-        "ProvisionIdentity",
-        "RegisterCurrentUserIdentity",
-        "RegisterIdentity",
-        "RollbackCurrentUserIdentity",
-        "RollbackIdentity",
-        "SnapshotIdentity",
-        "UnregisterIdentity"
+        "UnregisterCurrentUserIdentity",
+        "ValidateIdentityPayload"
     )
     foreach ($export in $expectedExports) {
         Assert-True (
@@ -1192,6 +1138,20 @@ try {
                 "(?m)^\s+\d+\s+[0-9A-Fa-f]+\s+[0-9A-Fa-f]+\s+$export(?:\s|$)"
             )
         ) "The custom-action DLL does not export '$export'."
+    }
+    foreach ($forbiddenExport in @(
+        "ProvisionIdentity",
+        "RegisterIdentity",
+        "RollbackIdentity",
+        "SnapshotIdentity",
+        "UnregisterIdentity"
+    )) {
+        Assert-True (
+            $dumpbinResult.StandardOutput -notmatch (
+                "(?m)^\s+\d+\s+[0-9A-Fa-f]+\s+[0-9A-Fa-f]+\s+" +
+                "$forbiddenExport(?:\s|$)"
+            )
+        ) "The custom-action DLL still exports '$forbiddenExport'."
     }
 
     $baDataPath = Join-Path $bootstrapperApplicationRoot (
@@ -1286,7 +1246,27 @@ try {
     Assert-True (
         (Test-Path -LiteralPath $signTool -PathType Leaf)
     ) "The locked SignTool.exe is missing."
-    foreach ($signedArtifact in @($resolvedMsi, $resolvedSetup)) {
+    $identityPackageVerificationPath = Join-Path `
+        $identityExtractRoot `
+        "Librarian.Identity.msix"
+    Copy-Item `
+        -LiteralPath $releasePaths["IdentityPackage"] `
+        -Destination $identityPackageVerificationPath
+    $signedReleasePaths = @(
+        foreach ($entry in $releasePaths.GetEnumerator()) {
+            if ($entry.Key -eq "IdentityPackage") {
+                $identityPackageVerificationPath
+            } else {
+                $entry.Value
+            }
+        }
+    )
+    $artifactsRequiringSignature = @(
+        $resolvedMsi,
+        $resolvedSetup,
+        $customActionBinary
+    ) + $signedReleasePaths
+    foreach ($signedArtifact in $artifactsRequiringSignature) {
         $verification = Invoke-CapturedProcess `
             -FilePath $signTool `
             -Arguments @("verify", "/pa", "/all", $signedArtifact) `
@@ -1316,7 +1296,8 @@ try {
             "passed"
         })
     )
-    Write-Host "Product executables: 3"
+    Write-Host "Product-role executables: 3"
+    Write-Host "Identity launcher: present"
     Write-Host "Passkey provider: absent (owned by issue #18)"
 } finally {
     if (Test-Path -LiteralPath $resolvedInspectionRoot) {

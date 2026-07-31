@@ -24,7 +24,7 @@
     <!-- Burn owns the single Programs and Features entry. -->
     <Property Id="ARPSYSTEMCOMPONENT" Value="1" />
     <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOXTEXT" Value="Launch Librarian" />
-    <Property Id="WixShellExecTarget" Value="[#DesktopExecutable]" />
+    <Property Id="WixShellExecTarget" Value="[#IdentityLauncherExecutable]" />
 
     <Property Id="CHROME_MACHINE">
       <RegistrySearch
@@ -73,6 +73,18 @@
         <File
           Id="DesktopExecutable"
           Source="$(var.PayloadDir)\Librarian.Windows.exe"
+          KeyPath="yes" />
+        <RegistryValue
+          Root="HKLM"
+          Key="SOFTWARE\TheUndeadMonk\Librarian"
+          Name="Version"
+          Type="string"
+          Value="[ProductVersion]" />
+      </Component>
+      <Component Id="IdentityLauncherComponent" Directory="INSTALLFOLDER" Guid="*">
+        <File
+          Id="IdentityLauncherExecutable"
+          Source="$(var.PayloadDir)\Librarian.IdentityLauncher.exe"
           KeyPath="yes">
           <Shortcut
             Id="LibrarianStartMenuShortcut"
@@ -86,12 +98,6 @@
           Id="RemoveLibrarianProgramMenu"
           Directory="LibrarianProgramMenu"
           On="uninstall" />
-        <RegistryValue
-          Root="HKLM"
-          Key="SOFTWARE\TheUndeadMonk\Librarian"
-          Name="Version"
-          Type="string"
-          Value="[ProductVersion]" />
       </Component>
       <Component Id="VaultAgentExecutableComponent" Directory="INSTALLFOLDER" Guid="*">
         <File
@@ -121,6 +127,7 @@
         Include="$(var.PayloadDir)\**"
         Directory="INSTALLFOLDER">
         <Exclude Files="$(var.PayloadDir)\Librarian.Windows.exe" />
+        <Exclude Files="$(var.PayloadDir)\Librarian.IdentityLauncher.exe" />
         <Exclude Files="$(var.PayloadDir)\Librarian.VaultAgent.exe" />
         <Exclude Files="$(var.PayloadDir)\Librarian.ChromiumNativeHost.exe" />
         <Exclude Files="$(var.PayloadDir)\Librarian.Identity.msix" />
@@ -183,107 +190,19 @@
       SourceFile="$(var.CustomActionPath)" />
 
     <CustomAction
-      Id="SnapshotIdentity"
+      Id="ValidateIdentityPayload"
       BinaryRef="LibrarianSetupCustomActions"
-      DllEntry="SnapshotIdentity"
+      DllEntry="ValidateIdentityPayload"
       Execute="deferred"
       Impersonate="no"
       Return="check"
       HideTarget="yes" />
     <CustomAction
-      Id="RollbackIdentity"
+      Id="UnregisterCurrentUserIdentity"
       BinaryRef="LibrarianSetupCustomActions"
-      DllEntry="RollbackIdentity"
-      Execute="rollback"
-      Impersonate="no"
-      Return="check"
-      HideTarget="yes" />
-    <CustomAction
-      Id="RollbackCurrentUserIdentity"
-      BinaryRef="LibrarianSetupCustomActions"
-      DllEntry="RollbackCurrentUserIdentity"
-      Execute="rollback"
-      Impersonate="yes"
-      Return="check"
-      HideTarget="yes" />
-    <CustomAction
-      Id="RollbackIdentitySnapshotCleanup"
-      BinaryRef="LibrarianSetupCustomActions"
-      DllEntry="CleanupIdentitySnapshot"
-      Execute="rollback"
-      Impersonate="no"
-      Return="check"
-      HideTarget="yes" />
-    <CustomAction
-      Id="RegisterIdentity"
-      BinaryRef="LibrarianSetupCustomActions"
-      DllEntry="RegisterIdentity"
-      Execute="deferred"
-      Impersonate="no"
-      Return="check"
-      HideTarget="yes" />
-    <CustomAction
-      Id="RegisterCurrentUserIdentity"
-      BinaryRef="LibrarianSetupCustomActions"
-      DllEntry="RegisterCurrentUserIdentity"
+      DllEntry="UnregisterCurrentUserIdentity"
       Execute="deferred"
       Impersonate="yes"
-      Return="check"
-      HideTarget="yes" />
-    <CustomAction
-      Id="ProvisionIdentity"
-      BinaryRef="LibrarianSetupCustomActions"
-      DllEntry="ProvisionIdentity"
-      Execute="commit"
-      Impersonate="no"
-      Return="check"
-      HideTarget="yes" />
-    <CustomAction
-      Id="CleanupIdentitySnapshot"
-      BinaryRef="LibrarianSetupCustomActions"
-      DllEntry="CleanupIdentitySnapshot"
-      Execute="commit"
-      Impersonate="no"
-      Return="ignore"
-      HideTarget="yes" />
-    <CustomAction
-      Id="SnapshotUnregisterIdentity"
-      BinaryRef="LibrarianSetupCustomActions"
-      DllEntry="SnapshotIdentity"
-      Execute="deferred"
-      Impersonate="no"
-      Return="check"
-      HideTarget="yes" />
-    <CustomAction
-      Id="RollbackUnregisterIdentity"
-      BinaryRef="LibrarianSetupCustomActions"
-      DllEntry="RollbackIdentity"
-      Execute="rollback"
-      Impersonate="no"
-      Return="check"
-      HideTarget="yes" />
-    <CustomAction
-      Id="RollbackUnregisterCurrentUserIdentity"
-      BinaryRef="LibrarianSetupCustomActions"
-      DllEntry="RollbackCurrentUserIdentity"
-      Execute="rollback"
-      Impersonate="yes"
-      Return="check"
-      HideTarget="yes" />
-    <CustomAction
-      Id="RollbackUnregisterSnapshotCleanup"
-      BinaryRef="LibrarianSetupCustomActions"
-      DllEntry="CleanupIdentitySnapshot"
-      Execute="rollback"
-      Impersonate="no"
-      Return="check"
-      HideTarget="yes" />
-    <CustomAction
-      Id="UnregisterIdentity"
-      BinaryRef="LibrarianSetupCustomActions"
-      DllEntry="UnregisterIdentity"
-      Execute="commit"
-      Impersonate="no"
       Return="check"
       HideTarget="yes" />
     <CustomAction
@@ -294,146 +213,27 @@
       Return="check" />
 
     <SetProperty
-      Id="SnapshotIdentity"
-      Value="[INSTALLFOLDER]Librarian.Identity.msix.state|[INSTALLFOLDER]|[ProductVersion]|[UserSID]"
-      Before="SnapshotIdentity"
-      Sequence="execute"
-      Condition="NOT (REMOVE~=&quot;ALL&quot;)" />
-    <SetProperty
-      Id="RollbackIdentitySnapshotCleanup"
-      Value="[INSTALLFOLDER]Librarian.Identity.msix.state|[INSTALLFOLDER]"
-      Before="RollbackIdentitySnapshotCleanup"
-      Sequence="execute"
-      Condition="NOT (REMOVE~=&quot;ALL&quot;)" />
-    <SetProperty
-      Id="RollbackCurrentUserIdentity"
-      Value="[INSTALLFOLDER]Librarian.Identity.msix.state|[INSTALLFOLDER]Librarian.Identity.rollback.msix|[INSTALLFOLDER]|[ProductVersion]"
-      Before="RollbackCurrentUserIdentity"
-      Sequence="execute"
-      Condition="NOT (REMOVE~=&quot;ALL&quot;)" />
-    <SetProperty
-      Id="RollbackIdentity"
-      Value="[INSTALLFOLDER]Librarian.Identity.msix.state|[INSTALLFOLDER]Librarian.Identity.rollback.msix|[INSTALLFOLDER]|[ProductVersion]"
-      Before="RollbackIdentity"
-      Sequence="execute"
-      Condition="NOT (REMOVE~=&quot;ALL&quot;)" />
-    <SetProperty
-      Id="RegisterIdentity"
+      Id="ValidateIdentityPayload"
       Value="[INSTALLFOLDER]|[ProductVersion]|$(var.PayloadHashManifestSha256)"
-      Before="RegisterIdentity"
+      Before="ValidateIdentityPayload"
       Sequence="execute"
       Condition="NOT (REMOVE~=&quot;ALL&quot;)" />
     <SetProperty
-      Id="RegisterCurrentUserIdentity"
-      Value="[INSTALLFOLDER]|[ProductVersion]|$(var.PayloadHashManifestSha256)"
-      Before="RegisterCurrentUserIdentity"
-      Sequence="execute"
-      Condition="NOT (REMOVE~=&quot;ALL&quot;)" />
-    <SetProperty
-      Id="ProvisionIdentity"
-      Value="[INSTALLFOLDER]|[ProductVersion]|$(var.PayloadHashManifestSha256)"
-      Before="ProvisionIdentity"
-      Sequence="execute"
-      Condition="NOT (REMOVE~=&quot;ALL&quot;)" />
-    <SetProperty
-      Id="CleanupIdentitySnapshot"
-      Value="[INSTALLFOLDER]Librarian.Identity.msix.state|[INSTALLFOLDER]"
-      Before="CleanupIdentitySnapshot"
-      Sequence="execute"
-      Condition="NOT (REMOVE~=&quot;ALL&quot;) OR (REMOVE~=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE)" />
-    <SetProperty
-      Id="SnapshotUnregisterIdentity"
-      Value="[INSTALLFOLDER]Librarian.Identity.msix.state|[INSTALLFOLDER]|[ProductVersion]|[UserSID]"
-      Before="SnapshotUnregisterIdentity"
-      Sequence="execute"
-      Condition="REMOVE~=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
-    <SetProperty
-      Id="RollbackUnregisterSnapshotCleanup"
-      Value="[INSTALLFOLDER]Librarian.Identity.msix.state|[INSTALLFOLDER]"
-      Before="RollbackUnregisterSnapshotCleanup"
-      Sequence="execute"
-      Condition="REMOVE~=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
-    <SetProperty
-      Id="RollbackUnregisterCurrentUserIdentity"
-      Value="[INSTALLFOLDER]Librarian.Identity.msix.state|[INSTALLFOLDER]Librarian.Identity.rollback.msix|[INSTALLFOLDER]|[ProductVersion]"
-      Before="RollbackUnregisterCurrentUserIdentity"
-      Sequence="execute"
-      Condition="REMOVE~=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
-    <SetProperty
-      Id="RollbackUnregisterIdentity"
-      Value="[INSTALLFOLDER]Librarian.Identity.msix.state|[INSTALLFOLDER]Librarian.Identity.rollback.msix|[INSTALLFOLDER]|[ProductVersion]"
-      Before="RollbackUnregisterIdentity"
-      Sequence="execute"
-      Condition="REMOVE~=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
-    <SetProperty
-      Id="UnregisterIdentity"
+      Id="UnregisterCurrentUserIdentity"
       Value="[ProductVersion]"
-      Before="UnregisterIdentity"
+      Before="UnregisterCurrentUserIdentity"
       Sequence="execute"
       Condition="REMOVE~=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
 
     <InstallExecuteSequence>
       <Custom
-        Action="SnapshotIdentity"
-        After="CreateFolders"
-        Condition="NOT (REMOVE~=&quot;ALL&quot;)" />
-      <!-- Rollback actions execute in reverse sequence. Queue them after
-           InstallFiles so they restore identity from the preserved package
-           before Windows Installer rolls product files back. Queue the system
-           restore before the impersonated restore so reverse execution removes
-           the invoking-user registration for an incoming upgrade before the
-           system restore waits for that package to disappear. -->
-      <Custom
-        Action="RollbackIdentitySnapshotCleanup"
+        Action="ValidateIdentityPayload"
         After="InstallFiles"
         Condition="NOT (REMOVE~=&quot;ALL&quot;)" />
       <Custom
-        Action="RollbackIdentity"
-        After="RollbackIdentitySnapshotCleanup"
-        Condition="NOT (REMOVE~=&quot;ALL&quot;)" />
-      <Custom
-        Action="RollbackCurrentUserIdentity"
-        After="RollbackIdentity"
-        Condition="NOT (REMOVE~=&quot;ALL&quot;)" />
-      <Custom
-        Action="RegisterIdentity"
-        After="RollbackCurrentUserIdentity"
-        Condition="NOT (REMOVE~=&quot;ALL&quot;)" />
-      <Custom
-        Action="RegisterCurrentUserIdentity"
-        After="RegisterIdentity"
-        Condition="NOT (REMOVE~=&quot;ALL&quot;)" />
-      <Custom
-        Action="ProvisionIdentity"
-        After="RegisterCurrentUserIdentity"
-        Condition="NOT (REMOVE~=&quot;ALL&quot;)" />
-      <Custom
-        Action="SnapshotUnregisterIdentity"
+        Action="UnregisterCurrentUserIdentity"
         Before="RemoveFiles"
         Condition="REMOVE~=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
-      <!-- Preserve the installed package before RemoveFiles, then queue the
-           restore actions after it so they execute before file rollback. The
-           system restore again runs first in reverse execution. -->
-      <Custom
-        Action="RollbackUnregisterSnapshotCleanup"
-        After="RemoveFiles"
-        Condition="REMOVE~=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
-      <Custom
-        Action="RollbackUnregisterCurrentUserIdentity"
-        After="RollbackUnregisterSnapshotCleanup"
-        Condition="REMOVE~=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
-      <Custom
-        Action="RollbackUnregisterIdentity"
-        After="RollbackUnregisterCurrentUserIdentity"
-        Condition="REMOVE~=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
-      <Custom
-        Action="UnregisterIdentity"
-        After="RollbackUnregisterIdentity"
-        Condition="REMOVE~=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
-      <Custom
-        Action="CleanupIdentitySnapshot"
-        Before="InstallFinalize"
-        Condition="NOT (REMOVE~=&quot;ALL&quot;) OR (REMOVE~=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE)" />
     </InstallExecuteSequence>
 
     <UI Id="LibrarianInstallerUI">

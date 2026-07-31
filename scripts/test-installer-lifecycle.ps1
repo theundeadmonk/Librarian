@@ -274,37 +274,26 @@ exit 1
     )
 }
 
-function Register-DisposableUserIdentity {
+function Invoke-DisposableUserIdentityLauncher {
     param(
         [Parameter(Mandatory)]
         [PSCredential]$Credential,
 
         [Parameter(Mandatory)]
-        [string]$PackagePath,
-
-        [Parameter(Mandatory)]
-        [string]$ExternalLocation,
+        [string]$LauncherPath,
 
         [Parameter(Mandatory)]
         [ValidatePattern("^\d+\.\d+\.\d+\.\d+$")]
         [string]$ExpectedVersion
     )
 
-    $stagedPackagePath = Join-Path `
-        ([Environment]::GetFolderPath(
-            [Environment+SpecialFolder]::CommonApplicationData
-        )) `
-        ("LibrarianInstallerLifecycle-{0}.msix" -f [Guid]::NewGuid().ToString("N"))
-    try {
-        Copy-Item `
-            -LiteralPath $PackagePath `
-            -Destination $stagedPackagePath `
-            -Force
-        $escapedPackagePath = $stagedPackagePath.Replace("'", "''")
-        $escapedExternalLocation = $ExternalLocation.Replace("'", "''")
-        $probe = @"
+    $escapedLauncherPath = $LauncherPath.Replace("'", "''")
+    $probe = @"
 `$ErrorActionPreference = "Stop"
-Add-AppxPackage -Path '$escapedPackagePath' -ExternalLocation '$escapedExternalLocation' -ForceUpdateFromAnyVersion
+`$process = Start-Process -FilePath '$escapedLauncherPath' -ArgumentList '--register-only' -Wait -PassThru
+if (`$process.ExitCode -ne 0) {
+    exit `$process.ExitCode
+}
 `$versions = @(
     Get-AppxPackage -Name "TheUndeadMonk.Librarian.Development" |
         ForEach-Object { `$_.Version.ToString() } |
@@ -315,41 +304,32 @@ if (`$versions.Count -ne 1 -or `$versions[0] -ne "$ExpectedVersion") {
 }
 exit 0
 "@
-        $result = Invoke-DisposableUserPowerShell `
-            -Credential $Credential `
-            -Script $probe
-        Assert-True (
-            $result.ExitCode -eq 0
-        ) (
-            "The disposable secondary user could not register Librarian " +
-            "identity version '$ExpectedVersion'. Probe error: " +
-            $result.Diagnostic
-        )
-    } finally {
-        Remove-Item `
-            -LiteralPath $stagedPackagePath `
-            -Force `
-            -ErrorAction SilentlyContinue
-    }
+    $result = Invoke-DisposableUserPowerShell `
+        -Credential $Credential `
+        -Script $probe
+    Assert-True (
+        $result.ExitCode -eq 0
+    ) (
+        "The disposable secondary user's Librarian identity launcher did " +
+        "not converge to version '$ExpectedVersion'. Probe error: " +
+        $result.Diagnostic
+    )
 }
 
-function Register-CurrentUserIdentity {
+function Invoke-CurrentUserIdentityLauncher {
     param(
         [Parameter(Mandatory)]
-        [string]$PackagePath,
-
-        [Parameter(Mandatory)]
-        [string]$ExternalLocation,
+        [string]$LauncherPath,
 
         [Parameter(Mandatory)]
         [ValidatePattern("^\d+\.\d+\.\d+\.\d+$")]
         [string]$ExpectedVersion
     )
 
-    Add-AppxPackage `
-        -Path $PackagePath `
-        -ExternalLocation $ExternalLocation `
-        -ForceUpdateFromAnyVersion
+    Invoke-SuccessfulProcess `
+        -Label "Register current-user identity $ExpectedVersion" `
+        -FilePath $LauncherPath `
+        -Arguments @("--register-only")
     $versions = @(
         Get-LibrarianCurrentUserPackages |
             ForEach-Object { $_.Version.ToString() } |
@@ -358,7 +338,7 @@ function Register-CurrentUserIdentity {
     Assert-True (
         $versions.Count -eq 1 -and $versions[0] -eq $ExpectedVersion
     ) (
-        "The invoking user could not register Librarian identity version " +
+        "The invoking user's identity launcher did not converge to version " +
         "'$ExpectedVersion'."
     )
 }
@@ -527,14 +507,23 @@ function Assert-Installed {
         [string]$EdgeRegistryPath,
 
         [Parameter(Mandatory)]
-        [string]$ProductRegistryPath
+        [string]$ProductRegistryPath,
+
+        [AllowEmptyString()]
+        [string]$ExpectedCurrentUserIdentityVersion = "__installed__"
     )
 
+    if ($ExpectedCurrentUserIdentityVersion -eq "__installed__") {
+        $ExpectedCurrentUserIdentityVersion = $ExpectedVersion
+    }
+
     foreach ($name in @(
+        "Librarian.IdentityLauncher.exe",
         "Librarian.Windows.exe",
         "Librarian.VaultAgent.exe",
         "Librarian.ChromiumNativeHost.exe",
         "Librarian.Identity.msix",
+        "Librarian.PayloadHashes",
         "Librarian.Release.json"
     )) {
         Assert-True (
@@ -560,6 +549,7 @@ function Assert-Installed {
     ) "The installed release manifest does not match the expected fixture."
 
     foreach ($executable in @(
+        "Librarian.IdentityLauncher.exe",
         "Librarian.Windows.exe",
         "Librarian.VaultAgent.exe",
         "Librarian.ChromiumNativeHost.exe"
@@ -583,40 +573,38 @@ function Assert-Installed {
         @(Get-VisibleArpEntries).Count -eq 1
     ) "The install must expose exactly one visible Programs and Features entry."
 
-    $packageVersions = @(
-        Get-LibrarianPackages |
-            ForEach-Object { $_.Version.ToString() } |
-            Sort-Object -Unique
-    )
-    Assert-True (
-        $packageVersions.Count -eq 1 -and
-        $packageVersions[0] -eq $ExpectedVersion
-    ) (
-        "The staged identity package is missing, stale, or duplicated. Found: " +
-        "$($packageVersions -join ', ')."
-    )
     $currentUserVersions = @(
         Get-LibrarianCurrentUserPackages |
             ForEach-Object { $_.Version.ToString() } |
             Sort-Object -Unique
     )
-    Assert-True (
-        $currentUserVersions.Count -eq 1 -and
-        $currentUserVersions[0] -eq $ExpectedVersion
-    ) (
-        "The invoking user does not have the expected package identity. Found: " +
-        "$($currentUserVersions -join ', ')."
-    )
+    if ($ExpectedCurrentUserIdentityVersion) {
+        Assert-True (
+            $currentUserVersions.Count -eq 1 -and
+            $currentUserVersions[0] -eq
+                $ExpectedCurrentUserIdentityVersion
+        ) (
+            "The invoking user does not have identity version " +
+            "'$ExpectedCurrentUserIdentityVersion'. Found: " +
+            "$($currentUserVersions -join ', ')."
+        )
+    } else {
+        Assert-True (
+            $currentUserVersions.Count -eq 0
+        ) (
+            "Setup mutated current-user identity before user-context " +
+            "activation. Found: $($currentUserVersions -join ', ')."
+        )
+    }
     $provisionedVersions = @(
         Get-LibrarianProvisionedPackages |
             ForEach-Object { $_.Version.ToString() } |
             Sort-Object -Unique
     )
     Assert-True (
-        $provisionedVersions.Count -eq 1 -and
-        $provisionedVersions[0] -eq $ExpectedVersion
+        $provisionedVersions.Count -eq 0
     ) (
-        "The provisioned identity package is missing, stale, or duplicated. Found: " +
+        "The per-user installer must not provision package identity. Found: " +
         "$($provisionedVersions -join ', ')."
     )
 
@@ -640,7 +628,9 @@ function Assert-ProductAbsent {
         [string]$EdgeRegistryPath,
 
         [Parameter(Mandatory)]
-        [string]$ProductRegistryPath
+        [string]$ProductRegistryPath,
+
+        [switch]$AllowOtherUserIdentity
     )
 
     if (Test-Path -LiteralPath $InstallFolder) {
@@ -649,7 +639,7 @@ function Assert-ProductAbsent {
             $remaining.Count -eq 0
         ) (
             "Installer-owned files remain after rollback or uninstall: " +
-            "$($remaining.FullName -join ', ')."
+            "$(($remaining | ForEach-Object FullName) -join ', ')."
         )
     }
     foreach ($registryPath in @(
@@ -664,78 +654,17 @@ function Assert-ProductAbsent {
     Assert-True (
         @(Get-VisibleArpEntries).Count -eq 0
     ) "A visible Librarian Programs and Features entry remains."
-    Assert-True (
-        @(Get-LibrarianPackages).Count -eq 0
-    ) "A Librarian identity package remains installed."
+    if (-not $AllowOtherUserIdentity) {
+        Assert-True (
+            @(Get-LibrarianPackages).Count -eq 0
+        ) "A Librarian identity package remains installed."
+    }
     Assert-True (
         @(Get-LibrarianCurrentUserPackages).Count -eq 0
     ) "A Librarian identity package remains registered for the invoking user."
     Assert-True (
         @(Get-LibrarianProvisionedPackages).Count -eq 0
     ) "A Librarian identity package remains provisioned."
-}
-
-function Assert-InstalledWithoutIdentity {
-    param(
-        [Parameter(Mandatory)]
-        [string]$ExpectedVersion,
-
-        [Parameter(Mandatory)]
-        [string]$InstallFolder,
-
-        [Parameter(Mandatory)]
-        [string]$ChromeRegistryPath,
-
-        [Parameter(Mandatory)]
-        [string]$EdgeRegistryPath,
-
-        [Parameter(Mandatory)]
-        [string]$ProductRegistryPath
-    )
-
-    foreach ($name in @(
-        "Librarian.Windows.exe",
-        "Librarian.VaultAgent.exe",
-        "Librarian.ChromiumNativeHost.exe",
-        "Librarian.Identity.msix",
-        "Librarian.Release.json"
-    )) {
-        Assert-True (
-            Test-Path -LiteralPath (Join-Path $InstallFolder $name) -PathType Leaf
-        ) "Uninstall rollback did not restore installer-owned file '$name'."
-    }
-    Assert-True (
-        (Get-ItemProperty -LiteralPath $ProductRegistryPath).Version -eq
-            $ExpectedVersion
-    ) "Uninstall rollback did not restore the product registration."
-    Assert-True (
-        @(Get-VisibleArpEntries).Count -eq 1
-    ) "Uninstall rollback did not restore the Programs and Features entry."
-    Assert-BrowserState `
-        -Expected $true `
-        -InstallFolder $InstallFolder `
-        -ChromeRegistryPath $ChromeRegistryPath `
-        -EdgeRegistryPath $EdgeRegistryPath
-    Assert-NoInstallerRollbackArtifacts -InstallFolder $InstallFolder
-    Assert-True (
-        @(Get-LibrarianPackages).Count -eq 0 -and
-        @(Get-LibrarianCurrentUserPackages).Count -eq 0 -and
-        @(Get-LibrarianProvisionedPackages).Count -eq 0
-    ) "Uninstall rollback created identity state that was absent beforehand."
-}
-
-function Remove-LibrarianIdentityState {
-    foreach ($package in Get-LibrarianProvisionedPackages) {
-        $null = Remove-AppxProvisionedPackage `
-            -Online `
-            -AllUsers `
-            -PackageName $package.PackageName
-    }
-    foreach ($package in Get-LibrarianPackages) {
-        Remove-AppxPackage `
-            -AllUsers `
-            -Package $package.PackageFullName
-    }
 }
 
 function Remove-ProductState {
@@ -899,13 +828,6 @@ Assert-True (
 $resolvedUnsignedSetup = (Resolve-Path -LiteralPath $UnsignedSetupPath).Path
 $resolvedSignedLowMsi = (Resolve-Path -LiteralPath $SignedLowMsiPath).Path
 $resolvedSignedLowSetup = (Resolve-Path -LiteralPath $SignedLowSetupPath).Path
-$resolvedSignedLowIdentity = (
-    Resolve-Path -LiteralPath (
-        Join-Path (
-            Split-Path $resolvedSignedLowMsi -Parent
-        ) "Librarian.Identity.msix"
-    )
-).Path
 $resolvedSignedHighMsi = (Resolve-Path -LiteralPath $SignedHighMsiPath).Path
 $resolvedSignedHighSetup = (Resolve-Path -LiteralPath $SignedHighSetupPath).Path
 $resolvedLogDirectory = [IO.Path]::GetFullPath($LogDirectory)
@@ -1022,11 +944,17 @@ try {
         -InstallFolder $installFolder `
         -ChromeRegistryPath $chromeRegistryPath `
         -EdgeRegistryPath $edgeRegistryPath `
-        -ProductRegistryPath $productRegistryPath
-    Register-DisposableUserIdentity `
+        -ProductRegistryPath $productRegistryPath `
+        -ExpectedCurrentUserIdentityVersion ""
+    $identityLauncher = Join-Path (
+        $installFolder
+    ) "Librarian.IdentityLauncher.exe"
+    Invoke-CurrentUserIdentityLauncher `
+        -LauncherPath $identityLauncher `
+        -ExpectedVersion $LowVersion
+    Invoke-DisposableUserIdentityLauncher `
         -Credential $disposableUserCredential `
-        -PackagePath $resolvedSignedLowIdentity `
-        -ExternalLocation $installFolder `
+        -LauncherPath $identityLauncher `
         -ExpectedVersion $LowVersion
 
     if (-not $SkipInteractiveDesktopLaunch) {
@@ -1038,31 +966,40 @@ try {
             )
         }
 
-        $desktopProcess = Start-Process `
-            -FilePath (Join-Path $installFolder "Librarian.Windows.exe") `
+        $launcherProcess = Start-Process `
+            -FilePath $identityLauncher `
             -WorkingDirectory $installFolder `
             -PassThru
+        $launchedDesktopProcesses = @()
         try {
             Start-Sleep -Seconds 3
-            $desktopProcess.Refresh()
-            if ($desktopProcess.HasExited) {
-                $desktopExitCode = $desktopProcess.ExitCode
-                $desktopExitCodeHex = "0x{0:X8}" -f (
-                    [int64]$desktopExitCode -band 0xFFFFFFFFL
-                )
-                Assert-True (
-                    $desktopExitCode -eq 0
-                ) (
-                    "The installed desktop executable exited with code " +
-                    "$desktopExitCode ($desktopExitCodeHex)."
-                )
-            }
+            $launcherProcess.Refresh()
+            Assert-True (
+                $launcherProcess.HasExited -and
+                $launcherProcess.ExitCode -eq 0
+            ) "The installed identity launcher failed."
+            $launchedDesktopProcesses = @(
+                Get-Process `
+                    -Name "Librarian.Windows" `
+                    -ErrorAction SilentlyContinue
+            )
+            Assert-True (
+                $launchedDesktopProcesses.Count -gt 0
+            ) "The identity launcher did not start the desktop application."
         } finally {
-            if (-not $desktopProcess.HasExited) {
-                Stop-Process -Id $desktopProcess.Id -Force
-                Wait-Process -Id $desktopProcess.Id -ErrorAction SilentlyContinue
+            foreach ($launchedDesktop in @($launchedDesktopProcesses)) {
+                Stop-Process `
+                    -Id $launchedDesktop.Id `
+                    -Force `
+                    -ErrorAction SilentlyContinue
+                Wait-Process `
+                    -Id $launchedDesktop.Id `
+                    -ErrorAction SilentlyContinue
             }
-            $desktopProcess.Dispose()
+            if (-not $launcherProcess.HasExited) {
+                Stop-Process -Id $launcherProcess.Id -Force
+            }
+            $launcherProcess.Dispose()
         }
     }
 
@@ -1186,64 +1123,18 @@ try {
         -InstallFolder $installFolder `
         -ChromeRegistryPath $chromeRegistryPath `
         -EdgeRegistryPath $edgeRegistryPath `
-        -ProductRegistryPath $productRegistryPath
+        -ProductRegistryPath $productRegistryPath `
+        -ExpectedCurrentUserIdentityVersion $LowVersion
     Invoke-DisposableUserIdentityProbe `
         -Credential $disposableUserCredential `
-        -ExpectedVersion $HighVersion
+        -ExpectedVersion $LowVersion
     Assert-Sentinel -Path $sentinelPath -Expected $sentinelValue
 
-    Register-CurrentUserIdentity `
-        -PackagePath $resolvedSignedLowIdentity `
-        -ExternalLocation $installFolder `
-        -ExpectedVersion $LowVersion
-    $highProvisioning = @(Get-LibrarianProvisionedPackages)
-    Assert-True (
-        $highProvisioning.Count -eq 1 -and
-        $highProvisioning[0].Version.ToString() -eq $HighVersion
-    ) "The retained-user fixture did not begin with high provisioning."
-    $null = Remove-AppxProvisionedPackage `
-        -Online `
-        -AllUsers `
-        -PackageName $highProvisioning[0].PackageName
-    Assert-True (
-        @(Get-LibrarianProvisionedPackages).Count -eq 0
-    ) "The retained-user fixture could not remove package provisioning."
-    Invoke-DisposableUserIdentityProbe `
-        -Credential $disposableUserCredential `
-        -ExpectedVersion $HighVersion
-    Invoke-FailingProcess `
-        -Label "Reject repair over another user's incoming identity" `
-        -FilePath $msiexec `
-        -Arguments @(
-            "/i",
-            $resolvedSignedHighMsi,
-            "REINSTALL=ALL",
-            "REINSTALLMODE=amus",
-            "ADDLOCAL=Core,ChromeIntegration,EdgeIntegration",
-            "/qn",
-            "/norestart",
-            "/l*v",
-            (Join-Path $resolvedLogDirectory "07a-other-user-state-rejected.log")
-        )
-    $currentUserAfterOtherUserRejection = @(
-        Get-LibrarianCurrentUserPackages |
-            ForEach-Object { $_.Version.ToString() } |
-            Sort-Object -Unique
-    )
-    Assert-True (
-        $currentUserAfterOtherUserRejection.Count -eq 1 -and
-        $currentUserAfterOtherUserRejection[0] -eq $LowVersion -and
-        @(Get-LibrarianProvisionedPackages).Count -eq 0
-    ) "The rejected retained-user repair changed identity state."
-    Invoke-DisposableUserIdentityProbe `
-        -Credential $disposableUserCredential `
-        -ExpectedVersion $HighVersion
-    Register-CurrentUserIdentity `
-        -PackagePath (Join-Path $installFolder "Librarian.Identity.msix") `
-        -ExternalLocation $installFolder `
+    Invoke-CurrentUserIdentityLauncher `
+        -LauncherPath $identityLauncher `
         -ExpectedVersion $HighVersion
     Invoke-SuccessfulProcess `
-        -Label "Restore provisioning after retained-user rejection" `
+        -Label "Repair with retained secondary-user identity" `
         -FilePath $msiexec `
         -Arguments @(
             "/i",
@@ -1254,7 +1145,7 @@ try {
             "/qn",
             "/norestart",
             "/l*v",
-            (Join-Path $resolvedLogDirectory "07b-restored-provisioning.log")
+            (Join-Path $resolvedLogDirectory "07a-secondary-user-repair.log")
         )
     Assert-Installed `
         -ExpectedVersion $HighVersion `
@@ -1263,96 +1154,17 @@ try {
         -ChromeRegistryPath $chromeRegistryPath `
         -EdgeRegistryPath $edgeRegistryPath `
         -ProductRegistryPath $productRegistryPath
+    Invoke-DisposableUserIdentityProbe `
+        -Credential $disposableUserCredential `
+        -ExpectedVersion $LowVersion
+    Invoke-DisposableUserIdentityLauncher `
+        -Credential $disposableUserCredential `
+        -LauncherPath $identityLauncher `
+        -ExpectedVersion $HighVersion
     Invoke-DisposableUserIdentityProbe `
         -Credential $disposableUserCredential `
         -ExpectedVersion $HighVersion
 
-    Register-DisposableUserIdentity `
-        -Credential $disposableUserCredential `
-        -PackagePath $resolvedSignedLowIdentity `
-        -ExternalLocation $installFolder `
-        -ExpectedVersion $LowVersion
-    $coexistingVersions = @(
-        Get-LibrarianPackages |
-            ForEach-Object { $_.Version.ToString() } |
-            Sort-Object -Unique
-    )
-    Assert-True (
-        $coexistingVersions.Count -eq 2 -and
-        $coexistingVersions -contains $LowVersion -and
-        $coexistingVersions -contains $HighVersion
-    ) "The secondary-user fixture did not create two package versions."
-    Register-CurrentUserIdentity `
-        -PackagePath $resolvedSignedLowIdentity `
-        -ExternalLocation $installFolder `
-        -ExpectedVersion $LowVersion
-    $provisionedBeforeRejectedRepair = @(
-        Get-LibrarianProvisionedPackages |
-            ForEach-Object { $_.Version.ToString() } |
-            Sort-Object -Unique
-    )
-    Assert-True (
-        $provisionedBeforeRejectedRepair.Count -eq 1 -and
-        $provisionedBeforeRejectedRepair[0] -eq $HighVersion
-    ) "The divergent-state fixture did not preserve high provisioning."
-    Invoke-FailingProcess `
-        -Label "Reject repair from divergent identity state" `
-        -FilePath $msiexec `
-        -Arguments @(
-            "/i",
-            $resolvedSignedHighMsi,
-            "REINSTALL=ALL",
-            "REINSTALLMODE=amus",
-            "ADDLOCAL=Core,ChromeIntegration,EdgeIntegration",
-            "/qn",
-            "/norestart",
-            "/l*v",
-            (Join-Path $resolvedLogDirectory "07a-divergent-state-rejected.log")
-        )
-    $currentUserAfterRejectedRepair = @(
-        Get-LibrarianCurrentUserPackages |
-            ForEach-Object { $_.Version.ToString() } |
-            Sort-Object -Unique
-    )
-    $provisionedAfterRejectedRepair = @(
-        Get-LibrarianProvisionedPackages |
-            ForEach-Object { $_.Version.ToString() } |
-            Sort-Object -Unique
-    )
-    Assert-True (
-        $currentUserAfterRejectedRepair.Count -eq 1 -and
-        $currentUserAfterRejectedRepair[0] -eq $LowVersion -and
-        $provisionedAfterRejectedRepair.Count -eq 1 -and
-        $provisionedAfterRejectedRepair[0] -eq $HighVersion
-    ) "The rejected divergent-state repair changed identity state."
-    Register-CurrentUserIdentity `
-        -PackagePath (Join-Path $installFolder "Librarian.Identity.msix") `
-        -ExternalLocation $installFolder `
-        -ExpectedVersion $HighVersion
-    Invoke-SuccessfulProcess `
-        -Label "Repair with a retained secondary-user identity" `
-        -FilePath $msiexec `
-        -Arguments @(
-            "/i",
-            $resolvedSignedHighMsi,
-            "REINSTALL=ALL",
-            "REINSTALLMODE=amus",
-            "ADDLOCAL=Core,ChromeIntegration,EdgeIntegration",
-            "/qn",
-            "/norestart",
-            "/l*v",
-            (Join-Path $resolvedLogDirectory "07b-secondary-user-repair.log")
-        )
-    Assert-Installed `
-        -ExpectedVersion $HighVersion `
-        -BrowsersExpected $true `
-        -InstallFolder $installFolder `
-        -ChromeRegistryPath $chromeRegistryPath `
-        -EdgeRegistryPath $edgeRegistryPath `
-        -ProductRegistryPath $productRegistryPath
-    Invoke-DisposableUserIdentityProbe `
-        -Credential $disposableUserCredential `
-        -ExpectedVersion $HighVersion
     Assert-Sentinel -Path $sentinelPath -Expected $sentinelValue
 
     Invoke-FailingProcess `
@@ -1374,15 +1186,8 @@ try {
         -ProductRegistryPath $productRegistryPath
     Assert-Sentinel -Path $sentinelPath -Expected $sentinelValue
 
-    Remove-LibrarianIdentityState
-    Assert-InstalledWithoutIdentity `
-        -ExpectedVersion $HighVersion `
-        -InstallFolder $installFolder `
-        -ChromeRegistryPath $chromeRegistryPath `
-        -EdgeRegistryPath $edgeRegistryPath `
-        -ProductRegistryPath $productRegistryPath
     Invoke-FailingProcess `
-        -Label "Preserve absent identity through uninstall rollback" `
+        -Label "Rollback interrupted uninstall" `
         -FilePath $msiexec `
         -Arguments @(
             "/x",
@@ -1391,30 +1196,11 @@ try {
             "/qn",
             "/norestart",
             "/l*v",
-            (Join-Path $resolvedLogDirectory "09-absent-identity-rollback.log")
+            (Join-Path $resolvedLogDirectory "09-interrupted-uninstall.log")
         )
-    Assert-InstalledWithoutIdentity `
-        -ExpectedVersion $HighVersion `
-        -InstallFolder $installFolder `
-        -ChromeRegistryPath $chromeRegistryPath `
-        -EdgeRegistryPath $edgeRegistryPath `
-        -ProductRegistryPath $productRegistryPath
-    Assert-Sentinel -Path $sentinelPath -Expected $sentinelValue
-
-    Invoke-SuccessfulProcess `
-        -Label "Repair identity after external package-state damage" `
-        -FilePath $msiexec `
-        -Arguments @(
-            "/i",
-            $resolvedSignedHighMsi,
-            "REINSTALL=ALL",
-            "REINSTALLMODE=amus",
-            "ADDLOCAL=Core,ChromeIntegration,EdgeIntegration",
-            "/qn",
-            "/norestart",
-            "/l*v",
-            (Join-Path $resolvedLogDirectory "10-repair-identity.log")
-        )
+    Invoke-CurrentUserIdentityLauncher `
+        -LauncherPath $identityLauncher `
+        -ExpectedVersion $HighVersion
     Assert-Installed `
         -ExpectedVersion $HighVersion `
         -BrowsersExpected $true `
@@ -1438,7 +1224,11 @@ try {
         -InstallFolder $installFolder `
         -ChromeRegistryPath $chromeRegistryPath `
         -EdgeRegistryPath $edgeRegistryPath `
-        -ProductRegistryPath $productRegistryPath
+        -ProductRegistryPath $productRegistryPath `
+        -AllowOtherUserIdentity
+    Invoke-DisposableUserIdentityProbe `
+        -Credential $disposableUserCredential `
+        -ExpectedVersion $HighVersion
     Assert-Sentinel -Path $sentinelPath -Expected $sentinelValue
 
     Invoke-SuccessfulProcess `
@@ -1451,6 +1241,23 @@ try {
             "/log",
             (Join-Path $resolvedLogDirectory "12-reinstall-high.log")
         )
+    Assert-Installed `
+        -ExpectedVersion $HighVersion `
+        -BrowsersExpected $false `
+        -InstallFolder $installFolder `
+        -ChromeRegistryPath $chromeRegistryPath `
+        -EdgeRegistryPath $edgeRegistryPath `
+        -ProductRegistryPath $productRegistryPath `
+        -ExpectedCurrentUserIdentityVersion ""
+    Invoke-DisposableUserIdentityProbe `
+        -Credential $disposableUserCredential `
+        -ExpectedVersion $HighVersion
+    $identityLauncher = Join-Path (
+        $installFolder
+    ) "Librarian.IdentityLauncher.exe"
+    Invoke-CurrentUserIdentityLauncher `
+        -LauncherPath $identityLauncher `
+        -ExpectedVersion $HighVersion
     Assert-Installed `
         -ExpectedVersion $HighVersion `
         -BrowsersExpected $false `
@@ -1474,7 +1281,11 @@ try {
         -InstallFolder $installFolder `
         -ChromeRegistryPath $chromeRegistryPath `
         -EdgeRegistryPath $edgeRegistryPath `
-        -ProductRegistryPath $productRegistryPath
+        -ProductRegistryPath $productRegistryPath `
+        -AllowOtherUserIdentity
+    Invoke-DisposableUserIdentityProbe `
+        -Credential $disposableUserCredential `
+        -ExpectedVersion $HighVersion
     Assert-Sentinel -Path $sentinelPath -Expected $sentinelValue
 } catch {
     $failure = $_
@@ -1499,11 +1310,9 @@ try {
                 -Pattern (
                     "Librarian setup:|" +
                     "Action (start|ended).*" +
-                    "(SnapshotIdentity|RollbackIdentity|" +
-                    "RollbackCurrentUserIdentity|" +
-                    "RollbackIdentitySnapshotCleanup|" +
-                    "RegisterIdentity|RegisterCurrentUserIdentity|" +
-                    "ProvisionIdentity|WixFailWhenDeferred)"
+                    "(ValidateIdentityPayload|" +
+                    "UnregisterCurrentUserIdentity|" +
+                    "WixFailWhenDeferred)"
                 ) `
                 -ErrorAction Continue |
                 ForEach-Object { Write-Host $_.Line }
@@ -1570,6 +1379,6 @@ else {
 }
 Write-Host "Browser opt-in and repair: passed"
 Write-Host "Interrupted repair and upgrade rollback: passed"
-Write-Host "Secondary-user identity upgrade retirement: passed"
+Write-Host "Independent current- and secondary-user identity convergence: passed"
 Write-Host "Downgrade rejection: passed"
 Write-Host "Upgrade, uninstall, reinstall, and data retention: passed"

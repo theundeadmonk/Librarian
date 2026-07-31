@@ -175,6 +175,7 @@ $signedHighRoot = Join-Path $fixtureRoot "signed-$HighVersion"
 $certificatePath = Join-Path $ciRoot "Librarian.Development.cer"
 $certificate = $null
 $trustedCertificate = $null
+$rootCertificate = $null
 $failure = $null
 
 try {
@@ -197,9 +198,14 @@ try {
         Get-ChildItem Cert:\LocalMachine\TrustedPeople |
             Where-Object { $_.Subject -eq $subject }
     )
+    $preexistingRooted = @(
+        Get-ChildItem Cert:\LocalMachine\Root |
+            Where-Object { $_.Subject -eq $subject }
+    )
     Assert-True (
         $preexistingPersonal.Count -eq 0 -and
-        $preexistingTrusted.Count -eq 0
+        $preexistingTrusted.Count -eq 0 -and
+        $preexistingRooted.Count -eq 0
     ) "The disposable runner already contains a Librarian development certificate."
 
     Write-Host ""
@@ -231,6 +237,12 @@ try {
     Assert-True (
         $trustedCertificate.Thumbprint -eq $certificate.Thumbprint
     ) "The public development certificate was not trusted correctly."
+    $rootCertificate = Import-Certificate `
+        -FilePath $certificatePath `
+        -CertStoreLocation "Cert:\LocalMachine\Root"
+    Assert-True (
+        $rootCertificate.Thumbprint -eq $certificate.Thumbprint
+    ) "The public development certificate was not rooted correctly."
 
     Write-Host ""
     Write-Host "==> Build and validate signed low fixture"
@@ -285,19 +297,47 @@ try {
 } catch {
     $failure = $_
 } finally {
-    if ($null -ne $trustedCertificate) {
-        $trustedPath = (
-            "Cert:\LocalMachine\TrustedPeople\" +
-            $trustedCertificate.Thumbprint
+    $cleanupFailures = @()
+    if ($null -ne $certificate) {
+        $certificatePaths = @(
+            "Cert:\LocalMachine\TrustedPeople\$($certificate.Thumbprint)",
+            "Cert:\LocalMachine\Root\$($certificate.Thumbprint)",
+            "Cert:\CurrentUser\My\$($certificate.Thumbprint)"
         )
-        if (Test-Path -LiteralPath $trustedPath) {
-            Remove-Item -LiteralPath $trustedPath -Force
+        foreach ($certificatePathToRemove in $certificatePaths) {
+            try {
+                if (Test-Path -LiteralPath $certificatePathToRemove) {
+                    Remove-Item `
+                        -LiteralPath $certificatePathToRemove `
+                        -Force `
+                        -ErrorAction Stop
+                }
+                if (Test-Path -LiteralPath $certificatePathToRemove) {
+                    throw (
+                        "Certificate entry remains after removal: " +
+                        $certificatePathToRemove
+                    )
+                }
+            } catch {
+                $cleanupFailures += (
+                    "Failed to remove '$certificatePathToRemove': " +
+                    $_.Exception.Message
+                )
+            }
         }
     }
-    if ($null -ne $certificate) {
-        $personalPath = "Cert:\CurrentUser\My\$($certificate.Thumbprint)"
-        if (Test-Path -LiteralPath $personalPath) {
-            Remove-Item -LiteralPath $personalPath -Force
+    if ($cleanupFailures.Count -gt 0) {
+        $cleanupMessage = (
+            "Ephemeral development-certificate cleanup failed: " +
+            ($cleanupFailures -join " ")
+        )
+        if ($null -eq $failure) {
+            $failure = [RuntimeException]::new($cleanupMessage)
+        } else {
+            $failure = [RuntimeException]::new(
+                "$($failure.Exception.Message) $cleanupMessage",
+                $failure.Exception
+            )
         }
     }
 }
@@ -308,4 +348,4 @@ if ($null -ne $failure) {
 
 Write-Host ""
 Write-Host "CI-only signed installer validation passed."
-Write-Host "The ephemeral certificate and both trust-store entries were removed."
+Write-Host "All ephemeral certificate-store entries were removed."

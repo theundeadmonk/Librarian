@@ -6,8 +6,9 @@ package layout, registration manifests, signing, installation, upgrade, repair,
 and removal behavior.
 
 The production design has one user-facing `LibrarianSetup.exe`. Its bundled MSI
-owns the native binaries, identity-package registration, servicing, uninstall,
-and selected Chrome/Edge native-host registrations.
+owns the native binaries and identity-package file, servicing, uninstall, and
+selected Chrome/Edge native-host registrations. The unpackaged identity
+launcher owns supported per-user registration at first launch.
 
 The MSIX in this directory is identity-only and uses an external location. It
 does not own the native binaries and must not appear as a second user-facing

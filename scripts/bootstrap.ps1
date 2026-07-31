@@ -311,20 +311,28 @@ if ($globalJson.sdk.version -ne $expected.DotNetSdk -or
 $customActionProject = Join-Path $repoRoot (
     "packaging\windows\custom-actions\Librarian.Setup.CustomActions.vcxproj"
 )
-Assert-FileContains `
-    -Path $customActionProject `
-    -ExpectedText (
-        'Include="Microsoft.Windows.CppWinRT" Version="' +
-        $expected.CppWinRt +
-        '"'
-    )
-Assert-FileContains `
-    -Path $customActionProject `
-    -ExpectedText (
-        'Include="Microsoft.Windows.SDK.BuildTools" Version="' +
-        $expected.WindowsSdkBuildTools +
-        '"'
-    )
+$identityLauncherProject = Join-Path $repoRoot (
+    "packaging\windows\identity-launcher\Librarian.IdentityLauncher.vcxproj"
+)
+foreach ($nativePackagingProject in @(
+    $customActionProject,
+    $identityLauncherProject
+)) {
+    Assert-FileContains `
+        -Path $nativePackagingProject `
+        -ExpectedText (
+            'Include="Microsoft.Windows.CppWinRT" Version="' +
+            $expected.CppWinRt +
+            '"'
+        )
+    Assert-FileContains `
+        -Path $nativePackagingProject `
+        -ExpectedText (
+            'Include="Microsoft.Windows.SDK.BuildTools" Version="' +
+            $expected.WindowsSdkBuildTools +
+            '"'
+        )
+}
 
 foreach ($wixProject in @(
     (Join-Path $repoRoot "packaging\windows\Librarian.Package.wixproj")
@@ -343,6 +351,7 @@ foreach ($lockfile in @(
     (Join-Path $repoRoot "package-lock.json")
     (Join-Path $repoRoot "apps\windows\Librarian.Windows\packages.lock.json")
     (Join-Path $repoRoot "packaging\windows\custom-actions\packages.lock.json")
+    (Join-Path $repoRoot "packaging\windows\identity-launcher\packages.lock.json")
     (Join-Path $repoRoot "packaging\windows\Librarian.Package.packages.lock.json")
     (Join-Path $repoRoot "packaging\windows\Librarian.Setup.packages.lock.json")
 )) {

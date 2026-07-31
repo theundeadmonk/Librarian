@@ -21,6 +21,21 @@ behavior. Conversely, abandoning package identity would weaken the authenticated
 client boundary accepted by
 [[ADRs/0006 Authenticated Local IPC and Client Authorization]].
 
+## 2026-07-30 amendment: user-context identity ownership
+
+The original issue #19 design staged and provisioned identity machine-wide,
+then attempted to snapshot and roll back AppX state across Windows users from
+the MSI service context. Disposable multi-user VM testing proved that the
+supported package APIs do not always expose a verifiable external path for
+another user's retained registration in that context. Failing open would
+weaken the IPC trust boundary, while relying on private package-database state
+would create an unsupported security dependency.
+
+This amendment replaces Slice 1's provisioning and all-user package mutation
+with the documented per-user `PackageManager` registration model below.
+[Issue #39](https://github.com/theundeadmonk/Librarian/issues/39) preserves the
+evidence and owns any future return to an ideal all-user lifecycle.
+
 ## Decision
 
 ### One user-facing setup
@@ -66,34 +81,56 @@ native executable but does not contain or service those executables. It is not
 a second user-facing application and does not create a second Apps & Features
 entry.
 
-The MSI owns registration and removal of the identity package. Production setup
-uses the Windows `PackageManager` API with the installed external location; it
-does not shell out to PowerShell. Every identity-bearing executable embeds
-matching side-by-side MSIX identity metadata. Package name, publisher, and
-application identifiers must match exactly. The identity-only MSIX remains
+The MSI owns the protected machine-wide payload and validates it before commit.
+Librarian owns package registration in the interactive user's context by using
+the Windows `PackageManager` API with the installed external location; it does
+not shell out to PowerShell. Every identity-bearing executable embeds matching
+side-by-side MSIX identity metadata. Package name, publisher, and application
+identifiers must match exactly. The identity-only MSIX remains
 architecture-neutral as required by Microsoft's external-location guidance;
 the external production executables and installer payload remain x64-only.
 Setup separately validates the fixed executable paths and requires every
 payload component to carry the same product version.
 
-Setup stages the identity package and registers it immediately in the invoking
-user's impersonated Windows Installer context before any optional launch.
-Provisioning for future profiles is a checked commit action, after the
-rollback-capable installation script succeeds. All-user removal is likewise a
-checked uninstall commit action, with only best-effort marker cleanup after it.
-A failed transaction therefore never removes another existing user's package
-registration. Transaction rollback records the prior package version,
-provisioning state, and invoking-user registration in the protected
-installation directory and restores that exact pre-commit state, including
-preserving pre-existing absence. Restoration does not clean-reprovision a
-package whose prior provisioning is still intact.
+The Start-menu shortcut targets a narrow, unpackaged
+`Librarian.IdentityLauncher.exe`, following Microsoft's external-location C++
+sample boundary. Before opening the product UI or connecting to the vault
+agent, that launcher accepts only the canonical, non-redirected
+`Program Files\Librarian` payload, verifies its MSI-bound hashes, registers the
+installed identity MSIX for the current user with `AddPackageByUriAsync` and
+`ExternalLocationUri`, and starts the identity-bearing desktop. Registration,
+path validation, or launch failure is fail closed. The desktop separately
+refuses to open if its current package version does not match the installed
+payload version. The first successful desktop launch therefore registers all
+application identities declared by the package without a second download, an
+administrator prompt, PowerShell, or manual package-management step.
 
-Before staging or registering identity, both the elevated and impersonated
-custom actions hash the three identity-bearing executables and the fixed
-identity-package path. Those SHA-256 values must match the values embedded in
-the signed MSI at build time. A stale or mixed-version file left at the
-protected installation path therefore fails closed before it can receive
-package identity.
+The MSI deliberately does not provision the package for all users or ask a
+System-context custom action to inspect another user's package projection.
+Each user converges independently at first launch. An upgrade leaves dormant
+users' old registrations untouched until their next launch, when the newer
+side-by-side executable identity causes the same current-user registration
+path to converge them to the installed version. Repair restores the protected
+payload; current-user registration is repaired at the next launch.
+
+A final uninstall removes the invoking user's matching package registration in
+that user's impersonated Windows Installer context before deleting the
+machine-wide payload. Registrations belonging to other Windows users are not
+mutated by Slice 1. They become inert when the protected executable path is
+removed and converge on reinstall and next launch. Complete deterministic
+all-user cleanup, including dormant and deleted profiles, is deferred to
+[issue #39](https://github.com/theundeadmonk/Librarian/issues/39). That issue
+must use a supported Windows ownership model; private AppRepository state,
+arbitrary user-hive manipulation, and weaker path validation remain forbidden.
+
+Before accepting the installed payload, the elevated validation action uses
+Windows `WinVerifyTrust` to require its own custom-action module and all five
+identity-bound payload files to have a valid code-signing chain, the exact
+development publisher, and one matching signer certificate. It then hashes the
+launcher, three identity-bearing executables, and fixed identity-package path.
+Those SHA-256 values must match the values embedded in the signed MSI at build
+time. Unsigned, wrong-signer, stale, or mixed-version files at the protected
+installation path therefore fail closed before a user can register them.
 
 The existing package-enabled WinUI development target may continue to produce a
 full MSIX for isolated UI smoke tests. It is not the production product
@@ -133,7 +170,9 @@ the user's independent browser-extension choices.
   Clients from a partial or incompatible release cannot receive the incoming
   package identity.
 - The MSI uses transactional installation and Windows Installer repair. Native
-  binaries and registrations are removed together.
+  binaries and machine-wide registrations are removed together. Current-user
+  package identity is reconciled at launch and removed for the invoking user
+  during final uninstall; ideal all-user removal is owned by issue #39.
 - User vaults and encrypted backups live outside the installation directory.
   Uninstall retains encrypted user data by default. Deletion is a separate,
   explicit, warned action; repair never replaces user data.
@@ -150,15 +189,18 @@ setup never creates or trusts one.
   processes retain package identities suitable for local client authorization.
 - The MSI can transactionally own external native-host registrations and
   preserve encrypted user data during servicing.
+- Package deployment stays in the interactive user's supported Windows API
+  projection instead of coupling MSI service rollback to cross-user AppX state.
 - Browser vendors retain control of extension distribution and consent.
 - External native binaries do not receive the full container and block-map
   protections of a conventional MSIX. Librarian compensates with protected
   installation ACLs, Authenticode on every executable, signed MSI and MSIX
   artifacts, payload verification, transactional repair, and fail-closed
   version checks.
-- The packaging implementation must test install, repair, upgrade, downgrade,
-  interruption, wrong signer, mixed versions, browser opt-in/out, uninstall,
-  retained data, and complete removal of Librarian-owned registrations.
+- The packaging implementation must test install, first-launch registration,
+  repair, per-user upgrade convergence, downgrade, interruption, wrong signer,
+  mixed versions, browser opt-in/out, invoking-user uninstall cleanup, inert
+  retained secondary-user registration, reinstall, and retained data.
 
 ## Validation
 
@@ -177,11 +219,15 @@ Control, and is not permitted on the clean Windows CI runner.
 
 The disposable GitHub-hosted Windows runner also creates a short-lived,
 non-exportable development code-signing certificate, trusts only its public
-certificate for that job, and removes both certificate-store entries in a
-`finally` block. CI builds a workspace-version fixture and a strictly higher
+certificate in `TrustedPeople` and `Root` for that job, and removes both
+trust entries plus the personal certificate in a verified `finally` cleanup.
+CI builds a workspace-version
+fixture and a strictly higher
 fixture whose first three Windows Installer version fields differ. It then
-executes unsigned and wrong-component rejection, clean install and launch,
-browser opt-in, repair, interrupted-upgrade rollback, successful upgrade,
-downgrade rejection, uninstall, reinstall, registration cleanup, and retained
-disposable user-data checks. The harness refuses to run on a developer or
-self-hosted machine and never exports a PFX or private key.
+executes unsigned and wrong-component rejection, clean install and
+current-user registration, secondary-user first activation, browser opt-in,
+repair, interrupted-upgrade rollback, independent per-user upgrade
+convergence, downgrade rejection, invoking-user uninstall cleanup, retained
+secondary-user behavior, reinstall, and retained disposable user-data checks.
+The harness refuses to run on a developer or self-hosted machine and never
+exports a PFX or private key.

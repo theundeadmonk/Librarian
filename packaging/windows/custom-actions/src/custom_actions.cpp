@@ -2,8 +2,10 @@
 #include <bcrypt.h>
 #include <msi.h>
 #include <msiquery.h>
-#include <sddl.h>
 #include <shlobj.h>
+#include <softpub.h>
+#include <wincrypt.h>
+#include <wintrust.h>
 
 #include <winrt/Windows.ApplicationModel.h>
 #include <winrt/Windows.Foundation.h>
@@ -17,91 +19,40 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
-#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <vector>
+
+extern "C" IMAGE_DOS_HEADER __ImageBase;
 
 namespace
 {
     using winrt::Windows::ApplicationModel::Package;
     using winrt::Windows::ApplicationModel::PackageVersion;
-    using winrt::Windows::Foundation::Uri;
     using winrt::Windows::Management::Deployment::DeploymentResult;
-    using winrt::Windows::Management::Deployment::AddPackageOptions;
     using winrt::Windows::Management::Deployment::PackageManager;
-    using winrt::Windows::Management::Deployment::RemovalOptions;
-    using winrt::Windows::Management::Deployment::StagePackageOptions;
 
     constexpr std::wstring_view package_name{
         L"TheUndeadMonk.Librarian.Development"};
-    constexpr std::wstring_view package_publisher{L"CN=Librarian Development"};
-    constexpr std::array<std::wstring_view, 3> required_executables{
+    constexpr std::wstring_view package_publisher{
+        L"CN=Librarian Development"};
+    constexpr std::array<std::wstring_view, 5> payload_files{
+        L"Librarian.IdentityLauncher.exe",
         L"Librarian.Windows.exe",
         L"Librarian.VaultAgent.exe",
         L"Librarian.ChromiumNativeHost.exe",
+        L"Librarian.Identity.msix",
     };
-    constexpr std::array<std::wstring_view, 3> rollback_executables{
-        L"Librarian.Windows.rollback.exe",
-        L"Librarian.VaultAgent.rollback.exe",
-        L"Librarian.ChromiumNativeHost.rollback.exe",
-    };
-    constexpr std::wstring_view forbidden_provider{
-        L"Librarian.PasskeyProvider.exe"};
-    constexpr std::wstring_view snapshot_name{
-        L"Librarian.Identity.msix.state"};
-    constexpr std::wstring_view rollback_package_name{
-        L"Librarian.Identity.rollback.msix"};
     constexpr std::wstring_view payload_hash_manifest_name{
         L"Librarian.PayloadHashes"};
-    constexpr unsigned package_state_convergence_attempts{40U};
-    constexpr DWORD package_state_retry_delay_ms{250U};
+    constexpr std::wstring_view forbidden_provider{
+        L"Librarian.PasskeyProvider.exe"};
     using sha256_digest = std::array<std::uint8_t, 32>;
-
-    struct identity_snapshot
-    {
-        bool package_present{};
-        PackageVersion package_version{};
-        bool provisioned{};
-        bool invoking_user_registered{};
-        std::array<bool, required_executables.size()> executable_present{};
-    };
-
-    struct payload_hashes
-    {
-        sha256_digest desktop{};
-        sha256_digest vault_agent{};
-        sha256_digest native_host{};
-        sha256_digest identity_package{};
-    };
 
     struct validation_error
     {
         std::wstring message;
     };
-
-    void log_message(
-        MSIHANDLE installer,
-        INSTALLMESSAGE kind,
-        std::wstring_view message)
-    {
-        PMSIHANDLE record = MsiCreateRecord(0);
-        if (record == 0)
-        {
-            return;
-        }
-
-        std::wstring owned{message};
-        if (MsiRecordSetStringW(record, 0, owned.c_str()) == ERROR_SUCCESS)
-        {
-            static_cast<void>(MsiProcessMessage(installer, kind, record));
-        }
-    }
-
-    [[noreturn]] void fail(std::wstring_view message)
-    {
-        throw validation_error{std::wstring{message}};
-    }
 
     struct file_handle
     {
@@ -135,7 +86,8 @@ namespace
             }
         }
 
-        bcrypt_algorithm_handle(bcrypt_algorithm_handle const&) = delete;
+        bcrypt_algorithm_handle(
+            bcrypt_algorithm_handle const&) = delete;
         bcrypt_algorithm_handle& operator=(
             bcrypt_algorithm_handle const&) = delete;
     };
@@ -155,1183 +107,68 @@ namespace
         }
 
         bcrypt_hash_handle(bcrypt_hash_handle const&) = delete;
-        bcrypt_hash_handle& operator=(bcrypt_hash_handle const&) = delete;
+        bcrypt_hash_handle& operator=(
+            bcrypt_hash_handle const&) = delete;
     };
 
-    void check_bcrypt(NTSTATUS status)
+    struct payload_manifest
     {
-        if (!BCRYPT_SUCCESS(status))
-        {
-            fail(L"Setup could not verify an installed payload hash.");
-        }
-    }
+        PackageVersion version{};
+        std::array<sha256_digest, payload_files.size()> hashes{};
+    };
 
-    std::uint8_t parse_hex_digit(wchar_t value)
+    struct validation_action_data
     {
-        if (value >= L'0' && value <= L'9')
-        {
-            return static_cast<std::uint8_t>(value - L'0');
-        }
-        if (value >= L'A' && value <= L'F')
-        {
-            return static_cast<std::uint8_t>(value - L'A' + 10);
-        }
-        if (value >= L'a' && value <= L'f')
-        {
-            return static_cast<std::uint8_t>(value - L'a' + 10);
-        }
-        fail(L"Setup received an invalid expected payload hash.");
-    }
-
-    sha256_digest parse_sha256(std::wstring_view value)
-    {
-        if (value.size() != 64U)
-        {
-            fail(L"Setup received an invalid expected payload hash.");
-        }
-
-        sha256_digest digest{};
-        for (std::size_t index = 0; index < digest.size(); ++index)
-        {
-            digest[index] = static_cast<std::uint8_t>(
-                (parse_hex_digit(value[index * 2U]) << 4U) |
-                parse_hex_digit(value[index * 2U + 1U]));
-        }
-        return digest;
-    }
-
-    sha256_digest hash_file(std::filesystem::path const& path)
-    {
-        file_handle file;
-        file.value = CreateFileW(
-            path.c_str(),
-            GENERIC_READ,
-            FILE_SHARE_READ,
-            nullptr,
-            OPEN_EXISTING,
-            FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN,
-            nullptr);
-        if (file.value == INVALID_HANDLE_VALUE)
-        {
-            fail(L"Setup could not read an installed payload file.");
-        }
-
-        bcrypt_algorithm_handle algorithm;
-        check_bcrypt(BCryptOpenAlgorithmProvider(
-            &algorithm.value,
-            BCRYPT_SHA256_ALGORITHM,
-            nullptr,
-            0));
-
-        DWORD object_length = 0;
-        DWORD result_length = 0;
-        check_bcrypt(BCryptGetProperty(
-            algorithm.value,
-            BCRYPT_OBJECT_LENGTH,
-            reinterpret_cast<PUCHAR>(&object_length),
-            sizeof(object_length),
-            &result_length,
-            0));
-        if (result_length != sizeof(object_length) || object_length == 0U)
-        {
-            fail(L"Setup could not initialize installed payload hashing.");
-        }
-
-        DWORD hash_length = 0;
-        check_bcrypt(BCryptGetProperty(
-            algorithm.value,
-            BCRYPT_HASH_LENGTH,
-            reinterpret_cast<PUCHAR>(&hash_length),
-            sizeof(hash_length),
-            &result_length,
-            0));
-        if (result_length != sizeof(hash_length) ||
-            hash_length != static_cast<DWORD>(sha256_digest{}.size()))
-        {
-            fail(L"Setup could not initialize SHA-256 payload hashing.");
-        }
-
-        std::vector<UCHAR> hash_object(object_length);
-        bcrypt_hash_handle hash;
-        check_bcrypt(BCryptCreateHash(
-            algorithm.value,
-            &hash.value,
-            hash_object.data(),
-            static_cast<ULONG>(hash_object.size()),
-            nullptr,
-            0,
-            0));
-
-        std::array<UCHAR, 64U * 1024U> buffer{};
-        while (true)
-        {
-            DWORD read = 0;
-            if (!ReadFile(
-                    file.value,
-                    buffer.data(),
-                    static_cast<DWORD>(buffer.size()),
-                    &read,
-                    nullptr))
-            {
-                fail(L"Setup could not read an installed payload file.");
-            }
-            if (read == 0U)
-            {
-                break;
-            }
-            check_bcrypt(BCryptHashData(
-                hash.value,
-                buffer.data(),
-                read,
-                0));
-        }
-
-        sha256_digest digest{};
-        check_bcrypt(BCryptFinishHash(
-            hash.value,
-            reinterpret_cast<PUCHAR>(digest.data()),
-            static_cast<ULONG>(digest.size()),
-            0));
-        return digest;
-    }
-
-    void verify_file_hash(
-        std::filesystem::path const& path,
-        sha256_digest const& expected)
-    {
-        if (hash_file(path) != expected)
-        {
-            fail(L"Setup refused a mismatched installed payload file.");
-        }
-    }
-
-    std::wstring get_property(MSIHANDLE installer, wchar_t const* name)
-    {
-        DWORD characters = 0;
-        wchar_t empty[1]{};
-        UINT const size_result =
-            MsiGetPropertyW(installer, name, empty, &characters);
-        if (size_result != ERROR_MORE_DATA && size_result != ERROR_SUCCESS)
-        {
-            fail(L"Windows Installer could not read required custom-action data.");
-        }
-
-        std::wstring value(static_cast<std::size_t>(characters) + 1U, L'\0');
-        DWORD capacity = characters + 1U;
-        UINT const read_result =
-            MsiGetPropertyW(installer, name, value.data(), &capacity);
-        if (read_result != ERROR_SUCCESS)
-        {
-            fail(L"Windows Installer could not read required custom-action data.");
-        }
-        value.resize(capacity);
-        return value;
-    }
-
-    std::vector<std::wstring> split_data(
-        std::wstring_view data,
-        std::size_t expected_fields)
-    {
-        std::vector<std::wstring> fields;
-        std::size_t start = 0;
-        while (start <= data.size())
-        {
-            std::size_t const separator = data.find(L'|', start);
-            std::size_t const end =
-                separator == std::wstring_view::npos ? data.size() : separator;
-            fields.emplace_back(data.substr(start, end - start));
-            if (separator == std::wstring_view::npos)
-            {
-                break;
-            }
-            start = separator + 1U;
-        }
-
-        if (fields.size() != expected_fields ||
-            std::ranges::any_of(fields, [](std::wstring const& field) {
-                return field.empty();
-            }))
-        {
-            fail(L"Windows Installer supplied malformed custom-action data.");
-        }
-        return fields;
-    }
-
-    std::wstring validate_user_sid(std::wstring const& value)
-    {
-        if (value.size() < 5U || value.size() > SECURITY_MAX_SID_SIZE * 3U ||
-            !value.starts_with(L"S-1-"))
-        {
-            fail(L"Windows Installer supplied an invalid invoking-user SID.");
-        }
-
-        PSID parsed = nullptr;
-        if (!ConvertStringSidToSidW(value.c_str(), &parsed) ||
-            parsed == nullptr || !IsValidSid(parsed))
-        {
-            if (parsed != nullptr)
-            {
-                LocalFree(parsed);
-            }
-            fail(L"Windows Installer supplied an invalid invoking-user SID.");
-        }
-        LocalFree(parsed);
-        return value;
-    }
-
-    std::filesystem::path absolute_path(std::wstring const& value)
-    {
-        std::filesystem::path path{value};
-        if (!path.is_absolute())
-        {
-            fail(L"Setup refused a non-absolute installation path.");
-        }
-        return path.lexically_normal();
-    }
-
-    bool paths_equal(
-        std::filesystem::path const& left,
-        std::filesystem::path const& right)
-    {
-        auto comparable = [](std::filesystem::path const& path) {
-            std::filesystem::path const normalized = path.lexically_normal();
-            std::wstring value = normalized.native();
-            std::size_t const root_length =
-                normalized.root_path().native().size();
-            while (value.size() > root_length &&
-                   (value.back() == L'\\' || value.back() == L'/'))
-            {
-                value.pop_back();
-            }
-            return value;
-        };
-        std::wstring const normalized_left = comparable(left);
-        std::wstring const normalized_right = comparable(right);
-        return _wcsicmp(
-                   normalized_left.c_str(),
-                   normalized_right.c_str()) == 0;
-    }
-
-    void reject_reparse_chain(
-        std::filesystem::path const& path,
-        bool allow_missing_leaf,
-        std::wstring_view failure_message)
-    {
-        std::filesystem::path current = path.root_path();
-        DWORD attributes = GetFileAttributesW(current.c_str());
-        if (attributes == INVALID_FILE_ATTRIBUTES ||
-            (attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0)
-        {
-            fail(failure_message);
-        }
-
-        for (auto const& part : path.relative_path())
-        {
-            current /= part;
-            attributes = GetFileAttributesW(current.c_str());
-            if (attributes == INVALID_FILE_ATTRIBUTES)
-            {
-                if (allow_missing_leaf && paths_equal(current, path))
-                {
-                    return;
-                }
-                fail(failure_message);
-            }
-            if ((attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0)
-            {
-                fail(failure_message);
-            }
-        }
-    }
-
-    std::filesystem::path required_install_folder()
-    {
-        PWSTR raw_path = nullptr;
-        winrt::check_hresult(SHGetKnownFolderPath(
-            FOLDERID_ProgramFilesX64,
-            KF_FLAG_DEFAULT,
-            nullptr,
-            &raw_path));
-        std::filesystem::path const program_files{raw_path};
-        CoTaskMemFree(raw_path);
-        return (program_files / L"Librarian").lexically_normal();
-    }
-
-    void validate_install_folder(std::filesystem::path const& install_folder)
-    {
-        if (!paths_equal(install_folder, required_install_folder()))
-        {
-            fail(
-                L"Setup requires the protected Program Files Librarian folder.");
-        }
-        if (!std::filesystem::is_directory(install_folder))
-        {
-            fail(L"Setup refused a missing installation folder.");
-        }
-        reject_reparse_chain(
-            install_folder,
-            false,
-            L"Setup refused a redirected installation folder.");
-    }
-
-    void validate_snapshot_path(
-        std::filesystem::path const& marker,
-        std::filesystem::path const& install_folder,
-        bool allow_missing)
-    {
-        validate_install_folder(install_folder);
-        if (!paths_equal(marker.parent_path(), install_folder) ||
-            marker.filename().native() != snapshot_name)
-        {
-            fail(L"Setup refused an unsafe identity rollback marker path.");
-        }
-        reject_reparse_chain(
-            marker,
-            allow_missing,
-            L"Setup refused a redirected identity rollback marker.");
-    }
-
-    std::filesystem::path rollback_package_path(
-        std::filesystem::path const& install_folder)
-    {
-        return install_folder / rollback_package_name;
-    }
-
-    void validate_rollback_package_path(
-        std::filesystem::path const& package_path,
-        std::filesystem::path const& install_folder,
-        bool allow_missing)
-    {
-        validate_install_folder(install_folder);
-        if (!paths_equal(package_path.parent_path(), install_folder) ||
-            package_path.filename().native() != rollback_package_name)
-        {
-            fail(L"Setup refused an unsafe identity rollback package path.");
-        }
-        reject_reparse_chain(
-            package_path,
-            allow_missing,
-            L"Setup refused a redirected identity rollback package.");
-        if (std::filesystem::exists(package_path) &&
-            !std::filesystem::is_regular_file(package_path))
-        {
-            fail(L"Setup refused an invalid identity rollback package.");
-        }
-        if (!allow_missing && !std::filesystem::is_regular_file(package_path))
-        {
-            fail(L"Setup could not read its identity rollback package.");
-        }
-    }
-
-    std::filesystem::path rollback_executable_path(
-        std::filesystem::path const& install_folder,
-        std::size_t index)
-    {
-        return install_folder / rollback_executables[index];
-    }
-
-    void validate_rollback_executable_path(
-        std::filesystem::path const& executable_path,
-        std::filesystem::path const& install_folder,
-        std::size_t index,
-        bool allow_missing)
-    {
-        validate_install_folder(install_folder);
-        if (index >= rollback_executables.size() ||
-            !paths_equal(executable_path.parent_path(), install_folder) ||
-            executable_path.filename().native() !=
-                rollback_executables[index])
-        {
-            fail(L"Setup refused an unsafe executable rollback path.");
-        }
-        reject_reparse_chain(
-            executable_path,
-            allow_missing,
-            L"Setup refused a redirected executable rollback file.");
-        if (std::filesystem::exists(executable_path) &&
-            !std::filesystem::is_regular_file(executable_path))
-        {
-            fail(L"Setup refused an invalid executable rollback file.");
-        }
-        if (!allow_missing &&
-            !std::filesystem::is_regular_file(executable_path))
-        {
-            fail(L"Setup could not read an executable rollback file.");
-        }
-    }
-
-    void validate_identity_package_file(
-        std::filesystem::path const& package_path,
-        std::filesystem::path const& install_folder,
-        std::wstring_view expected_name)
-    {
-        validate_install_folder(install_folder);
-        if (!paths_equal(package_path.parent_path(), install_folder) ||
-            package_path.filename().native() != expected_name ||
-            !std::filesystem::is_regular_file(package_path))
-        {
-            fail(L"Setup refused an invalid identity package path.");
-        }
-        reject_reparse_chain(
-            package_path,
-            false,
-            L"Setup refused a redirected identity package.");
-    }
-
-    void validate_payload_path(
-        std::filesystem::path const& package_path,
-        std::filesystem::path const& install_folder,
-        std::wstring_view expected_name)
-    {
-        validate_identity_package_file(
-            package_path,
-            install_folder,
-            expected_name);
-        for (std::wstring_view const name : required_executables)
-        {
-            std::filesystem::path const executable = install_folder / name;
-            if (!std::filesystem::is_regular_file(executable))
-            {
-                fail(L"Setup refused an incomplete executable set.");
-            }
-            reject_reparse_chain(
-                executable,
-                false,
-                L"Setup refused a redirected executable set.");
-        }
-
-        if (std::filesystem::exists(install_folder / forbidden_provider))
-        {
-            fail(
-                L"Setup refused an unexpected passkey provider before issue #18.");
-        }
-    }
-
-    std::array<bool, required_executables.size()>
-    capture_executable_state(
-        std::filesystem::path const& install_folder)
-    {
-        validate_install_folder(install_folder);
-        std::array<bool, required_executables.size()> present{};
-        for (std::size_t index = 0U;
-             index < required_executables.size();
-             ++index)
-        {
-            std::filesystem::path const executable =
-                install_folder / required_executables[index];
-            if (!std::filesystem::exists(executable))
-            {
-                continue;
-            }
-            if (!std::filesystem::is_regular_file(executable))
-            {
-                fail(L"Setup refused an invalid installed executable.");
-            }
-            reject_reparse_chain(
-                executable,
-                false,
-                L"Setup refused a redirected installed executable.");
-            present[index] = true;
-        }
-        return present;
-    }
-
-    void validate_payload(
-        std::filesystem::path const& package_path,
-        std::filesystem::path const& install_folder)
-    {
-        validate_payload_path(
-            package_path,
-            install_folder,
-            L"Librarian.Identity.msix");
-    }
-
-    void validate_rollback_payload(
-        std::filesystem::path const& package_path,
-        std::filesystem::path const& install_folder)
-    {
-        validate_payload_path(
-            package_path,
-            install_folder,
-            rollback_package_name);
-    }
-
-    void validate_release_payload(
-        std::filesystem::path const& package_path,
-        std::filesystem::path const& install_folder,
-        payload_hashes const& hashes)
-    {
-        validate_payload(package_path, install_folder);
-        verify_file_hash(
-            install_folder / required_executables[0],
-            hashes.desktop);
-        verify_file_hash(
-            install_folder / required_executables[1],
-            hashes.vault_agent);
-        verify_file_hash(
-            install_folder / required_executables[2],
-            hashes.native_host);
-        verify_file_hash(package_path, hashes.identity_package);
-    }
-
-    payload_hashes read_payload_hashes(
-        std::filesystem::path const& manifest_path,
-        std::filesystem::path const& install_folder,
-        sha256_digest const& expected_manifest_hash)
-    {
-        validate_install_folder(install_folder);
-        if (!paths_equal(manifest_path.parent_path(), install_folder) ||
-            manifest_path.filename().native() != payload_hash_manifest_name ||
-            !std::filesystem::is_regular_file(manifest_path))
-        {
-            fail(L"Setup refused an invalid payload hash manifest path.");
-        }
-        reject_reparse_chain(
-            manifest_path,
-            false,
-            L"Setup refused a redirected payload hash manifest.");
-
-        file_handle manifest;
-        manifest.value = CreateFileW(
-            manifest_path.c_str(),
-            GENERIC_READ,
-            FILE_SHARE_READ,
-            nullptr,
-            OPEN_EXISTING,
-            FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN,
-            nullptr);
-        if (manifest.value == INVALID_HANDLE_VALUE)
-        {
-            fail(L"Setup could not read the payload hash manifest.");
-        }
-
-        LARGE_INTEGER manifest_size{};
-        if (!GetFileSizeEx(manifest.value, &manifest_size) ||
-            manifest_size.QuadPart <= 0 ||
-            manifest_size.QuadPart > 384)
-        {
-            fail(L"Setup refused an invalid payload hash manifest size.");
-        }
-
-        std::string contents(
-            static_cast<std::size_t>(manifest_size.QuadPart),
-            '\0');
-        DWORD bytes_read = 0;
-        if (!ReadFile(
-                manifest.value,
-                contents.data(),
-                static_cast<DWORD>(contents.size()),
-                &bytes_read,
-                nullptr) ||
-            bytes_read != static_cast<DWORD>(contents.size()))
-        {
-            fail(L"Setup could not read the payload hash manifest.");
-        }
-
-        bcrypt_algorithm_handle algorithm;
-        check_bcrypt(BCryptOpenAlgorithmProvider(
-            &algorithm.value,
-            BCRYPT_SHA256_ALGORITHM,
-            nullptr,
-            0));
-        sha256_digest actual_manifest_hash{};
-        check_bcrypt(BCryptHash(
-            algorithm.value,
-            nullptr,
-            0,
-            reinterpret_cast<PUCHAR>(contents.data()),
-            static_cast<ULONG>(contents.size()),
-            reinterpret_cast<PUCHAR>(actual_manifest_hash.data()),
-            static_cast<ULONG>(actual_manifest_hash.size())));
-        if (actual_manifest_hash != expected_manifest_hash)
-        {
-            fail(L"Setup refused a mismatched payload hash manifest.");
-        }
-
-        if (std::ranges::any_of(contents, [](unsigned char value) {
-                return value < 0x20U || value > 0x7EU;
-            }))
-        {
-            fail(L"Setup refused a non-ASCII payload hash manifest.");
-        }
-
-        std::wstring const wide_contents(contents.begin(), contents.end());
-        auto const fields = split_data(wide_contents, 5);
-        if (fields[0] != L"v1")
-        {
-            fail(L"Setup received an unsupported payload hash manifest.");
-        }
-
-        return payload_hashes{
-            .desktop = parse_sha256(fields[1]),
-            .vault_agent = parse_sha256(fields[2]),
-            .native_host = parse_sha256(fields[3]),
-            .identity_package = parse_sha256(fields[4]),
-        };
-    }
-
-    PackageVersion parse_version(std::wstring_view text)
-    {
-        std::array<std::uint16_t, 4> parts{};
-        std::size_t start = 0;
-        for (std::size_t index = 0; index < parts.size(); ++index)
-        {
-            std::size_t const separator = text.find(L'.', start);
-            std::size_t const end =
-                separator == std::wstring_view::npos ? text.size() : separator;
-            if (end == start || (index < parts.size() - 1U &&
-                                 separator == std::wstring_view::npos) ||
-                (index == parts.size() - 1U &&
-                 separator != std::wstring_view::npos))
-            {
-                fail(L"Setup received an invalid four-part product version.");
-            }
-
-            std::wstring const token{text.substr(start, end - start)};
-            std::size_t parsed = 0;
-            unsigned long const value = std::stoul(token, &parsed, 10);
-            if (parsed != token.size() || value > UINT16_MAX)
-            {
-                fail(L"Setup received an invalid four-part product version.");
-            }
-            parts[index] = static_cast<std::uint16_t>(value);
-            start = end + 1U;
-        }
-
-        return PackageVersion{
-            .Major = parts[0],
-            .Minor = parts[1],
-            .Build = parts[2],
-            .Revision = parts[3],
-        };
-    }
-
-    struct identity_action_data
-    {
-        std::filesystem::path package_path;
         std::filesystem::path install_folder;
-        PackageVersion version;
-        payload_hashes hashes;
+        PackageVersion version{};
+        sha256_digest manifest_hash{};
     };
 
-    identity_action_data read_identity_action_data(MSIHANDLE installer)
+    struct wintrust_state
     {
-        auto const fields =
-            split_data(get_property(installer, L"CustomActionData"), 3);
-        std::filesystem::path const install_folder = absolute_path(fields[0]);
-        std::filesystem::path const package_path =
-            install_folder / L"Librarian.Identity.msix";
-        std::filesystem::path const manifest_path =
-            install_folder / payload_hash_manifest_name;
+        GUID action = WINTRUST_ACTION_GENERIC_VERIFY_V2;
+        WINTRUST_DATA data{};
 
-        return identity_action_data{
-            .package_path = package_path,
-            .install_folder = install_folder,
-            .version = parse_version(fields[1]),
-            .hashes = read_payload_hashes(
-                manifest_path,
-                install_folder,
-                parse_sha256(fields[2])),
-        };
-    }
+        wintrust_state() = default;
 
-    std::uint64_t comparable_version(PackageVersion const& version)
-    {
-        return (static_cast<std::uint64_t>(version.Major) << 48U) |
-               (static_cast<std::uint64_t>(version.Minor) << 32U) |
-               (static_cast<std::uint64_t>(version.Build) << 16U) |
-               static_cast<std::uint64_t>(version.Revision);
-    }
-
-    std::vector<Package> matching_packages(PackageManager const& manager)
-    {
-        std::vector<Package> packages;
-        for (Package const& package : manager.FindPackages(
-                 winrt::hstring{package_name},
-                 winrt::hstring{package_publisher}))
+        ~wintrust_state()
         {
-            packages.push_back(package);
+            if (data.hWVTStateData != nullptr)
+            {
+                data.dwStateAction = WTD_STATEACTION_CLOSE;
+                static_cast<void>(WinVerifyTrust(
+                    reinterpret_cast<HWND>(INVALID_HANDLE_VALUE),
+                    &action,
+                    &data));
+            }
         }
-        return packages;
+
+        wintrust_state(wintrust_state const&) = delete;
+        wintrust_state& operator=(wintrust_state const&) = delete;
+    };
+
+    [[noreturn]] void fail(std::wstring_view message)
+    {
+        throw validation_error{std::wstring{message}};
     }
 
-    void check_deployment_result(
-        DeploymentResult const& result,
-        std::wstring_view operation)
+    void log_message(
+        MSIHANDLE installer,
+        INSTALLMESSAGE kind,
+        std::wstring_view message)
     {
-        winrt::hresult const error = result.ExtendedErrorCode();
-        if (FAILED(error.value))
+        PMSIHANDLE record = MsiCreateRecord(0);
+        if (record == 0)
         {
-            std::wstring message{operation};
-            message.append(L" failed with Windows error ");
-            wchar_t code[11]{};
+            return;
+        }
+
+        std::wstring owned{message};
+        if (MsiRecordSetStringW(record, 0, owned.c_str()) ==
+            ERROR_SUCCESS)
+        {
             static_cast<void>(
-                swprintf_s(code, L"0x%08X", static_cast<unsigned>(error.value)));
-            message.append(code);
-            if (!result.ErrorText().empty())
-            {
-                message.append(L": ");
-                message.append(result.ErrorText());
-            }
-            throw winrt::hresult_error(error, message);
-        }
-    }
-
-    Package find_exact_package(
-        PackageManager const& manager,
-        PackageVersion const& expected,
-        bool allow_newer = false)
-    {
-        Package exact{nullptr};
-        for (Package const& package : matching_packages(manager))
-        {
-            PackageVersion const actual = package.Id().Version();
-            if (!allow_newer &&
-                comparable_version(actual) > comparable_version(expected))
-            {
-                fail(
-                    L"Setup refused to replace a newer identity package.");
-            }
-            if (comparable_version(actual) == comparable_version(expected))
-            {
-                if (exact)
-                {
-                    fail(L"Setup found duplicate matching identity packages.");
-                }
-                exact = package;
-            }
-        }
-        if (!exact)
-        {
-            fail(L"Windows did not expose the staged identity package.");
-        }
-        return exact;
-    }
-
-    void validate_external_location(
-        Package const& package,
-        std::filesystem::path const& install_folder)
-    {
-        winrt::hstring const external_path =
-            package.EffectiveExternalPath();
-        if (external_path.empty())
-        {
-            fail(
-                L"Setup refused an identity package without an external path.");
-        }
-        std::filesystem::path const actual =
-            absolute_path(external_path.c_str());
-        if (!paths_equal(actual, install_folder))
-        {
-            fail(
-                L"Setup refused an identity package from another location.");
-        }
-        reject_reparse_chain(
-            actual,
-            false,
-            L"Setup refused a redirected identity package location.");
-    }
-
-    void reject_newer_packages(
-        PackageManager const& manager,
-        PackageVersion const& expected)
-    {
-        for (Package const& package : matching_packages(manager))
-        {
-            if (comparable_version(package.Id().Version()) >
-                comparable_version(expected))
-            {
-                fail(L"Setup refused to replace a newer identity package.");
-            }
-        }
-    }
-
-    bool exact_package_exists(
-        PackageManager const& manager,
-        PackageVersion const& expected)
-    {
-        return std::ranges::any_of(
-            matching_packages(manager),
-            [&expected](Package const& package) {
-                return comparable_version(package.Id().Version()) ==
-                       comparable_version(expected);
-            });
-    }
-
-    bool package_not_found(winrt::hresult const error)
-    {
-        constexpr HRESULT package_not_found_error =
-            static_cast<HRESULT>(0x80073CF1L);
-        constexpr HRESULT package_not_registered_error =
-            HRESULT_FROM_WIN32(APPMODEL_ERROR_NO_PACKAGE);
-        return error.value == package_not_found_error ||
-               error.value == package_not_registered_error;
-    }
-
-    bool package_is_provisioned(
-        PackageManager const& manager,
-        Package const& package)
-    {
-        winrt::hstring const expected = package.Id().FullName();
-        return std::ranges::any_of(
-            manager.FindProvisionedPackages(),
-            [&expected](Package const& candidate) {
-                return _wcsicmp(
-                           candidate.Id().FullName().c_str(),
-                           expected.c_str()) == 0;
-            });
-    }
-
-    void ensure_package_provisioned(
-        PackageManager const& manager,
-        Package const& package,
-        std::wstring_view operation)
-    {
-        for (unsigned attempt = 0U;
-             attempt < package_state_convergence_attempts;
-             ++attempt)
-        {
-            if (package_is_provisioned(manager, package))
-            {
-                return;
-            }
-            DeploymentResult const provisioned =
-                manager
-                    .ProvisionPackageForAllUsersAsync(
-                        package.Id().FamilyName())
-                    .get();
-            check_deployment_result(provisioned, operation);
-            if (package_is_provisioned(manager, package))
-            {
-                return;
-            }
-            if (attempt + 1U < package_state_convergence_attempts)
-            {
-                Sleep(package_state_retry_delay_ms);
-            }
-        }
-        fail(L"Setup could not verify identity package provisioning.");
-    }
-
-    bool package_is_registered_for_user(
-        PackageManager const& manager,
-        Package const& package,
-        std::wstring const& user_sid)
-    {
-        try
-        {
-            Package const registered = manager.FindPackageForUser(
-                winrt::hstring{user_sid},
-                package.Id().FullName());
-            return registered != nullptr;
-        }
-        catch (winrt::hresult_error const& error)
-        {
-            if (package_not_found(error.code()))
-            {
-                return false;
-            }
-            throw;
-        }
-    }
-
-    identity_snapshot capture_snapshot(
-        PackageManager const& manager,
-        PackageVersion const& incoming_version,
-        std::filesystem::path const& install_folder,
-        std::wstring const& user_sid)
-    {
-        std::vector<Package> const packages = matching_packages(manager);
-        if (packages.empty())
-        {
-            return {};
-        }
-
-        std::vector<Package> invoking_user_packages;
-        std::vector<Package> provisioned_packages;
-        for (Package const& package : packages)
-        {
-            if (comparable_version(package.Id().Version()) >
-                comparable_version(incoming_version))
-            {
-                fail(L"Setup refused to replace a newer identity package.");
-            }
-            validate_external_location(package, install_folder);
-            if (package_is_registered_for_user(manager, package, user_sid))
-            {
-                invoking_user_packages.push_back(package);
-            }
-            if (package_is_provisioned(manager, package))
-            {
-                provisioned_packages.push_back(package);
-            }
-        }
-        if (invoking_user_packages.size() > 1U ||
-            provisioned_packages.size() > 1U)
-        {
-            fail(
-                L"Setup refused ambiguous existing identity package state.");
-        }
-        auto const incoming_package = std::ranges::find_if(
-            packages,
-            [&incoming_version](Package const& candidate) {
-                return comparable_version(candidate.Id().Version()) ==
-                       comparable_version(incoming_version);
-            });
-        if (!invoking_user_packages.empty() &&
-            incoming_package != packages.end() &&
-            comparable_version(
-                invoking_user_packages.front().Id().Version()) !=
-                comparable_version(incoming_version))
-        {
-            // The incoming package predates this transaction but belongs to
-            // another user or staging state. A rollback that treats it as new
-            // would remove state the compact marker cannot reconstruct.
-            fail(
-                L"Setup refused divergent invoking-user and incoming "
-                L"identity package state.");
-        }
-        if (!invoking_user_packages.empty() &&
-            !provisioned_packages.empty() &&
-            comparable_version(
-                invoking_user_packages.front().Id().Version()) !=
-                comparable_version(
-                    provisioned_packages.front().Id().Version()))
-        {
-            // The compact rollback marker can restore one package version.
-            // Continuing from divergent per-user and all-user state would
-            // discard one half of the snapshot and could remove a package
-            // that existed before this transaction.
-            fail(
-                L"Setup refused divergent registered and provisioned "
-                L"identity package state.");
-        }
-
-        Package package{nullptr};
-        if (!invoking_user_packages.empty())
-        {
-            package = invoking_user_packages.front();
-        }
-        else
-        {
-            if (incoming_package != packages.end())
-            {
-                package = *incoming_package;
-            }
-            else if (!provisioned_packages.empty())
-            {
-                package = provisioned_packages.front();
-            }
-            else
-            {
-                package = *std::ranges::max_element(
-                    packages,
-                    [](Package const& left, Package const& right) {
-                        return comparable_version(left.Id().Version()) <
-                               comparable_version(right.Id().Version());
-                    });
-            }
-        }
-
-        PackageVersion const version = package.Id().Version();
-        return identity_snapshot{
-            .package_present = true,
-            .package_version = version,
-            .provisioned = package_is_provisioned(manager, package),
-            .invoking_user_registered =
-                package_is_registered_for_user(manager, package, user_sid),
-        };
-    }
-
-    void deprovision_package_family(
-        PackageManager const& manager,
-        winrt::hstring const& family_name)
-    {
-        try
-        {
-            DeploymentResult const deprovisioned =
-                manager.DeprovisionPackageForAllUsersAsync(family_name).get();
-            check_deployment_result(
-                deprovisioned,
-                L"Identity package deprovisioning");
-        }
-        catch (winrt::hresult_error const& error)
-        {
-            if (!package_not_found(error.code()))
-            {
-                throw;
-            }
-        }
-    }
-
-    void remove_package_for_all_users(
-        PackageManager const& manager,
-        Package const& package,
-        std::wstring_view operation)
-    {
-        try
-        {
-            DeploymentResult const removed =
-                manager
-                    .RemovePackageAsync(
-                        package.Id().FullName(),
-                        RemovalOptions::RemoveForAllUsers)
-                    .get();
-            check_deployment_result(removed, operation);
-        }
-        catch (winrt::hresult_error const& error)
-        {
-            if (!package_not_found(error.code()))
-            {
-                throw;
-            }
-        }
-    }
-
-    void remove_package(
-        PackageManager const& manager,
-        Package const& package)
-    {
-        if (package_is_provisioned(manager, package))
-        {
-            winrt::hstring const family_name = package.Id().FamilyName();
-            deprovision_package_family(manager, family_name);
-        }
-        remove_package_for_all_users(
-            manager,
-            package,
-            L"Identity package removal");
-    }
-
-    void remove_package_for_current_user(
-        PackageManager const& manager,
-        Package const& package)
-    {
-        try
-        {
-            DeploymentResult const removed =
-                manager.RemovePackageAsync(package.Id().FullName()).get();
-            check_deployment_result(
-                removed,
-                L"Invoking-user identity package removal");
-        }
-        catch (winrt::hresult_error const& error)
-        {
-            if (!package_not_found(error.code()))
-            {
-                throw;
-            }
-        }
-    }
-
-    Package ensure_package_staged(
-        PackageManager const& manager,
-        PackageVersion const& version,
-        std::filesystem::path const& package_path,
-        std::filesystem::path const& install_folder,
-        bool rollback_source = false)
-    {
-        if (!exact_package_exists(manager, version))
-        {
-            if (rollback_source)
-            {
-                validate_rollback_payload(package_path, install_folder);
-            }
-            else
-            {
-                validate_payload(package_path, install_folder);
-            }
-            StagePackageOptions const options;
-            options.ExternalLocationUri(Uri{install_folder.c_str()});
-            options.ForceUpdateFromAnyVersion(rollback_source);
-            DeploymentResult const staged =
-                manager
-                    .StagePackageByUriAsync(
-                        Uri{package_path.c_str()},
-                        options)
-                    .get();
-            check_deployment_result(staged, L"Identity package staging");
-        }
-
-        Package const package =
-            find_exact_package(manager, version, rollback_source);
-        validate_external_location(package, install_folder);
-        return package;
-    }
-
-    void register_package_for_current_user(
-        PackageManager const& manager,
-        PackageVersion const& version,
-        std::filesystem::path const& package_path,
-        std::filesystem::path const& install_folder)
-    {
-        validate_payload(package_path, install_folder);
-        if (exact_package_exists(manager, version))
-        {
-            Package const existing = find_exact_package(manager, version);
-            validate_external_location(existing, install_folder);
-            if (package_is_registered_for_user(manager, existing, L""))
-            {
-                return;
-            }
-        }
-
-        AddPackageOptions const options;
-        options.ExternalLocationUri(Uri{install_folder.c_str()});
-        DeploymentResult const registered =
-            manager.AddPackageByUriAsync(
-                Uri{package_path.c_str()},
-                options).get();
-        check_deployment_result(
-            registered,
-            L"Invoking-user identity package registration");
-
-        Package const package = find_exact_package(manager, version);
-        validate_external_location(package, install_folder);
-        if (!package_is_registered_for_user(manager, package, L""))
-        {
-            fail(
-                L"Identity package registration did not become visible "
-                L"for the invoking user.");
-        }
-    }
-
-    void register_rollback_package_for_current_user(
-        PackageManager const& manager,
-        PackageVersion const& version,
-        std::filesystem::path const& package_path,
-        std::filesystem::path const& install_folder)
-    {
-        validate_rollback_payload(package_path, install_folder);
-        if (exact_package_exists(manager, version))
-        {
-            Package const existing =
-                find_exact_package(manager, version, true);
-            validate_external_location(existing, install_folder);
-            if (package_is_registered_for_user(manager, existing, L""))
-            {
-                return;
-            }
-        }
-
-        AddPackageOptions const options;
-        options.ExternalLocationUri(Uri{install_folder.c_str()});
-        options.ForceUpdateFromAnyVersion(true);
-        DeploymentResult const registered =
-            manager.AddPackageByUriAsync(
-                Uri{package_path.c_str()},
-                options).get();
-        check_deployment_result(
-            registered,
-            L"Previous invoking-user identity registration");
-
-        Package const package = find_exact_package(manager, version, true);
-        validate_external_location(package, install_folder);
-        if (!package_is_registered_for_user(manager, package, L""))
-        {
-            fail(
-                L"Previous identity package registration did not become "
-                L"visible for the invoking user.");
+                MsiProcessMessage(installer, kind, record));
         }
     }
 
@@ -1373,13 +210,6 @@ namespace
             message.append(error.message);
             log_message(installer, INSTALLMESSAGE_ERROR, message);
         }
-        catch (std::exception const&)
-        {
-            std::wstring message{L"Librarian setup: "};
-            message.append(label);
-            message.append(L" failed validation.");
-            log_message(installer, INSTALLMESSAGE_ERROR, message);
-        }
         catch (...)
         {
             std::wstring message{L"Librarian setup: "};
@@ -1390,649 +220,689 @@ namespace
         return ERROR_INSTALL_FAILURE;
     }
 
-    void write_snapshot(
-        std::filesystem::path const& marker,
-        identity_snapshot const& snapshot)
+    void check_bcrypt(NTSTATUS status)
     {
-        std::ofstream stream{
-            marker,
-            std::ios::binary | std::ios::out | std::ios::trunc};
-        if (!stream)
+        if (!BCRYPT_SUCCESS(status))
         {
-            fail(L"Setup could not create its identity rollback marker.");
-        }
-        stream << "v2|" << (snapshot.package_present ? '1' : '0') << '|'
-               << snapshot.package_version.Major << '.'
-               << snapshot.package_version.Minor << '.'
-               << snapshot.package_version.Build << '.'
-               << snapshot.package_version.Revision << '|'
-               << (snapshot.provisioned ? '1' : '0') << '|'
-               << (snapshot.invoking_user_registered ? '1' : '0');
-        for (bool const present : snapshot.executable_present)
-        {
-            stream << '|' << (present ? '1' : '0');
-        }
-        stream.flush();
-        if (!stream)
-        {
-            fail(L"Setup could not persist its identity rollback marker.");
+            fail(L"Setup could not verify an installed payload hash.");
         }
     }
 
-    void write_snapshot_package(
-        std::filesystem::path const& marker,
-        std::filesystem::path const& install_folder,
-        identity_snapshot const& snapshot)
+    std::filesystem::path current_module_path()
     {
-        std::filesystem::path const rollback_package =
-            rollback_package_path(install_folder);
-        validate_rollback_package_path(
-            rollback_package,
-            install_folder,
-            true);
-        if (std::filesystem::exists(rollback_package))
+        std::array<wchar_t, 32768U> buffer{};
+        DWORD const length = GetModuleFileNameW(
+            reinterpret_cast<HMODULE>(&__ImageBase),
+            buffer.data(),
+            static_cast<DWORD>(buffer.size()));
+        if (length == 0U || length >= buffer.size())
         {
-            fail(L"Setup found a stale identity rollback package.");
+            fail(L"Setup could not identify its validation module.");
         }
-        for (std::size_t index = 0U;
-             index < rollback_executables.size();
-             ++index)
+        return std::filesystem::path{
+            std::wstring_view{buffer.data(), length}};
+    }
+
+    sha256_digest trusted_signer_hash(
+        std::filesystem::path const& path,
+        std::wstring_view failure_message)
+    {
+        std::wstring const native_path = path.native();
+        WINTRUST_FILE_INFO file_info{};
+        file_info.cbStruct = sizeof(file_info);
+        file_info.pcwszFilePath = native_path.c_str();
+
+        wintrust_state trust;
+        trust.data.cbStruct = sizeof(trust.data);
+        trust.data.dwUIChoice = WTD_UI_NONE;
+        trust.data.fdwRevocationChecks = WTD_REVOKE_NONE;
+        trust.data.dwUnionChoice = WTD_CHOICE_FILE;
+        trust.data.pFile = &file_info;
+        trust.data.dwStateAction = WTD_STATEACTION_VERIFY;
+        trust.data.dwProvFlags = WTD_CACHE_ONLY_URL_RETRIEVAL;
+
+        LONG const status = WinVerifyTrust(
+            reinterpret_cast<HWND>(INVALID_HANDLE_VALUE),
+            &trust.action,
+            &trust.data);
+        if (status != ERROR_SUCCESS ||
+            trust.data.hWVTStateData == nullptr)
         {
-            std::filesystem::path const rollback_executable =
-                rollback_executable_path(install_folder, index);
-            validate_rollback_executable_path(
-                rollback_executable,
-                install_folder,
-                index,
-                true);
-            if (std::filesystem::exists(rollback_executable))
-            {
-                fail(L"Setup found a stale executable rollback file.");
-            }
+            fail(failure_message);
         }
 
-        auto const remove_partial_snapshot = [&] {
-            static_cast<void>(DeleteFileW(rollback_package.c_str()));
-            for (std::size_t index = 0U;
-                 index < rollback_executables.size();
-                 ++index)
+        HMODULE const wintrust = GetModuleHandleW(L"wintrust.dll");
+        if (wintrust == nullptr)
+        {
+            fail(failure_message);
+        }
+        using provider_data_function =
+            CRYPT_PROVIDER_DATA* (WINAPI*)(HANDLE);
+        using signer_function = CRYPT_PROVIDER_SGNR* (WINAPI*)(
+            CRYPT_PROVIDER_DATA*, DWORD, BOOL, DWORD);
+        auto const provider_data_from_state =
+            reinterpret_cast<provider_data_function>(GetProcAddress(
+                wintrust,
+                "WTHelperProvDataFromStateData"));
+        auto const signer_from_chain =
+            reinterpret_cast<signer_function>(GetProcAddress(
+                wintrust,
+                "WTHelperGetProvSignerFromChain"));
+        if (provider_data_from_state == nullptr ||
+            signer_from_chain == nullptr)
+        {
+            fail(failure_message);
+        }
+
+        CRYPT_PROVIDER_DATA* const provider =
+            provider_data_from_state(trust.data.hWVTStateData);
+        CRYPT_PROVIDER_SGNR* const signer = provider == nullptr ?
+            nullptr :
+            signer_from_chain(provider, 0U, FALSE, 0U);
+        if (signer == nullptr || signer->csCertChain == 0U ||
+            signer->pasCertChain == nullptr ||
+            signer->pasCertChain[0].pCert == nullptr)
+        {
+            fail(failure_message);
+        }
+
+        PCCERT_CONTEXT const certificate =
+            signer->pasCertChain[0].pCert;
+        DWORD const subject_size = CertGetNameStringW(
+            certificate,
+            CERT_NAME_SIMPLE_DISPLAY_TYPE,
+            0U,
+            nullptr,
+            nullptr,
+            0U);
+        if (subject_size <= 1U || subject_size > 256U)
+        {
+            fail(failure_message);
+        }
+        std::vector<wchar_t> subject(subject_size);
+        if (CertGetNameStringW(
+                certificate,
+                CERT_NAME_SIMPLE_DISPLAY_TYPE,
+                0U,
+                nullptr,
+                subject.data(),
+                subject_size) != subject_size ||
+            std::wstring_view{subject.data()} != L"Librarian Development")
+        {
+            fail(failure_message);
+        }
+
+        DWORD usage_size = 0U;
+        if (!CertGetEnhancedKeyUsage(
+                certificate,
+                0U,
+                nullptr,
+                &usage_size) &&
+            GetLastError() != CRYPT_E_NOT_FOUND)
+        {
+            fail(failure_message);
+        }
+        if (usage_size == 0U || usage_size > 4096U)
+        {
+            fail(failure_message);
+        }
+        std::vector<std::uint8_t> usage_buffer(usage_size);
+        auto* const usages = reinterpret_cast<PCERT_ENHKEY_USAGE>(
+            usage_buffer.data());
+        if (!CertGetEnhancedKeyUsage(
+                certificate,
+                0U,
+                usages,
+                &usage_size))
+        {
+            fail(failure_message);
+        }
+        bool code_signing = false;
+        for (DWORD index = 0U; index < usages->cUsageIdentifier; ++index)
+        {
+            if (std::string_view{usages->rgpszUsageIdentifier[index]} ==
+                szOID_PKIX_KP_CODE_SIGNING)
             {
-                std::filesystem::path const rollback_executable =
-                    rollback_executable_path(install_folder, index);
-                static_cast<void>(
-                    DeleteFileW(rollback_executable.c_str()));
+                code_signing = true;
+                break;
             }
-            static_cast<void>(DeleteFileW(marker.c_str()));
+        }
+        if (!code_signing)
+        {
+            fail(failure_message);
+        }
+
+        sha256_digest digest{};
+        DWORD digest_size = static_cast<DWORD>(digest.size());
+        if (!CertGetCertificateContextProperty(
+                certificate,
+                CERT_SHA256_HASH_PROP_ID,
+                digest.data(),
+                &digest_size) ||
+            digest_size != digest.size())
+        {
+            fail(failure_message);
+        }
+        return digest;
+    }
+
+    std::wstring get_property(
+        MSIHANDLE installer,
+        wchar_t const* name)
+    {
+        DWORD characters = 0U;
+        wchar_t empty[1]{};
+        UINT const size_result =
+            MsiGetPropertyW(installer, name, empty, &characters);
+        if (size_result != ERROR_MORE_DATA &&
+            size_result != ERROR_SUCCESS)
+        {
+            fail(
+                L"Windows Installer could not read required custom-action "
+                L"data.");
+        }
+
+        std::wstring value(
+            static_cast<std::size_t>(characters) + 1U,
+            L'\0');
+        DWORD capacity = characters + 1U;
+        UINT const read_result = MsiGetPropertyW(
+            installer,
+            name,
+            value.data(),
+            &capacity);
+        if (read_result != ERROR_SUCCESS)
+        {
+            fail(
+                L"Windows Installer could not read required custom-action "
+                L"data.");
+        }
+        value.resize(capacity);
+        return value;
+    }
+
+    std::vector<std::wstring> split_data(
+        std::wstring_view data,
+        std::size_t expected_fields)
+    {
+        std::vector<std::wstring> fields;
+        std::size_t start = 0U;
+        while (start <= data.size())
+        {
+            std::size_t const separator = data.find(L'|', start);
+            std::size_t const end =
+                separator == std::wstring_view::npos ?
+                    data.size() :
+                    separator;
+            fields.emplace_back(data.substr(start, end - start));
+            if (separator == std::wstring_view::npos)
+            {
+                break;
+            }
+            start = separator + 1U;
+        }
+
+        if (fields.size() != expected_fields ||
+            std::ranges::any_of(
+                fields,
+                [](std::wstring const& field) {
+                    return field.empty();
+                }))
+        {
+            fail(
+                L"Windows Installer supplied malformed custom-action data.");
+        }
+        return fields;
+    }
+
+    std::filesystem::path absolute_path(std::wstring const& value)
+    {
+        std::filesystem::path path{value};
+        if (!path.is_absolute())
+        {
+            fail(L"Setup refused a non-absolute installation path.");
+        }
+        return path.lexically_normal();
+    }
+
+    bool paths_equal(
+        std::filesystem::path const& left,
+        std::filesystem::path const& right)
+    {
+        auto comparable = [](std::filesystem::path const& path) {
+            std::filesystem::path const normalized =
+                path.lexically_normal();
+            std::wstring value = normalized.native();
+            std::size_t const root_length =
+                normalized.root_path().native().size();
+            while (value.size() > root_length &&
+                   (value.back() == L'\\' || value.back() == L'/'))
+            {
+                value.pop_back();
+            }
+            return value;
         };
+        std::wstring const normalized_left = comparable(left);
+        std::wstring const normalized_right = comparable(right);
+        return _wcsicmp(
+                   normalized_left.c_str(),
+                   normalized_right.c_str()) == 0;
+    }
 
-        try
+    void reject_reparse_chain(
+        std::filesystem::path const& path,
+        std::wstring_view failure_message)
+    {
+        std::filesystem::path current = path.root_path();
+        DWORD attributes = GetFileAttributesW(current.c_str());
+        if (attributes == INVALID_FILE_ATTRIBUTES ||
+            (attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0)
         {
-            if (snapshot.package_present)
-            {
-                std::filesystem::path const installed_package =
-                    install_folder / L"Librarian.Identity.msix";
-                validate_identity_package_file(
-                    installed_package,
-                    install_folder,
-                    L"Librarian.Identity.msix");
-                if (!CopyFileW(
-                        installed_package.c_str(),
-                        rollback_package.c_str(),
-                        TRUE))
-                {
-                    fail(
-                        L"Setup could not preserve its identity rollback "
-                        L"package.");
-                }
-            }
-            for (std::size_t index = 0U;
-                 index < required_executables.size();
-                 ++index)
-            {
-                if (!snapshot.executable_present[index])
-                {
-                    continue;
-                }
-                std::filesystem::path const installed_executable =
-                    install_folder / required_executables[index];
-                if (!std::filesystem::is_regular_file(
-                        installed_executable))
-                {
-                    fail(
-                        L"Setup could not preserve a missing installed "
-                        L"executable.");
-                }
-                reject_reparse_chain(
-                    installed_executable,
-                    false,
-                    L"Setup refused a redirected installed executable.");
-                std::filesystem::path const rollback_executable =
-                    rollback_executable_path(install_folder, index);
-                if (!CopyFileW(
-                        installed_executable.c_str(),
-                        rollback_executable.c_str(),
-                        TRUE))
-                {
-                    fail(
-                        L"Setup could not preserve an executable for "
-                        L"rollback.");
-                }
-            }
-            write_snapshot(marker, snapshot);
+            fail(failure_message);
         }
-        catch (...)
+
+        for (auto const& part : path.relative_path())
         {
-            remove_partial_snapshot();
-            throw;
+            current /= part;
+            attributes = GetFileAttributesW(current.c_str());
+            if (attributes == INVALID_FILE_ATTRIBUTES ||
+                (attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0)
+            {
+                fail(failure_message);
+            }
         }
     }
 
-    bool parse_snapshot_boolean(std::wstring const& value)
+    std::filesystem::path required_install_folder()
     {
-        if (value == L"0")
-        {
-            return false;
-        }
-        if (value == L"1")
-        {
-            return true;
-        }
-        fail(L"Setup could not parse its identity rollback marker.");
+        PWSTR raw_path = nullptr;
+        winrt::check_hresult(SHGetKnownFolderPath(
+            FOLDERID_ProgramFilesX64,
+            KF_FLAG_DEFAULT,
+            nullptr,
+            &raw_path));
+        std::filesystem::path const program_files{raw_path};
+        CoTaskMemFree(raw_path);
+        return (program_files / L"Librarian").lexically_normal();
     }
 
-    identity_snapshot read_snapshot(std::filesystem::path const& marker)
+    void validate_install_folder(
+        std::filesystem::path const& install_folder)
     {
-        std::ifstream stream{marker, std::ios::binary | std::ios::in};
-        std::string const serialized{
+        if (!paths_equal(
+                install_folder,
+                required_install_folder()) ||
+            !std::filesystem::is_directory(install_folder))
+        {
+            fail(
+                L"Setup requires the protected Program Files Librarian "
+                L"folder.");
+        }
+        reject_reparse_chain(
+            install_folder,
+            L"Setup refused a redirected installation folder.");
+    }
+
+    PackageVersion parse_version(std::wstring_view text)
+    {
+        std::array<std::uint16_t, 4> parts{};
+        std::size_t start = 0U;
+        for (std::size_t index = 0U; index < parts.size(); ++index)
+        {
+            std::size_t const separator = text.find(L'.', start);
+            std::size_t const end =
+                separator == std::wstring_view::npos ?
+                    text.size() :
+                    separator;
+            if (end == start ||
+                (index < parts.size() - 1U &&
+                 separator == std::wstring_view::npos) ||
+                (index == parts.size() - 1U &&
+                 separator != std::wstring_view::npos))
+            {
+                fail(
+                    L"Setup received an invalid four-part product version.");
+            }
+
+            unsigned long value = 0U;
+            for (wchar_t const character :
+                 text.substr(start, end - start))
+            {
+                if (character < L'0' || character > L'9')
+                {
+                    fail(
+                        L"Setup received an invalid four-part product "
+                        L"version.");
+                }
+                value = value * 10U +
+                        static_cast<unsigned long>(character - L'0');
+                if (value > UINT16_MAX)
+                {
+                    fail(
+                        L"Setup received an invalid four-part product "
+                        L"version.");
+                }
+            }
+            parts[index] = static_cast<std::uint16_t>(value);
+            start = end + 1U;
+        }
+
+        return PackageVersion{
+            .Major = parts[0],
+            .Minor = parts[1],
+            .Build = parts[2],
+            .Revision = parts[3],
+        };
+    }
+
+    std::uint64_t comparable_version(PackageVersion const& version)
+    {
+        return (static_cast<std::uint64_t>(version.Major) << 48U) |
+               (static_cast<std::uint64_t>(version.Minor) << 32U) |
+               (static_cast<std::uint64_t>(version.Build) << 16U) |
+               static_cast<std::uint64_t>(version.Revision);
+    }
+
+    std::uint8_t parse_hex_digit(wchar_t value)
+    {
+        if (value >= L'0' && value <= L'9')
+        {
+            return static_cast<std::uint8_t>(value - L'0');
+        }
+        if (value >= L'A' && value <= L'F')
+        {
+            return static_cast<std::uint8_t>(value - L'A' + 10);
+        }
+        fail(L"Setup received an invalid expected payload hash.");
+    }
+
+    sha256_digest parse_sha256(std::wstring_view value)
+    {
+        if (value.size() != 64U)
+        {
+            fail(L"Setup received an invalid expected payload hash.");
+        }
+
+        sha256_digest digest{};
+        for (std::size_t index = 0U; index < digest.size(); ++index)
+        {
+            digest[index] = static_cast<std::uint8_t>(
+                (parse_hex_digit(value[index * 2U]) << 4U) |
+                parse_hex_digit(value[index * 2U + 1U]));
+        }
+        return digest;
+    }
+
+    sha256_digest hash_file(std::filesystem::path const& path)
+    {
+        file_handle file;
+        file.value = CreateFileW(
+            path.c_str(),
+            GENERIC_READ,
+            FILE_SHARE_READ,
+            nullptr,
+            OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN,
+            nullptr);
+        if (file.value == INVALID_HANDLE_VALUE)
+        {
+            fail(L"Setup could not read an installed payload file.");
+        }
+
+        bcrypt_algorithm_handle algorithm;
+        check_bcrypt(BCryptOpenAlgorithmProvider(
+            &algorithm.value,
+            BCRYPT_SHA256_ALGORITHM,
+            nullptr,
+            0));
+
+        DWORD object_length = 0U;
+        DWORD result_length = 0U;
+        check_bcrypt(BCryptGetProperty(
+            algorithm.value,
+            BCRYPT_OBJECT_LENGTH,
+            reinterpret_cast<PUCHAR>(&object_length),
+            sizeof(object_length),
+            &result_length,
+            0));
+        if (result_length != sizeof(object_length) ||
+            object_length == 0U)
+        {
+            fail(
+                L"Setup could not initialize installed payload hashing.");
+        }
+
+        std::vector<UCHAR> hash_object(object_length);
+        bcrypt_hash_handle hash;
+        check_bcrypt(BCryptCreateHash(
+            algorithm.value,
+            &hash.value,
+            hash_object.data(),
+            static_cast<ULONG>(hash_object.size()),
+            nullptr,
+            0,
+            0));
+
+        std::array<UCHAR, 64U * 1024U> buffer{};
+        while (true)
+        {
+            DWORD read = 0U;
+            if (!ReadFile(
+                    file.value,
+                    buffer.data(),
+                    static_cast<DWORD>(buffer.size()),
+                    &read,
+                    nullptr))
+            {
+                fail(L"Setup could not read an installed payload file.");
+            }
+            if (read == 0U)
+            {
+                break;
+            }
+            check_bcrypt(BCryptHashData(
+                hash.value,
+                buffer.data(),
+                read,
+                0));
+        }
+
+        sha256_digest digest{};
+        check_bcrypt(BCryptFinishHash(
+            hash.value,
+            reinterpret_cast<PUCHAR>(digest.data()),
+            static_cast<ULONG>(digest.size()),
+            0));
+        return digest;
+    }
+
+    payload_manifest read_payload_manifest(
+        std::filesystem::path const& install_folder,
+        sha256_digest const& expected_manifest_hash)
+    {
+        std::filesystem::path const path =
+            install_folder / payload_hash_manifest_name;
+        if (!std::filesystem::is_regular_file(path))
+        {
+            fail(
+                L"Setup refused an invalid payload hash manifest path.");
+        }
+        reject_reparse_chain(
+            path,
+            L"Setup refused a redirected payload hash manifest.");
+        if (hash_file(path) != expected_manifest_hash)
+        {
+            fail(
+                L"Setup refused a mismatched payload hash manifest.");
+        }
+
+        std::ifstream stream{path, std::ios::binary | std::ios::in};
+        std::string const contents{
             std::istreambuf_iterator<char>{stream},
             std::istreambuf_iterator<char>{}};
-        if (stream.bad() || serialized.empty() || serialized.size() > 128U ||
-            std::ranges::any_of(serialized, [](char character) {
-                return character < 0x20 || character > 0x7E;
+        if (stream.bad() || contents.empty() || contents.size() > 512U ||
+            std::ranges::any_of(contents, [](unsigned char value) {
+                return value < 0x20U || value > 0x7EU;
             }))
         {
-            fail(L"Setup could not read its identity rollback marker.");
+            fail(L"Setup refused an invalid payload hash manifest.");
         }
 
-        std::wstring const text{serialized.begin(), serialized.end()};
-        auto const fields = split_data(text, 8);
+        std::wstring const wide_contents{
+            contents.begin(),
+            contents.end()};
+        auto const fields = split_data(
+            wide_contents,
+            payload_files.size() + 2U);
         if (fields[0] != L"v2")
         {
-            fail(L"Setup found an unsupported identity rollback marker.");
+            fail(
+                L"Setup received an unsupported payload hash manifest.");
         }
 
-        identity_snapshot const snapshot{
-            .package_present = parse_snapshot_boolean(fields[1]),
-            .package_version = parse_version(fields[2]),
-            .provisioned = parse_snapshot_boolean(fields[3]),
-            .invoking_user_registered =
-                parse_snapshot_boolean(fields[4]),
-            .executable_present = {
-                parse_snapshot_boolean(fields[5]),
-                parse_snapshot_boolean(fields[6]),
-                parse_snapshot_boolean(fields[7]),
-            },
+        payload_manifest manifest{
+            .version = parse_version(fields[1]),
         };
-        if (!snapshot.package_present &&
-            (comparable_version(snapshot.package_version) != 0U ||
-             snapshot.provisioned ||
-             snapshot.invoking_user_registered))
-        {
-            fail(L"Setup found inconsistent identity rollback state.");
-        }
-        return snapshot;
-    }
-
-    void remove_snapshot(
-        std::filesystem::path const& marker,
-        std::filesystem::path const& install_folder)
-    {
-        std::filesystem::path const rollback_package =
-            rollback_package_path(install_folder);
-        validate_rollback_package_path(
-            rollback_package,
-            install_folder,
-            true);
-        std::error_code error;
-        static_cast<void>(
-            std::filesystem::remove(rollback_package, error));
-        if (error)
-        {
-            fail(L"Setup could not remove its identity rollback package.");
-        }
         for (std::size_t index = 0U;
-             index < rollback_executables.size();
+             index < manifest.hashes.size();
              ++index)
         {
-            std::filesystem::path const rollback_executable =
-                rollback_executable_path(install_folder, index);
-            validate_rollback_executable_path(
-                rollback_executable,
-                install_folder,
-                index,
-                true);
-            error.clear();
-            static_cast<void>(
-                std::filesystem::remove(rollback_executable, error));
-            if (error)
-            {
-                fail(L"Setup could not remove an executable rollback file.");
-            }
+            manifest.hashes[index] =
+                parse_sha256(fields[index + 2U]);
         }
-        error.clear();
-        static_cast<void>(std::filesystem::remove(marker, error));
-        if (error)
-        {
-            fail(L"Setup could not remove its identity rollback marker.");
-        }
+        return manifest;
     }
 
-    void remove_exact_package(
-        PackageManager const& manager,
-        PackageVersion const& version)
+    validation_action_data read_validation_action_data(
+        MSIHANDLE installer)
     {
-        for (unsigned attempt = 0U;
-             attempt < package_state_convergence_attempts;
-             ++attempt)
-        {
-            for (Package const& package : matching_packages(manager))
-            {
-                if (comparable_version(package.Id().Version()) ==
-                    comparable_version(version))
-                {
-                    remove_package(manager, package);
-                }
-            }
-
-            // Package deployment completion and cross-user enumeration can
-            // converge at different times. Do not reprovision the family
-            // while the incoming version is still visible, or Windows can
-            // select that higher version again.
-            if (!exact_package_exists(manager, version))
-            {
-                return;
-            }
-            if (attempt + 1U < package_state_convergence_attempts)
-            {
-                Sleep(package_state_retry_delay_ms);
-            }
-        }
-        fail(L"Setup could not remove the incoming identity package.");
+        auto const fields = split_data(
+            get_property(installer, L"CustomActionData"),
+            3U);
+        return validation_action_data{
+            .install_folder = absolute_path(fields[0]),
+            .version = parse_version(fields[1]),
+            .manifest_hash = parse_sha256(fields[2]),
+        };
     }
 
-    void restore_external_payload(
-        identity_snapshot const& snapshot,
-        std::filesystem::path const& install_folder)
+    void validate_release_payload(
+        validation_action_data const& data)
     {
-        validate_install_folder(install_folder);
+        validate_install_folder(data.install_folder);
+        sha256_digest const setup_signer = trusted_signer_hash(
+            current_module_path(),
+            L"Setup refused an untrusted validation module.");
+        for (std::wstring_view const name : payload_files)
+        {
+            std::filesystem::path const path =
+                data.install_folder / name;
+            if (!std::filesystem::is_regular_file(path))
+            {
+                fail(L"Setup refused an incomplete executable set.");
+            }
+            reject_reparse_chain(
+                path,
+                L"Setup refused a redirected executable set.");
+            if (trusted_signer_hash(
+                    path,
+                    L"Setup refused an untrusted payload signature.") !=
+                setup_signer)
+            {
+                fail(L"Setup refused a payload signed by another publisher.");
+            }
+        }
+        if (std::filesystem::exists(
+                data.install_folder / forbidden_provider))
+        {
+            fail(
+                L"Setup refused an unexpected passkey provider before "
+                L"issue #18.");
+        }
+
+        payload_manifest const manifest = read_payload_manifest(
+            data.install_folder,
+            data.manifest_hash);
+        if (comparable_version(manifest.version) !=
+            comparable_version(data.version))
+        {
+            fail(
+                L"Setup refused a payload manifest with a mismatched "
+                L"version.");
+        }
         for (std::size_t index = 0U;
-             index < required_executables.size();
+             index < payload_files.size();
              ++index)
         {
-            std::filesystem::path const installed_executable =
-                install_folder / required_executables[index];
-            reject_reparse_chain(
-                installed_executable,
-                true,
-                L"Setup refused a redirected installed executable.");
-            if (std::filesystem::exists(installed_executable) &&
-                !std::filesystem::is_regular_file(installed_executable))
+            if (hash_file(data.install_folder / payload_files[index]) !=
+                manifest.hashes[index])
             {
-                fail(L"Setup refused an invalid installed executable.");
+                fail(
+                    L"Setup refused a mismatched installed payload file.");
             }
-
-            std::filesystem::path const rollback_executable =
-                rollback_executable_path(install_folder, index);
-            validate_rollback_executable_path(
-                rollback_executable,
-                install_folder,
-                index,
-                !snapshot.executable_present[index]);
-            if (!snapshot.executable_present[index])
-            {
-                if (std::filesystem::exists(rollback_executable))
-                {
-                    fail(
-                        L"Setup found inconsistent executable rollback state.");
-                }
-                std::error_code error;
-                static_cast<void>(
-                    std::filesystem::remove(installed_executable, error));
-                if (error)
-                {
-                    fail(
-                        L"Setup could not restore an absent executable.");
-                }
-                continue;
-            }
-
-            if (!CopyFileW(
-                    rollback_executable.c_str(),
-                    installed_executable.c_str(),
-                    FALSE))
-            {
-                fail(L"Setup could not restore an installed executable.");
-            }
-            if (!std::filesystem::is_regular_file(installed_executable))
-            {
-                fail(L"Setup restored an invalid installed executable.");
-            }
-            reject_reparse_chain(
-                installed_executable,
-                false,
-                L"Setup restored a redirected installed executable.");
         }
     }
 
-    void restore_system_identity(
-        PackageManager const& manager,
-        identity_snapshot const& snapshot,
-        PackageVersion const& incoming_version,
-        std::filesystem::path const& package_path,
-        std::filesystem::path const& install_folder)
+    void check_deployment_result(
+        DeploymentResult const& result,
+        std::wstring_view operation)
     {
-        if (!snapshot.package_present)
+        winrt::hresult const error = result.ExtendedErrorCode();
+        if (error.value < 0)
         {
-            remove_exact_package(manager, incoming_version);
-            restore_external_payload(snapshot, install_folder);
-            return;
-        }
-
-        if (comparable_version(snapshot.package_version) !=
-            comparable_version(incoming_version))
-        {
-            // Keep the incoming external payload intact until its identity is
-            // removed. Replacing those files first can make Windows package
-            // deployment lose the external-location package during removal.
-            remove_exact_package(manager, incoming_version);
-        }
-
-        restore_external_payload(snapshot, install_folder);
-        Package const previous = ensure_package_staged(
-            manager,
-            snapshot.package_version,
-            package_path,
-            install_folder,
-            true);
-        if (snapshot.provisioned &&
-            !package_is_provisioned(manager, previous))
-        {
-            ensure_package_provisioned(
-                manager,
-                previous,
-                L"Previous identity package provisioning");
-        }
-        else if (!snapshot.provisioned &&
-                 package_is_provisioned(manager, previous))
-        {
-            deprovision_package_family(
-                manager,
-                previous.Id().FamilyName());
-        }
-    }
-
-    void retire_superseded_packages(
-        PackageManager const& manager,
-        PackageVersion const& installed_version)
-    {
-        std::uint64_t const installed =
-            comparable_version(installed_version);
-        std::vector<Package> const packages = matching_packages(manager);
-        auto const superseded = [installed](Package const& package) {
-            return comparable_version(package.Id().Version()) < installed;
-        };
-        auto const provisioned_superseded =
-            [&manager, &superseded](Package const& package) {
-                return superseded(package) &&
-                       package_is_provisioned(manager, package);
-            };
-        if (std::ranges::any_of(packages, provisioned_superseded))
-        {
-            deprovision_package_family(
-                manager,
-                packages.front().Id().FamilyName());
-        }
-        for (Package const& package : packages)
-        {
-            if (superseded(package))
-            {
-                // The incoming package is already staged and registered for
-                // the invoking user. Retire older registrations only in the
-                // checked commit phase, then provision the incoming package
-                // after these family-affecting removals are complete.
-                remove_package_for_all_users(
-                    manager,
-                    package,
-                    L"Superseded identity package retirement");
-            }
-        }
-    }
-
-    void restore_current_user_identity(
-        PackageManager const& manager,
-        identity_snapshot const& snapshot,
-        PackageVersion const& incoming_version,
-        std::filesystem::path const& package_path,
-        std::filesystem::path const& install_folder)
-    {
-        for (Package const& package : matching_packages(manager))
-        {
-            std::uint64_t const actual =
-                comparable_version(package.Id().Version());
-            bool const incoming =
-                actual == comparable_version(incoming_version);
-            bool const previous =
-                snapshot.package_present &&
-                actual == comparable_version(snapshot.package_version);
-            bool const preserve_previous =
-                snapshot.package_present &&
-                snapshot.invoking_user_registered &&
-                previous;
-            if (!preserve_previous && (incoming || previous))
-            {
-                remove_package_for_current_user(manager, package);
-            }
-        }
-
-        if (snapshot.package_present &&
-            snapshot.invoking_user_registered)
-        {
-            register_rollback_package_for_current_user(
-                manager,
-                snapshot.package_version,
-                package_path,
-                install_folder);
+            std::wstring message{operation};
+            message.append(L" failed.");
+            throw winrt::hresult_error{error, message};
         }
     }
 }
 
-extern "C" __declspec(dllexport) UINT __stdcall SnapshotIdentity(
+extern "C" __declspec(dllexport) UINT __stdcall ValidateIdentityPayload(
     MSIHANDLE installer)
 {
-    return run_action(installer, L"identity snapshot", [&] {
-        auto const fields =
-            split_data(get_property(installer, L"CustomActionData"), 4);
-        std::filesystem::path const marker = absolute_path(fields[0]);
-        std::filesystem::path const install_folder = absolute_path(fields[1]);
-        PackageVersion const version = parse_version(fields[2]);
-        std::wstring const user_sid = validate_user_sid(fields[3]);
-        validate_snapshot_path(marker, install_folder, true);
-        if (std::filesystem::exists(marker))
-        {
-            fail(L"Setup found a stale identity rollback marker.");
-        }
-        PackageManager const manager;
-        identity_snapshot snapshot = capture_snapshot(
-            manager,
-            version,
-            install_folder,
-            user_sid);
-        snapshot.executable_present =
-            capture_executable_state(install_folder);
-        write_snapshot_package(marker, install_folder, snapshot);
-    });
-}
-
-extern "C" __declspec(dllexport) UINT __stdcall RegisterIdentity(
-    MSIHANDLE installer)
-{
-    return run_action(installer, L"identity staging", [&] {
-        identity_action_data const data = read_identity_action_data(installer);
+    return run_action(installer, L"identity payload validation", [&] {
         validate_release_payload(
-            data.package_path,
-            data.install_folder,
-            data.hashes);
-        PackageManager const manager;
-        reject_newer_packages(manager, data.version);
-        static_cast<void>(ensure_package_staged(
-            manager,
-            data.version,
-            data.package_path,
-            data.install_folder));
+            read_validation_action_data(installer));
     });
 }
 
-extern "C" __declspec(dllexport) UINT __stdcall RegisterCurrentUserIdentity(
-    MSIHANDLE installer)
-{
-    return run_action(installer, L"invoking-user identity registration", [&] {
-        identity_action_data const data = read_identity_action_data(installer);
-        validate_release_payload(
-            data.package_path,
-            data.install_folder,
-            data.hashes);
-        PackageManager const manager;
-        register_package_for_current_user(
-            manager,
-            data.version,
-            data.package_path,
-            data.install_folder);
-        Package const package = find_exact_package(manager, data.version);
-        validate_external_location(package, data.install_folder);
-    });
-}
-
-extern "C" __declspec(dllexport) UINT __stdcall ProvisionIdentity(
-    MSIHANDLE installer)
-{
-    return run_action(installer, L"identity provisioning", [&] {
-        identity_action_data const data = read_identity_action_data(installer);
-        validate_release_payload(
-            data.package_path,
-            data.install_folder,
-            data.hashes);
-        PackageManager const manager;
-        reject_newer_packages(manager, data.version);
-        Package const package = find_exact_package(manager, data.version);
-        validate_external_location(package, data.install_folder);
-        retire_superseded_packages(manager, data.version);
-        ensure_package_provisioned(
-            manager,
-            package,
-            L"Identity package provisioning");
-    });
-}
-
-extern "C" __declspec(dllexport) UINT __stdcall RollbackIdentity(
-    MSIHANDLE installer)
-{
-    return run_action(installer, L"identity rollback", [&] {
-        auto const fields =
-            split_data(get_property(installer, L"CustomActionData"), 4);
-        std::filesystem::path const marker = absolute_path(fields[0]);
-        std::filesystem::path const package_path = absolute_path(fields[1]);
-        std::filesystem::path const install_folder = absolute_path(fields[2]);
-        PackageVersion const version = parse_version(fields[3]);
-
-        validate_snapshot_path(marker, install_folder, false);
-        identity_snapshot const snapshot = read_snapshot(marker);
-        PackageManager const manager;
-        restore_system_identity(
-            manager,
-            snapshot,
-            version,
-            package_path,
-            install_folder);
-    });
-}
-
-extern "C" __declspec(dllexport) UINT __stdcall RollbackCurrentUserIdentity(
-    MSIHANDLE installer)
+extern "C" __declspec(dllexport) UINT __stdcall
+UnregisterCurrentUserIdentity(MSIHANDLE installer)
 {
     return run_action(
         installer,
-        L"invoking-user identity rollback",
+        L"invoking-user identity removal",
         [&] {
-            auto const fields =
-                split_data(
-                    get_property(installer, L"CustomActionData"),
-                    4);
-            std::filesystem::path const marker =
-                absolute_path(fields[0]);
-            std::filesystem::path const package_path =
-                absolute_path(fields[1]);
-            std::filesystem::path const install_folder =
-                absolute_path(fields[2]);
-            PackageVersion const version = parse_version(fields[3]);
-
-            validate_snapshot_path(marker, install_folder, false);
-            identity_snapshot const snapshot = read_snapshot(marker);
+            auto const fields = split_data(
+                get_property(installer, L"CustomActionData"),
+                1U);
+            PackageVersion const installed_version =
+                parse_version(fields[0]);
+            std::uint64_t const installed =
+                comparable_version(installed_version);
             PackageManager const manager;
-            restore_current_user_identity(
-                manager,
-                snapshot,
-                version,
-                package_path,
-                install_folder);
-        });
-}
-
-extern "C" __declspec(dllexport) UINT __stdcall CleanupIdentitySnapshot(
-    MSIHANDLE installer)
-{
-    return run_action(installer, L"identity snapshot cleanup", [&] {
-        auto const fields =
-            split_data(get_property(installer, L"CustomActionData"), 2);
-        std::filesystem::path const marker = absolute_path(fields[0]);
-        std::filesystem::path const install_folder = absolute_path(fields[1]);
-        validate_snapshot_path(marker, install_folder, false);
-        remove_snapshot(marker, install_folder);
-    });
-}
-
-extern "C" __declspec(dllexport) UINT __stdcall UnregisterIdentity(
-    MSIHANDLE installer)
-{
-    return run_action(installer, L"identity removal", [&] {
-        // This all-user mutation is a checked commit custom action. It runs
-        // only after Windows Installer has completed the rollback-capable
-        // script, so a failed uninstall never removes another user's
-        // pre-existing package registration.
-        auto const fields =
-            split_data(get_property(installer, L"CustomActionData"), 1);
-        PackageVersion const installed_version = parse_version(fields[0]);
-        PackageManager const manager;
-        std::vector<Package> const packages = matching_packages(manager);
-        if (std::ranges::any_of(
-                packages,
-                [&installed_version](Package const& package) {
-                    return comparable_version(package.Id().Version()) >
-                           comparable_version(installed_version);
-                }))
-        {
-            // Burn removes the superseded bundle after the newer MSI commits.
-            // Removing any older package for all users can also clear the
-            // newer package's family provisioning, so the newer product owns
-            // all identity cleanup from this point forward.
-            return;
-        }
-        for (Package const& package : packages)
-        {
-            if (comparable_version(package.Id().Version()) <=
-                comparable_version(installed_version))
+            std::vector<Package> packages;
+            for (Package const& package :
+                 manager.FindPackagesForUser(
+                     L"",
+                     winrt::hstring{package_name},
+                     winrt::hstring{package_publisher}))
             {
-                remove_package(manager, package);
+                packages.push_back(package);
             }
-        }
-    });
+            for (Package const& package : packages)
+            {
+                if (comparable_version(package.Id().Version()) >
+                    installed)
+                {
+                    continue;
+                }
+                DeploymentResult const result =
+                    manager.RemovePackageAsync(
+                        package.Id().FullName()).get();
+                check_deployment_result(
+                    result,
+                    L"Invoking-user identity removal");
+            }
+        });
 }
