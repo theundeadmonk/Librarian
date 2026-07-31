@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <array>
+#include <climits>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
@@ -812,6 +813,70 @@ namespace
             L"Librarian",
             MB_OK | MB_ICONERROR | MB_SETFOREGROUND);
     }
+
+    void write_headless_failure(std::wstring_view message)
+    {
+        HANDLE const standard_error = GetStdHandle(STD_ERROR_HANDLE);
+        if (standard_error == nullptr ||
+            standard_error == INVALID_HANDLE_VALUE ||
+            message.empty() || message.size() > INT_MAX)
+        {
+            return;
+        }
+
+        int const byte_count = WideCharToMultiByte(
+            CP_UTF8,
+            WC_ERR_INVALID_CHARS,
+            message.data(),
+            static_cast<int>(message.size()),
+            nullptr,
+            0,
+            nullptr,
+            nullptr);
+        if (byte_count <= 0)
+        {
+            return;
+        }
+
+        std::string output(static_cast<std::size_t>(byte_count), '\0');
+        if (WideCharToMultiByte(
+                CP_UTF8,
+                WC_ERR_INVALID_CHARS,
+                message.data(),
+                static_cast<int>(message.size()),
+                output.data(),
+                byte_count,
+                nullptr,
+                nullptr) != byte_count)
+        {
+            return;
+        }
+        output.append("\r\n");
+
+        DWORD written = 0U;
+        static_cast<void>(WriteFile(
+            standard_error,
+            output.data(),
+            static_cast<DWORD>(output.size()),
+            &written,
+            nullptr));
+    }
+
+    void report_failure(
+        operation requested,
+        std::wstring_view message)
+    {
+        std::wstring const terminated_message{message};
+        OutputDebugStringW(terminated_message.c_str());
+        if (requested == operation::launch)
+        {
+            show_failure(message);
+        }
+        else
+        {
+            write_headless_failure(message);
+        }
+    }
 }
 
 int WINAPI wWinMain(
@@ -846,11 +911,7 @@ int WINAPI wWinMain(
     }
     catch (validation_error const& error)
     {
-        OutputDebugStringW(error.message.c_str());
-        if (requested == operation::launch)
-        {
-            show_failure(error.message);
-        }
+        report_failure(requested, error.message);
     }
     catch (winrt::hresult_error const& error)
     {
@@ -864,21 +925,13 @@ int WINAPI wWinMain(
             L"user ("};
         message.append(code);
         message.append(L"). Close Librarian processes and try again.");
-        OutputDebugStringW(message.c_str());
-        if (requested == operation::launch)
-        {
-            show_failure(message);
-        }
+        report_failure(requested, message);
     }
     catch (...)
     {
         constexpr std::wstring_view message{
             L"Librarian could not prepare its Windows package identity."};
-        OutputDebugStringW(message.data());
-        if (requested == operation::launch)
-        {
-            show_failure(message);
-        }
+        report_failure(requested, message);
     }
     return 1;
 }

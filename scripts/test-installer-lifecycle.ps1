@@ -358,9 +358,25 @@ function Invoke-DisposableUserIdentityLauncher {
     $escapedLauncherPath = $LauncherPath.Replace("'", "''")
     $probe = @"
 `$ErrorActionPreference = "Stop"
-`$process = Start-Process -FilePath '$escapedLauncherPath' -ArgumentList '--register-only' -Wait -PassThru
-if (`$process.ExitCode -ne 0) {
-    exit `$process.ExitCode
+`$launcherErrorPath = Join-Path `$env:TEMP ("LibrarianIdentityLauncher-{0}.stderr.log" -f [Guid]::NewGuid().ToString("N"))
+try {
+    `$process = Start-Process -FilePath '$escapedLauncherPath' -ArgumentList '--register-only' -RedirectStandardError `$launcherErrorPath -Wait -PassThru
+    try {
+        `$launcherExitCode = `$process.ExitCode
+    }
+    finally {
+        `$process.Dispose()
+    }
+    if (`$launcherExitCode -ne 0) {
+        `$launcherError = [string](@(Get-Content -LiteralPath `$launcherErrorPath -Raw -ErrorAction SilentlyContinue) -join [Environment]::NewLine)
+        if (-not [string]::IsNullOrWhiteSpace(`$launcherError)) {
+            [Console]::Error.WriteLine(`$launcherError.TrimEnd())
+        }
+        exit `$launcherExitCode
+    }
+}
+finally {
+    Remove-Item -LiteralPath `$launcherErrorPath -Force -ErrorAction SilentlyContinue
 }
 `$versions = @(
     Get-AppxPackage -Name "TheUndeadMonk.Librarian.Development" |
