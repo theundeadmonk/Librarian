@@ -1279,9 +1279,6 @@ try {
             "/l*v",
             (Join-Path $resolvedLogDirectory "09-interrupted-uninstall.log")
         )
-    Invoke-CurrentUserIdentityLauncher `
-        -LauncherPath $identityLauncher `
-        -ExpectedVersion $HighVersion
     Assert-Installed `
         -ExpectedVersion $HighVersion `
         -BrowsersExpected $true `

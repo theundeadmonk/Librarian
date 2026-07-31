@@ -547,6 +547,7 @@ namespace
         std::uint64_t const expected =
             comparable_version(expected_version);
         bool exact_registered = false;
+        std::vector<Package> unhealthy_exact_packages;
         for (Package const& package : current_user_packages(manager))
         {
             std::uint64_t const actual =
@@ -560,12 +561,40 @@ namespace
             if (actual == expected)
             {
                 validate_external_location(package, install_folder);
-                exact_registered = true;
+                if (package.Status().VerifyIsOK())
+                {
+                    exact_registered = true;
+                }
+                else
+                {
+                    unhealthy_exact_packages.push_back(package);
+                }
             }
+        }
+        if (exact_registered && !unhealthy_exact_packages.empty())
+        {
+            fail(
+                L"Librarian refused ambiguous exact-version identity "
+                L"registrations.");
         }
         if (exact_registered)
         {
             return;
+        }
+        if (unhealthy_exact_packages.size() > 1U)
+        {
+            fail(
+                L"Librarian refused multiple unhealthy exact-version "
+                L"identity registrations.");
+        }
+        for (Package const& package : unhealthy_exact_packages)
+        {
+            DeploymentResult const result =
+                manager.RemovePackageAsync(
+                    package.Id().FullName()).get();
+            check_deployment_result(
+                result,
+                L"Unhealthy current-user package identity removal");
         }
 
         AddPackageOptions const options;
@@ -591,6 +620,12 @@ namespace
             fail(
                 L"Librarian identity registration did not become visible "
                 L"for the current user.");
+        }
+        if (!exact->Status().VerifyIsOK())
+        {
+            fail(
+                L"Librarian identity registration remained unhealthy for "
+                L"the current user.");
         }
         validate_external_location(*exact, install_folder);
     }

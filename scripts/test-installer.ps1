@@ -635,7 +635,7 @@ try {
             Execute = "deferred"; Impersonate = "no"
         }
         UnregisterCurrentUserIdentity = [PSCustomObject]@{
-            Execute = "deferred"; Impersonate = "yes"
+            Execute = "commit"; Impersonate = "yes"
         }
     }
     foreach ($entry in $expectedCustomActions.GetEnumerator()) {
@@ -778,9 +778,11 @@ try {
         "before InstallFinalize."
     )
     Assert-True (
-        $unregisterCurrentUserIdentity -lt $removeFiles
+        $unregisterCurrentUserIdentity -gt $removeFiles -and
+        $unregisterCurrentUserIdentity -lt $installFinalize
     ) (
-        "Invoking-user package cleanup must run before RemoveFiles."
+        "Invoking-user package cleanup must be committed only after " +
+        "RemoveFiles succeeds."
     )
 
     $chromeManifestPath = Get-ExtractedMsiFile `

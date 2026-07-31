@@ -200,14 +200,15 @@ repeats the canonical path, reparse-point, version, and hash validation before
 calling the supported package-management API. A stale or mixed-release
 identity-bearing file therefore fails closed before desktop launch.
 
-Final uninstall runs one deferred impersonated native action before file
-removal. It removes only matching registrations belonging to the invoking user
-and leaves newer versions untouched. If more than one removable version is
-present for that user, it fails closed before changing any registration rather
-than risk partial cleanup. It never enumerates or mutates another profile.
-Registrations retained by other users become inert once Program Files is
-removed and can converge after reinstall and next launch. Deterministic
-all-user cleanup is intentionally deferred to
+Final uninstall schedules one checked impersonated native commit action after
+file removal succeeds, so a transaction that rolls back cannot unregister the
+invoking user. The commit action removes only matching registrations belonging
+to that user and leaves newer versions untouched. If more than one removable
+version is present for that user, it fails closed before changing any
+registration rather than risk partial cleanup. It never enumerates or mutates
+another profile. Registrations retained by other users become inert once
+Program Files is removed and can converge after reinstall and next launch.
+Deterministic all-user cleanup is intentionally deferred to
 [issue #39](https://github.com/theundeadmonk/Librarian/issues/39).
 
 The MSI owns Librarian files and registrations beneath `Program Files` and

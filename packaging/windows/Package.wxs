@@ -201,7 +201,7 @@
       Id="UnregisterCurrentUserIdentity"
       BinaryRef="LibrarianSetupCustomActions"
       DllEntry="UnregisterCurrentUserIdentity"
-      Execute="deferred"
+      Execute="commit"
       Impersonate="yes"
       Return="check"
       HideTarget="yes" />
@@ -232,7 +232,7 @@
         Condition="NOT (REMOVE~=&quot;ALL&quot;)" />
       <Custom
         Action="UnregisterCurrentUserIdentity"
-        Before="RemoveFiles"
+        After="RemoveFiles"
         Condition="REMOVE~=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
     </InstallExecuteSequence>
 
