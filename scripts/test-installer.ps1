@@ -713,16 +713,37 @@ try {
     Assert-True (
         $null -ne $coreCreateFolder
     ) "The protected install directory must be created before validation."
+    $minimumWindowsBuildProperty = $decompiled.SelectSingleNode(
+        "//*[local-name()='Property' and @Id='WINDOWSBUILDNUMBER']"
+    )
+    $minimumWindowsBuildSearch = if ($null -ne $minimumWindowsBuildProperty) {
+        $minimumWindowsBuildProperty.SelectSingleNode(
+            "*[local-name()='RegistrySearch']"
+        )
+    } else {
+        $null
+    }
+    Assert-True (
+        $null -ne $minimumWindowsBuildProperty -and
+        $minimumWindowsBuildProperty.GetAttribute("Secure") -eq "yes" -and
+        $null -ne $minimumWindowsBuildSearch -and
+        $minimumWindowsBuildSearch.GetAttribute("Root") -eq "HKLM" -and
+        $minimumWindowsBuildSearch.GetAttribute("Key") -eq
+            "SOFTWARE\Microsoft\Windows NT\CurrentVersion" -and
+        $minimumWindowsBuildSearch.GetAttribute("Name") -eq
+            "CurrentBuildNumber" -and
+        $minimumWindowsBuildSearch.GetAttribute("Type") -eq "raw"
+    ) "The MSI must securely read the native Windows build number."
     $minimumWindowsLaunch = $decompiled.SelectSingleNode(
         (
             "//*[local-name()='Launch' and " +
-            "contains(@Condition,'WindowsBuild')]"
+            "contains(@Condition,'WINDOWSBUILDNUMBER')]"
         )
     )
     Assert-True (
         $null -ne $minimumWindowsLaunch -and
         $minimumWindowsLaunch.GetAttribute("Condition") -eq
-            "Installed OR (VersionNT64 >= 1000 AND WindowsBuild >= 26100)"
+            "Installed OR (VersionNT64 AND WINDOWSBUILDNUMBER >= 26100)"
     ) "The MSI must reject unsupported Windows architectures and builds."
     $installFolderPermission = $coreCreateFolder.SelectSingleNode(
         "*[local-name()='PermissionEx']"
