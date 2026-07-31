@@ -202,9 +202,11 @@ identity-bearing file therefore fails closed before desktop launch.
 
 Final uninstall runs one deferred impersonated native action before file
 removal. It removes only matching registrations belonging to the invoking user
-and leaves newer versions untouched. It never enumerates or mutates another
-profile. Registrations retained by other users become inert once Program Files
-is removed and can converge after reinstall and next launch. Deterministic
+and leaves newer versions untouched. If more than one removable version is
+present for that user, it fails closed before changing any registration rather
+than risk partial cleanup. It never enumerates or mutates another profile.
+Registrations retained by other users become inert once Program Files is
+removed and can converge after reinstall and next launch. Deterministic
 all-user cleanup is intentionally deferred to
 [issue #39](https://github.com/theundeadmonk/Librarian/issues/39).
 

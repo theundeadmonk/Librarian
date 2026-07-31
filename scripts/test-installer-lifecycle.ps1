@@ -169,10 +169,47 @@ function Invoke-DisposableUserPowerShell {
     $probePath = "$probeBase.ps1"
     $standardOutputPath = "$probeBase.stdout.log"
     $standardErrorPath = "$probeBase.stderr.log"
+    $environmentPreamble = @'
+$identityName = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+$separator = $identityName.IndexOf("\")
+if ($separator -ge 0) {
+    $env:USERDOMAIN = $identityName.Substring(0, $separator)
+    $env:USERNAME = $identityName.Substring($separator + 1)
+}
+else {
+    $env:USERNAME = $identityName
+}
+$userProfile = [Environment]::GetFolderPath(
+    [Environment+SpecialFolder]::UserProfile
+)
+$localAppData = [Environment]::GetFolderPath(
+    [Environment+SpecialFolder]::LocalApplicationData
+)
+$roamingAppData = [Environment]::GetFolderPath(
+    [Environment+SpecialFolder]::ApplicationData
+)
+if ([string]::IsNullOrWhiteSpace($userProfile) -or
+    [string]::IsNullOrWhiteSpace($localAppData) -or
+    [string]::IsNullOrWhiteSpace($roamingAppData)) {
+    exit 125
+}
+$homeRoot = [IO.Path]::GetPathRoot($userProfile).TrimEnd("\")
+$env:USERPROFILE = $userProfile
+$env:HOME = $userProfile
+$env:HOMEDRIVE = $homeRoot
+$env:HOMEPATH = $userProfile.Substring($homeRoot.Length)
+$env:LOCALAPPDATA = $localAppData
+$env:APPDATA = $roamingAppData
+$userTemp = Join-Path $localAppData "Temp"
+New-Item -ItemType Directory -Path $userTemp -Force | Out-Null
+$env:TEMP = $userTemp
+$env:TMP = $userTemp
+'@
+    $probeScript = $environmentPreamble + [Environment]::NewLine + $Script
     try {
         [IO.File]::WriteAllText(
             $probePath,
-            $Script,
+            $probeScript,
             (New-Object Text.UTF8Encoding($true))
         )
         $process = Start-Process `

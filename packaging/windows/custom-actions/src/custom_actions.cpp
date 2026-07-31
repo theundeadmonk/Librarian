@@ -881,22 +881,27 @@ UnregisterCurrentUserIdentity(MSIHANDLE installer)
             std::uint64_t const installed =
                 comparable_version(installed_version);
             PackageManager const manager;
-            std::vector<Package> packages;
+            std::vector<Package> removable_packages;
             for (Package const& package :
                  manager.FindPackagesForUser(
                      L"",
                      winrt::hstring{package_name},
                      winrt::hstring{package_publisher}))
             {
-                packages.push_back(package);
-            }
-            for (Package const& package : packages)
-            {
-                if (comparable_version(package.Id().Version()) >
+                if (comparable_version(package.Id().Version()) <=
                     installed)
                 {
-                    continue;
+                    removable_packages.push_back(package);
                 }
+            }
+            if (removable_packages.size() > 1U)
+            {
+                throw winrt::hresult_error{
+                    E_UNEXPECTED,
+                    L"Invoking-user identity state is ambiguous."};
+            }
+            for (Package const& package : removable_packages)
+            {
                 DeploymentResult const result =
                     manager.RemovePackageAsync(
                         package.Id().FullName()).get();
