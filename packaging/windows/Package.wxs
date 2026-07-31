@@ -17,8 +17,8 @@
       Keywords="Librarian,password manager,Windows"
       Manufacturer="Librarian contributors" />
     <Launch
-      Condition="Installed OR (VersionNT64 &gt;= 1000 AND WindowsBuild &gt;= 26100 AND MsiNTProductType = 1)"
-      Message="Librarian requires x64 Windows 11 build 26100 or newer." />
+      Condition="Installed OR (VersionNT64 &gt;= 1000 AND WindowsBuild &gt;= 26100)"
+      Message="Librarian requires x64 Windows build 26100 or newer." />
     <MajorUpgrade
       DowngradeErrorMessage="A newer version of Librarian is already installed."
       Schedule="afterInstallExecute" />
@@ -227,7 +227,7 @@
       Condition="NOT (REMOVE~=&quot;ALL&quot;)" />
     <SetProperty
       Id="UnregisterCurrentUserIdentity"
-      Value="[ProductVersion]"
+      Value="[INSTALLFOLDER]|[ProductVersion]"
       Before="UnregisterCurrentUserIdentity"
       Sequence="execute"
       Condition="REMOVE~=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />

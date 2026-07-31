@@ -111,10 +111,16 @@ namespace
             bcrypt_hash_handle const&) = delete;
     };
 
+    struct payload_hash_entry
+    {
+        std::filesystem::path file_name;
+        sha256_digest hash{};
+    };
+
     struct payload_manifest
     {
         PackageVersion version{};
-        std::array<sha256_digest, payload_files.size()> hashes{};
+        std::vector<payload_hash_entry> files;
     };
 
     struct validation_action_data
@@ -633,6 +639,84 @@ namespace
         return digest;
     }
 
+    std::size_t parse_manifest_entry_count(std::wstring_view value)
+    {
+        if (value.empty())
+        {
+            fail(L"Setup received an invalid payload manifest entry count.");
+        }
+        std::size_t count = 0U;
+        for (wchar_t const character : value)
+        {
+            if (character < L'0' || character > L'9')
+            {
+                fail(
+                    L"Setup received an invalid payload manifest entry "
+                    L"count.");
+            }
+            count = count * 10U +
+                    static_cast<std::size_t>(character - L'0');
+            if (count > 256U)
+            {
+                fail(
+                    L"Setup received too many payload manifest entries.");
+            }
+        }
+        if (count == 0U)
+        {
+            fail(L"Setup received an empty payload manifest.");
+        }
+        return count;
+    }
+
+    std::filesystem::path parse_manifest_file_name(
+        std::wstring const& value)
+    {
+        if (value.empty() || value.size() > 255U ||
+            std::ranges::any_of(value, [](wchar_t character) {
+                return !((character >= L'A' && character <= L'Z') ||
+                         (character >= L'a' && character <= L'z') ||
+                         (character >= L'0' && character <= L'9') ||
+                         character == L'_' || character == L'-' ||
+                         character == L'.');
+            }))
+        {
+            fail(L"Setup received an invalid payload manifest filename.");
+        }
+
+        std::filesystem::path const file_name{value};
+        std::wstring const extension = file_name.extension().native();
+        if (_wcsicmp(extension.c_str(), L".exe") != 0 &&
+            _wcsicmp(extension.c_str(), L".dll") != 0 &&
+            _wcsicmp(extension.c_str(), L".msix") != 0)
+        {
+            fail(
+                L"Setup received a non-executable payload manifest entry.");
+        }
+        return file_name;
+    }
+
+    std::vector<std::wstring> split_manifest(std::wstring_view contents)
+    {
+        std::vector<std::wstring> fields;
+        std::size_t start = 0U;
+        while (start <= contents.size())
+        {
+            std::size_t const separator = contents.find(L'|', start);
+            std::size_t const end =
+                separator == std::wstring_view::npos ?
+                    contents.size() :
+                    separator;
+            fields.emplace_back(contents.substr(start, end - start));
+            if (separator == std::wstring_view::npos)
+            {
+                break;
+            }
+            start = separator + 1U;
+        }
+        return fields;
+    }
+
     sha256_digest hash_file(std::filesystem::path const& path)
     {
         file_handle file;
@@ -740,7 +824,8 @@ namespace
         std::string const contents{
             std::istreambuf_iterator<char>{stream},
             std::istreambuf_iterator<char>{}};
-        if (stream.bad() || contents.empty() || contents.size() > 512U ||
+        if (stream.bad() || contents.empty() ||
+            contents.size() > 64U * 1024U ||
             std::ranges::any_of(contents, [](unsigned char value) {
                 return value < 0x20U || value > 0x7EU;
             }))
@@ -751,24 +836,59 @@ namespace
         std::wstring const wide_contents{
             contents.begin(),
             contents.end()};
-        auto const fields = split_data(
-            wide_contents,
-            payload_files.size() + 2U);
-        if (fields[0] != L"v2")
+        std::vector<std::wstring> const fields =
+            split_manifest(wide_contents);
+        if (fields.size() < 5U || fields[0] != L"v3" ||
+            std::ranges::any_of(
+                fields,
+                [](std::wstring const& field) { return field.empty(); }))
         {
             fail(
                 L"Setup received an unsupported payload hash manifest.");
         }
 
+        std::size_t const entry_count =
+            parse_manifest_entry_count(fields[2]);
+        if (fields.size() != 3U + entry_count * 2U)
+        {
+            fail(L"Setup received a malformed payload hash manifest.");
+        }
+
         payload_manifest manifest{
             .version = parse_version(fields[1]),
         };
-        for (std::size_t index = 0U;
-             index < manifest.hashes.size();
-             ++index)
+        manifest.files.reserve(entry_count);
+        for (std::size_t index = 0U; index < entry_count; ++index)
         {
-            manifest.hashes[index] =
-                parse_sha256(fields[index + 2U]);
+            std::filesystem::path const file_name =
+                parse_manifest_file_name(fields[3U + index * 2U]);
+            if (std::ranges::any_of(
+                    manifest.files,
+                    [&](payload_hash_entry const& entry) {
+                        return paths_equal(entry.file_name, file_name);
+                    }))
+            {
+                fail(
+                    L"Setup received a duplicate payload manifest entry.");
+            }
+            manifest.files.push_back(payload_hash_entry{
+                .file_name = file_name,
+                .hash = parse_sha256(fields[4U + index * 2U]),
+            });
+        }
+        for (std::wstring_view const required : payload_files)
+        {
+            if (!std::ranges::any_of(
+                    manifest.files,
+                    [&](payload_hash_entry const& entry) {
+                        return paths_equal(
+                            entry.file_name,
+                            std::filesystem::path{std::wstring{required}});
+                    }))
+            {
+                fail(
+                    L"Setup received an incomplete payload hash manifest.");
+            }
         }
         return manifest;
     }
@@ -830,12 +950,20 @@ namespace
                 L"Setup refused a payload manifest with a mismatched "
                 L"version.");
         }
-        for (std::size_t index = 0U;
-             index < payload_files.size();
-             ++index)
+        for (payload_hash_entry const& entry : manifest.files)
         {
-            if (hash_file(data.install_folder / payload_files[index]) !=
-                manifest.hashes[index])
+            std::filesystem::path const path =
+                data.install_folder / entry.file_name;
+            if (!std::filesystem::is_regular_file(path))
+            {
+                fail(
+                    L"Setup refused an incomplete executable dependency "
+                    L"set.");
+            }
+            reject_reparse_chain(
+                path,
+                L"Setup refused a redirected executable dependency set.");
+            if (hash_file(path) != entry.hash)
             {
                 fail(
                     L"Setup refused a mismatched installed payload file.");
@@ -875,9 +1003,16 @@ UnregisterCurrentUserIdentity(MSIHANDLE installer)
         [&] {
             auto const fields = split_data(
                 get_property(installer, L"CustomActionData"),
-                1U);
+                2U);
+            std::filesystem::path const install_folder =
+                absolute_path(fields[0]);
+            if (!paths_equal(install_folder, required_install_folder()))
+            {
+                fail(
+                    L"Setup refused an unexpected identity removal path.");
+            }
             PackageVersion const installed_version =
-                parse_version(fields[0]);
+                parse_version(fields[1]);
             std::uint64_t const installed =
                 comparable_version(installed_version);
             PackageManager const manager;
@@ -888,8 +1023,20 @@ UnregisterCurrentUserIdentity(MSIHANDLE installer)
                      winrt::hstring{package_name},
                      winrt::hstring{package_publisher}))
             {
-                if (comparable_version(package.Id().Version()) <=
-                    installed)
+                winrt::hstring external_path;
+                try
+                {
+                    external_path = package.EffectiveExternalPath();
+                }
+                catch (winrt::hresult_error const&)
+                {
+                    continue;
+                }
+                if (!external_path.empty() &&
+                    paths_equal(
+                        std::filesystem::path{external_path.c_str()},
+                        install_folder) &&
+                    comparable_version(package.Id().Version()) <= installed)
                 {
                     removable_packages.push_back(package);
                 }

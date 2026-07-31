@@ -107,10 +107,16 @@ namespace
             bcrypt_hash_handle const&) = delete;
     };
 
+    struct payload_hash_entry
+    {
+        std::filesystem::path file_name;
+        sha256_digest hash{};
+    };
+
     struct payload_manifest
     {
         PackageVersion version{};
-        std::array<sha256_digest, payload_files.size()> hashes{};
+        std::vector<payload_hash_entry> files;
     };
 
     [[noreturn]] void fail(std::wstring_view message)
@@ -275,6 +281,63 @@ namespace
         return digest;
     }
 
+    std::size_t parse_manifest_entry_count(std::string_view value)
+    {
+        if (value.empty())
+        {
+            fail(L"Librarian found an invalid payload manifest entry count.");
+        }
+        std::size_t count = 0U;
+        for (char const character : value)
+        {
+            if (character < '0' || character > '9')
+            {
+                fail(
+                    L"Librarian found an invalid payload manifest entry "
+                    L"count.");
+            }
+            count = count * 10U +
+                    static_cast<std::size_t>(character - '0');
+            if (count > 256U)
+            {
+                fail(L"Librarian found too many payload manifest entries.");
+            }
+        }
+        if (count == 0U)
+        {
+            fail(L"Librarian found an empty payload manifest.");
+        }
+        return count;
+    }
+
+    std::filesystem::path parse_manifest_file_name(
+        std::string const& value)
+    {
+        if (value.empty() || value.size() > 255U ||
+            std::ranges::any_of(value, [](char character) {
+                return !((character >= 'A' && character <= 'Z') ||
+                         (character >= 'a' && character <= 'z') ||
+                         (character >= '0' && character <= '9') ||
+                         character == '_' || character == '-' ||
+                         character == '.');
+            }))
+        {
+            fail(L"Librarian found an invalid payload manifest filename.");
+        }
+
+        std::filesystem::path const file_name{
+            std::wstring{value.begin(), value.end()}};
+        std::wstring const extension = file_name.extension().native();
+        if (_wcsicmp(extension.c_str(), L".exe") != 0 &&
+            _wcsicmp(extension.c_str(), L".dll") != 0 &&
+            _wcsicmp(extension.c_str(), L".msix") != 0)
+        {
+            fail(
+                L"Librarian found a non-executable payload manifest entry.");
+        }
+        return file_name;
+    }
+
     PackageVersion parse_version(std::string_view text)
     {
         std::array<std::uint16_t, 4> parts{};
@@ -358,7 +421,8 @@ namespace
         std::string const contents{
             std::istreambuf_iterator<char>{stream},
             std::istreambuf_iterator<char>{}};
-        if (stream.bad() || contents.empty() || contents.size() > 512U ||
+        if (stream.bad() || contents.empty() ||
+            contents.size() > 64U * 1024U ||
             std::ranges::any_of(contents, [](unsigned char value) {
                 return value < 0x20U || value > 0x7EU;
             }))
@@ -367,8 +431,7 @@ namespace
         }
 
         std::vector<std::string> const fields = split_manifest(contents);
-        if (fields.size() != payload_files.size() + 2U ||
-            fields[0] != "v2" ||
+        if (fields.size() < 5U || fields[0] != "v3" ||
             std::ranges::any_of(
                 fields,
                 [](std::string const& field) { return field.empty(); }))
@@ -376,14 +439,46 @@ namespace
             fail(L"Librarian refused an unsupported payload manifest.");
         }
 
+        std::size_t const entry_count =
+            parse_manifest_entry_count(fields[2]);
+        if (fields.size() != 3U + entry_count * 2U)
+        {
+            fail(L"Librarian refused a malformed payload manifest.");
+        }
+
         payload_manifest manifest{
             .version = parse_version(fields[1]),
         };
-        for (std::size_t index = 0U;
-             index < manifest.hashes.size();
-             ++index)
+        manifest.files.reserve(entry_count);
+        for (std::size_t index = 0U; index < entry_count; ++index)
         {
-            manifest.hashes[index] = parse_sha256(fields[index + 2U]);
+            std::filesystem::path const file_name =
+                parse_manifest_file_name(fields[3U + index * 2U]);
+            if (std::ranges::any_of(
+                    manifest.files,
+                    [&](payload_hash_entry const& entry) {
+                        return paths_equal(entry.file_name, file_name);
+                    }))
+            {
+                fail(L"Librarian refused a duplicate payload manifest entry.");
+            }
+            manifest.files.push_back(payload_hash_entry{
+                .file_name = file_name,
+                .hash = parse_sha256(fields[4U + index * 2U]),
+            });
+        }
+        for (std::wstring_view const required : payload_files)
+        {
+            if (!std::ranges::any_of(
+                    manifest.files,
+                    [&](payload_hash_entry const& entry) {
+                        return paths_equal(
+                            entry.file_name,
+                            std::filesystem::path{std::wstring{required}});
+                    }))
+            {
+                fail(L"Librarian refused an incomplete payload manifest.");
+            }
         }
         return manifest;
     }
@@ -474,12 +569,18 @@ namespace
     {
         payload_manifest const manifest =
             read_payload_manifest(install_folder);
-        for (std::size_t index = 0U;
-             index < payload_files.size();
-             ++index)
+        for (payload_hash_entry const& entry : manifest.files)
         {
-            if (hash_file(install_folder / payload_files[index]) !=
-                manifest.hashes[index])
+            std::filesystem::path const path =
+                install_folder / entry.file_name;
+            if (!std::filesystem::is_regular_file(path))
+            {
+                fail(
+                    L"Librarian found an incomplete executable dependency "
+                    L"set.");
+            }
+            reject_reparse_chain(path);
+            if (hash_file(path) != entry.hash)
             {
                 fail(L"Librarian refused a mismatched installed payload.");
             }

@@ -716,17 +716,14 @@ try {
     $minimumWindowsLaunch = $decompiled.SelectSingleNode(
         (
             "//*[local-name()='Launch' and " +
-            "contains(@Condition,'WindowsBuild') and " +
-            "contains(@Condition,'MsiNTProductType')]"
+            "contains(@Condition,'WindowsBuild')]"
         )
     )
     Assert-True (
         $null -ne $minimumWindowsLaunch -and
-        $minimumWindowsLaunch.GetAttribute("Condition") -eq (
-            "Installed OR (VersionNT64 >= 1000 AND WindowsBuild >= 26100 " +
-            "AND MsiNTProductType = 1)"
-        )
-    ) "The MSI must reject unsupported Windows editions and builds."
+        $minimumWindowsLaunch.GetAttribute("Condition") -eq
+            "Installed OR (VersionNT64 >= 1000 AND WindowsBuild >= 26100)"
+    ) "The MSI must reject unsupported Windows architectures and builds."
     $installFolderPermission = $coreCreateFolder.SelectSingleNode(
         "*[local-name()='PermissionEx']"
     )
@@ -894,28 +891,75 @@ try {
         $releaseHashes.Count -eq $expectedComponentRoles.Count
     ) "The release manifest does not hash every identity-bound component."
 
-    $expectedHashData = (
-        $expectedComponentRoles |
-            ForEach-Object { $releaseHashes[$_] }
-    ) -join "|"
     $payloadHashManifestPath = Get-ExtractedMsiFile `
         -DecompiledMsi $decompiled `
         -ExtractRoot $msiExtractRoot `
         -Name "Librarian.PayloadHashes"
-    $expectedPayloadHashManifest = (
-        "v2|$ExpectedProductVersion|$expectedHashData"
+    $payloadHashFields = @(
+        [IO.File]::ReadAllText($payloadHashManifestPath) -split '\|'
     )
     Assert-True (
-        [IO.File]::ReadAllText($payloadHashManifestPath) -ceq
-            $expectedPayloadHashManifest
-    ) "The MSI payload hash manifest does not bind every release component."
+        $payloadHashFields.Count -ge 5 -and
+        $payloadHashFields[0] -ceq "v3" -and
+        $payloadHashFields[1] -ceq $ExpectedProductVersion
+    ) "The MSI payload hash manifest header is invalid."
+    $payloadHashCount = 0
+    Assert-True (
+        [int]::TryParse($payloadHashFields[2], [ref]$payloadHashCount) -and
+        $payloadHashCount -gt 0 -and
+        $payloadHashCount -le 256 -and
+        $payloadHashFields.Count -eq (3 + (2 * $payloadHashCount))
+    ) "The MSI payload hash manifest entry count is invalid."
+
+    $payloadManifestHashes = [ordered]@{}
+    for ($index = 0; $index -lt $payloadHashCount; $index++) {
+        $fileName = $payloadHashFields[3 + (2 * $index)]
+        $expectedHash = $payloadHashFields[4 + (2 * $index)]
+        Assert-True (
+            $fileName -match '^[A-Za-z0-9_.-]+\.(?i:exe|dll|msix)$' -and
+            $expectedHash -match '^[0-9A-F]{64}$' -and
+            -not $payloadManifestHashes.Contains($fileName)
+        ) "The MSI payload hash manifest has an invalid or duplicate entry."
+        $boundPath = Get-ExtractedMsiFile `
+            -DecompiledMsi $decompiled `
+            -ExtractRoot $msiExtractRoot `
+            -Name $fileName
+        $actualHash = (
+            Get-FileHash -LiteralPath $boundPath -Algorithm SHA256
+        ).Hash
+        Assert-True (
+            $actualHash -ceq $expectedHash
+        ) "Payload hash mismatch for '$fileName'."
+        $payloadManifestHashes[$fileName] = $expectedHash
+    }
+
+    $expectedBoundPayloads = @(
+        $decompiled.SelectNodes("//*[local-name()='File']") |
+            ForEach-Object { $_.GetAttribute("Name") } |
+            Where-Object {
+                [IO.Path]::GetExtension($_) -in @(".exe", ".dll", ".msix")
+            } |
+            Sort-Object -Unique
+    )
+    Assert-True (
+        $payloadManifestHashes.Count -eq $expectedBoundPayloads.Count
+    ) "The MSI payload hash manifest does not bind every executable dependency."
+    foreach ($fileName in $expectedBoundPayloads) {
+        Assert-True (
+            $payloadManifestHashes.Contains($fileName)
+        ) "The MSI payload hash manifest omits '$fileName'."
+    }
+
     $payloadHashManifestSha256 = (
         Get-FileHash -LiteralPath $payloadHashManifestPath -Algorithm SHA256
     ).Hash
-    $expectedIdentityActionData = (
-        "[INSTALLFOLDER]|[ProductVersion]|$payloadHashManifestSha256"
-    )
-    foreach ($actionId in @("SetValidateIdentityPayload")) {
+    $expectedActionData = [ordered]@{
+        SetValidateIdentityPayload = (
+            "[INSTALLFOLDER]|[ProductVersion]|$payloadHashManifestSha256"
+        )
+        SetUnregisterCurrentUserIdentity = "[INSTALLFOLDER]|[ProductVersion]"
+    }
+    foreach ($actionId in $expectedActionData.Keys) {
         $hashPropertyAction = $decompiled.SelectSingleNode(
             "//*[local-name()='CustomAction' and @Id='$actionId']"
         )
@@ -925,10 +969,10 @@ try {
             $hashPropertyAction.GetAttribute("Value")
         }
         Assert-True (
-            $actionValue -ceq $expectedIdentityActionData
+            $actionValue -ceq $expectedActionData[$actionId]
         ) (
             "Identity payload action '$actionId' is not bound to the " +
-            "release payload hash manifest."
+            "expected installation scope."
         )
         Assert-True (
             $actionValue.Length -le 255

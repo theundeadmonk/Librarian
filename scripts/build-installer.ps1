@@ -898,21 +898,6 @@ $components = foreach ($entry in $componentPaths.GetEnumerator()) {
         sha256 = $componentHash
     }
 }
-$payloadHashManifestPath = Join-Path (
-    $payloadDirectory
-) "Librarian.PayloadHashes"
-$payloadHashManifest = (
-    "v2|$ProductVersion|" +
-    (($componentPaths.Keys | ForEach-Object { $componentHashes[$_] }) -join "|")
-)
-[IO.File]::WriteAllText(
-    $payloadHashManifestPath,
-    $payloadHashManifest,
-    (New-Object Text.UTF8Encoding($false))
-)
-$payloadHashManifestSha256 = (
-    Get-FileHash -LiteralPath $payloadHashManifestPath -Algorithm SHA256
-).Hash
 $releaseManifest = [ordered]@{
     schemaVersion = 1
     productVersion = $ProductVersion
@@ -934,6 +919,42 @@ $releaseManifest = [ordered]@{
     (($releaseManifest | ConvertTo-Json -Depth 6) + [Environment]::NewLine),
     (New-Object Text.UTF8Encoding($false))
 )
+
+$boundPayloadFiles = @(
+    Get-ChildItem -LiteralPath $payloadDirectory -File |
+        Where-Object { $_.Extension -in @(".exe", ".dll", ".msix") } |
+        Sort-Object -Property Name
+)
+if ($boundPayloadFiles.Count -eq 0 -or $boundPayloadFiles.Count -gt 256) {
+    throw "The executable payload dependency set is empty or exceeds 256 files."
+}
+foreach ($componentPath in $componentPaths.Values) {
+    if ($componentPath -notin $boundPayloadFiles.Name) {
+        throw "The executable payload manifest is missing '$componentPath'."
+    }
+}
+$boundPayloadFields = foreach ($file in $boundPayloadFiles) {
+    if ($file.Name -notmatch '^[A-Za-z0-9_.-]+$') {
+        throw "The executable payload filename '$($file.Name)' is not manifest-safe."
+    }
+    $file.Name
+    (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash
+}
+$payloadHashManifestPath = Join-Path (
+    $payloadDirectory
+) "Librarian.PayloadHashes"
+$payloadHashManifest = (
+    "v3|$ProductVersion|$($boundPayloadFiles.Count)|" +
+    ($boundPayloadFields -join "|")
+)
+[IO.File]::WriteAllText(
+    $payloadHashManifestPath,
+    $payloadHashManifest,
+    (New-Object Text.UTF8Encoding($false))
+)
+$payloadHashManifestSha256 = (
+    Get-FileHash -LiteralPath $payloadHashManifestPath -Algorithm SHA256
+).Hash
 
 if ($hasCiOnlyPayloadOverride) {
     $resolvedOverridePath = (

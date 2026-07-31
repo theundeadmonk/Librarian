@@ -136,8 +136,9 @@ namespace
         std::string const contents{
             std::istreambuf_iterator<char>{stream},
             std::istreambuf_iterator<char>{}};
-        if (stream.bad() || contents.empty() || contents.size() > 512U ||
-            !contents.starts_with("v2|"))
+        if (stream.bad() || contents.empty() ||
+            contents.size() > 64U * 1024U ||
+            !contents.starts_with("v3|"))
         {
             return false;
         }
@@ -169,6 +170,10 @@ namespace
         {
             auto const package =
                 winrt::Windows::ApplicationModel::Package::Current();
+            if (!package.Status().VerifyIsOK())
+            {
+                return false;
+            }
             std::filesystem::path const executable = module_path();
             if (executable.empty())
             {

@@ -108,19 +108,19 @@ localized file and fail-closed normalizes only these eight pinned Microsoft
 suite. Structural validation requires all eight normalized rows, rejects the
 original LCIDs and overlong values, and never globally suppresses ICE03.
 
-The five security-critical payload hashes (launcher, desktop, vault agent,
-native host, and identity package) live in a fixed-format manifest installed
-beside the binaries. Only that manifest's SHA-256 is passed through bounded
-deferred custom-action data. The System-context custom action first uses
-Windows `WinVerifyTrust` to require its own module and all five payloads to
-have a valid chain, the expected code-signing publisher, and one matching
-signer certificate. It then validates the protected manifest path, rejects
-reparse points, verifies the manifest hash, and verifies every identity-bound
-payload hash. It does not stage, provision, register, or remove package
-identity.
+Every shipped executable dependency (`.exe`, `.dll`, and `.msix`) is named and
+hashed in a bounded fixed-format manifest installed beside the binaries. Only
+that manifest's SHA-256 is passed through deferred custom-action data. The
+System-context custom action first uses Windows `WinVerifyTrust` to require its
+own module and Librarian's five identity-bearing payloads (launcher, desktop,
+vault agent, native host, and identity package) to have a valid chain, the
+expected code-signing publisher, and one matching signer certificate. It then
+validates the protected manifest path, rejects reparse points, verifies the
+manifest hash, and verifies every named executable dependency before setup can
+complete. It does not stage, provision, register, or remove package identity.
 
-The MSI refuses new installation on non-workstation systems, 32-bit Windows,
-and Windows builds below 26100 before it writes machine state. Its created
+The MSI refuses new installation on 32-bit Windows and Windows builds below
+26100 before it writes machine state. Its created
 Program Files directory always receives a protected descriptor owned by SYSTEM:
 SYSTEM and Administrators have full control, while built-in Users have only
 generic read and execute rights. This replaces an unsafe inherited or
@@ -131,7 +131,8 @@ The signed launcher repeats the path and hash checks in the interactive user's
 context. It rejects a newer identity and otherwise uses the documented
 `PackageManager.AddPackageByUriAsync` external-location flow to register the
 installed version for that user before it opens the desktop. The desktop also
-checks that its current package version matches the installed release. Users
+requires healthy package status and checks that its current package version
+matches the installed release. Users
 therefore converge independently on first launch after install or upgrade;
 repair restores the machine payload without attempting to inspect or mutate
 another Windows user's package projection.
@@ -212,9 +213,10 @@ identity-bearing file therefore fails closed before desktop launch.
 
 Final uninstall schedules one checked impersonated native commit action after
 file removal succeeds, so a transaction that rolls back cannot unregister the
-invoking user. The commit action removes only matching registrations belonging
-to that user and leaves newer versions untouched. If more than one removable
-version is present for that user, it fails closed before changing any
+invoking user. The commit action removes only registrations belonging to that
+user whose external location matches this installation folder and leaves newer
+versions or unrelated development registrations untouched. If more than one
+removable version is present for that user, it fails closed before changing any
 registration rather than risk partial cleanup. It never enumerates or mutates
 another profile. Registrations retained by other users become inert once
 Program Files is removed and can converge after reinstall and next launch.
