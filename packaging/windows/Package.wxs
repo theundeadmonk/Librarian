@@ -186,7 +186,7 @@
           Root="HKLM"
           Key="SOFTWARE\Google\Chrome\NativeMessagingHosts\com.theundeadmonk.librarian"
           Type="string"
-          Value="[#ChromeNativeHostManifest]"
+          Value="[INSTALLFOLDER]com.theundeadmonk.librarian.chrome.json"
           KeyPath="yes" />
       </Component>
     </Feature>
@@ -208,7 +208,7 @@
           Root="HKLM"
           Key="SOFTWARE\Microsoft\Edge\NativeMessagingHosts\com.theundeadmonk.librarian"
           Type="string"
-          Value="[#EdgeNativeHostManifest]"
+          Value="[INSTALLFOLDER]com.theundeadmonk.librarian.edge.json"
           KeyPath="yes" />
       </Component>
     </Feature>

@@ -604,6 +604,7 @@ try {
             [PSCustomObject]@{
                 Feature = "ChromeIntegration"
                 Manifest = "ChromeNativeHostManifest"
+                ManifestName = "com.theundeadmonk.librarian.chrome.json"
                 ManifestComponent = "ChromeNativeHostManifestFile"
                 RegistrationComponent = "ChromeNativeHostRegistration"
             }
@@ -611,6 +612,7 @@ try {
             [PSCustomObject]@{
                 Feature = "EdgeIntegration"
                 Manifest = "EdgeNativeHostManifest"
+                ManifestName = "com.theundeadmonk.librarian.edge.json"
                 ManifestComponent = "EdgeNativeHostManifestFile"
                 RegistrationComponent = "EdgeNativeHostRegistration"
             }
@@ -649,17 +651,24 @@ try {
                 "@Id='$($entry.Value.RegistrationComponent)']"
             )
         )
+        $browserManifestReference = $browserFeature.SelectSingleNode(
+            (
+                "*[local-name()='ComponentRef' and " +
+                "@Id='$($entry.Value.ManifestComponent)']"
+            )
+        )
         Assert-True (
             $component.GetAttribute("Id") -eq
                 $entry.Value.RegistrationComponent -and
             $registryValue[0].GetAttribute("KeyPath") -eq "yes" -and
             $registryValue[0].GetAttribute("Value") -eq
-                "[#$($entry.Value.Manifest)]" -and
+                "[INSTALLFOLDER]$($entry.Value.ManifestName)" -and
             $null -ne $manifestFile -and
             $manifestFile.ParentNode.GetAttribute("Id") -eq
                 $entry.Value.ManifestComponent -and
             $null -ne $coreManifestReference -and
             $null -ne $registrationReference -and
+            $null -eq $browserManifestReference -and
             $null -eq $component.SelectSingleNode("*[local-name()='File']")
         ) (
             "Browser manifest '$key' must be integrity-bound by Core while " +
