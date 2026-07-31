@@ -87,8 +87,10 @@ never be installed.
 The structural suite decompiles the MSI, extracts the Burn bundle, checks the
 three product roles and launcher boundary, feature conditions, registry
 ownership, custom-action modes and exports, package identity, hashes,
-native-messaging origins, signing mode, self-contained Windows App SDK payload,
-hybrid CRT linkage, and upgrade sequence. It does not execute setup.
+native-messaging origins, signing mode, the x64 Windows 11 build 26100 launch
+condition, the protected SYSTEM-owned Program Files ACL, self-contained Windows
+App SDK payload, hybrid CRT linkage, and upgrade sequence. It does not execute
+setup.
 
 Windows Installer ICE validation also runs unless the caller explicitly passes
 `-SkipIceValidation`. Smart App Control can block ICE's temporary unsigned MSI
@@ -116,6 +118,14 @@ signer certificate. It then validates the protected manifest path, rejects
 reparse points, verifies the manifest hash, and verifies every identity-bound
 payload hash. It does not stage, provision, register, or remove package
 identity.
+
+The MSI refuses new installation on non-workstation systems, 32-bit Windows,
+and Windows builds below 26100 before it writes machine state. Its created
+Program Files directory always receives a protected descriptor owned by SYSTEM:
+SYSTEM and Administrators have full control, while built-in Users have only
+generic read and execute rights. This replaces an unsafe inherited or
+pre-existing DACL instead of preserving an attacker-writable installation
+root.
 
 The signed launcher repeats the path and hash checks in the interactive user's
 context. It rejects a newer identity and otherwise uses the documented

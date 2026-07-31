@@ -16,6 +16,9 @@
       Description="Librarian Windows product"
       Keywords="Librarian,password manager,Windows"
       Manufacturer="Librarian contributors" />
+    <Launch
+      Condition="Installed OR (VersionNT64 &gt;= 1000 AND WindowsBuild &gt;= 26100 AND MsiNTProductType = 1)"
+      Message="Librarian requires x64 Windows 11 build 26100 or newer." />
     <MajorUpgrade
       DowngradeErrorMessage="A newer version of Librarian is already installed."
       Schedule="afterInstallExecute" />
@@ -69,7 +72,11 @@
       InstallDefault="local"
       Level="1">
       <Component Id="CoreExecutables" Directory="INSTALLFOLDER" Guid="*">
-        <CreateFolder />
+        <CreateFolder>
+          <PermissionEx
+            Id="LibrarianInstallFolderPermissions"
+            Sddl="O:SYG:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;GRGX;;;BU)" />
+        </CreateFolder>
         <File
           Id="DesktopExecutable"
           Source="$(var.PayloadDir)\Librarian.Windows.exe"

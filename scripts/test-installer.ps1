@@ -713,6 +713,33 @@ try {
     Assert-True (
         $null -ne $coreCreateFolder
     ) "The protected install directory must be created before validation."
+    $minimumWindowsLaunch = $decompiled.SelectSingleNode(
+        (
+            "//*[local-name()='Launch' and " +
+            "contains(@Condition,'WindowsBuild') and " +
+            "contains(@Condition,'MsiNTProductType')]"
+        )
+    )
+    Assert-True (
+        $null -ne $minimumWindowsLaunch -and
+        $minimumWindowsLaunch.GetAttribute("Condition") -eq (
+            "Installed OR (VersionNT64 >= 1000 AND WindowsBuild >= 26100 " +
+            "AND MsiNTProductType = 1)"
+        )
+    ) "The MSI must reject unsupported Windows editions and builds."
+    $installFolderPermission = $coreCreateFolder.SelectSingleNode(
+        "*[local-name()='PermissionEx']"
+    )
+    Assert-True (
+        $null -ne $installFolderPermission -and
+        $installFolderPermission.GetAttribute("Sddl") -eq (
+            "O:SYG:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)" +
+            "(A;OICI;GRGX;;;BU)"
+        )
+    ) (
+        "The Program Files directory must replace any pre-existing ACL with " +
+        "a protected SYSTEM-owned descriptor."
+    )
     foreach ($forbiddenAction in @(
         "SnapshotIdentity",
         "RegisterIdentity",
