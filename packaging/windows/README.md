@@ -129,21 +129,28 @@ another Windows user's package projection.
 The same disposable Windows runner then executes
 `scripts\test-installer-ci.ps1`. That entry point refuses to run anywhere
 except GitHub Actions, creates a short-lived non-exportable development
-certificate, trusts only its public certificate for the duration of the test,
-builds two signed versions, and verifies removal of its `TrustedPeople`, `Root`,
-and personal certificate-store entries in a `finally` block. It does not
-export a PFX or private key.
+certificate plus an independent wrong-signer certificate, and trusts only
+their public certificates for the duration of the test. It builds two valid
+signed versions and two deliberately invalid bundles: one replaces the low
+launcher with a validly signed wrong-signer copy, while the other replaces it
+with the accepted-signer high-version copy after the low manifest hashes are
+bound. The invalid-payload build hook refuses to run outside the exact
+GitHub-hosted lifecycle guard. The entry point verifies removal of all six
+`TrustedPeople`, `Root`, and personal certificate-store entries in a `finally`
+block. It does not export a PFX or private key.
 
-The lifecycle suite rejects unsigned and unexpected-provider installs, validates
-a clean installation, registers the invoking and disposable secondary users
-through the launcher, opts into and repairs both browser registrations, and
-rolls back injected repair and upgrade failures. It proves an upgraded MSI can
-be repaired while a dormant secondary user retains the old identity, then
-proves each user converges independently through the launcher. It also rejects
-a downgrade, verifies invoking-user uninstall cleanup and inert retained
-secondary-user identity, reinstalls, and confirms that a disposable per-user
-data sentinel survives every repair, update, and removal. The hosted runner
-deliberately delegates the interactive WinUI launch assertion to
+The lifecycle suite rejects unsigned, validly signed wrong-signer,
+accepted-signer mixed-release, and unexpected-provider installs without
+leaving product state. It then validates a clean installation, registers the
+invoking and disposable secondary users through the launcher, opts into and
+repairs both browser registrations, and rolls back injected repair and upgrade
+failures. It proves an upgraded MSI can be repaired while a dormant secondary
+user retains the old identity, then proves each user converges independently
+through the launcher. It also rejects a downgrade, verifies invoking-user
+uninstall cleanup and inert retained secondary-user identity, reinstalls, and
+confirms that a disposable per-user data sentinel survives every repair,
+update, and removal. The hosted runner deliberately delegates the interactive
+WinUI launch assertion to
 `scripts\test-windows-shell-ui.ps1`, which must run in an interactive Windows
 desktop after the Release build. The suite may mutate Program Files, HKLM,
 local accounts, package registrations, and test profiles, so its CI guard must

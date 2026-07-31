@@ -18,6 +18,17 @@ param(
     [ValidatePattern("^[A-Fa-f0-9]{40}$")]
     [string]$DevelopmentCertificateThumbprint,
 
+    [ValidateSet(
+        "IdentityLauncher",
+        "Desktop",
+        "VaultAgent",
+        "ChromiumNativeHost",
+        "IdentityPackage"
+    )]
+    [string]$CiOnlyPayloadOverrideRole,
+
+    [string]$CiOnlyPayloadOverridePath,
+
     [switch]$SuppressMsiValidation
 )
 
@@ -571,6 +582,31 @@ if ($versionParts[3] -ne 0) {
         "upgrades require the fourth field to remain zero."
     )
 }
+$hasCiOnlyPayloadOverrideRole = -not [string]::IsNullOrWhiteSpace(
+    $CiOnlyPayloadOverrideRole
+)
+$hasCiOnlyPayloadOverridePath = -not [string]::IsNullOrWhiteSpace(
+    $CiOnlyPayloadOverridePath
+)
+if ($hasCiOnlyPayloadOverrideRole -ne $hasCiOnlyPayloadOverridePath) {
+    throw (
+        "The CI-only payload override role and path must be supplied together."
+    )
+}
+$hasCiOnlyPayloadOverride = $hasCiOnlyPayloadOverrideRole
+if ($hasCiOnlyPayloadOverride -and (
+    $env:GITHUB_ACTIONS -ne "true" -or
+    $env:CI -ne "true" -or
+    $env:RUNNER_ENVIRONMENT -ne "github-hosted" -or
+    $env:RUNNER_OS -ne "Windows" -or
+    $env:RUNNER_ARCH -ne "X64" -or
+    $env:GITHUB_REPOSITORY -ne "theundeadmonk/Librarian"
+)) {
+    throw (
+        "Deliberately invalid payload overrides may be built only by the " +
+        "disposable GitHub-hosted installer lifecycle job."
+    )
+}
 
 $artifactsRoot = Join-Path $repoRoot "artifacts"
 $installerRoot = Join-Path $artifactsRoot "installer"
@@ -898,6 +934,31 @@ $releaseManifest = [ordered]@{
     (($releaseManifest | ConvertTo-Json -Depth 6) + [Environment]::NewLine),
     (New-Object Text.UTF8Encoding($false))
 )
+
+if ($hasCiOnlyPayloadOverride) {
+    $resolvedOverridePath = (
+        Resolve-Path -LiteralPath $CiOnlyPayloadOverridePath
+    ).Path
+    if (-not (Test-Path -LiteralPath $resolvedOverridePath -PathType Leaf)) {
+        throw "The CI-only payload override is not a file."
+    }
+    $overrideDestination = Join-Path (
+        $payloadDirectory
+    ) $componentPaths[$CiOnlyPayloadOverrideRole]
+    if ([IO.Path]::GetFullPath($resolvedOverridePath) -eq
+        [IO.Path]::GetFullPath($overrideDestination)) {
+        throw "The CI-only payload override must be an independent file."
+    }
+    Copy-Item `
+        -LiteralPath $resolvedOverridePath `
+        -Destination $overrideDestination `
+        -Force
+    Write-Host ""
+    Write-Host (
+        "Injected deliberately invalid $CiOnlyPayloadOverrideRole payload " +
+        "after binding the signed manifest hashes."
+    )
+}
 
 $packageProject = Join-Path $repoRoot "packaging\windows\Librarian.Package.wixproj"
 $setupProject = Join-Path $repoRoot "packaging\windows\Librarian.Setup.wixproj"

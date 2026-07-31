@@ -118,6 +118,78 @@ function Copy-InstallerFixture {
         -Destination (Join-Path $DestinationRoot "Librarian.Identity.msix")
 }
 
+function Assert-CertificateSubjectAbsent {
+    param(
+        [Parameter(Mandatory)]
+        [string]$Subject
+    )
+
+    foreach ($store in @(
+        "Cert:\CurrentUser\My",
+        "Cert:\LocalMachine\TrustedPeople",
+        "Cert:\LocalMachine\Root"
+    )) {
+        $matches = @(
+            Get-ChildItem -LiteralPath $store |
+                Where-Object { $_.Subject -eq $Subject }
+        )
+        Assert-True (
+            $matches.Count -eq 0
+        ) "The disposable runner already contains '$Subject' in '$store'."
+    }
+}
+
+function New-TrustedDisposableCodeSigningCertificate {
+    param(
+        [Parameter(Mandatory)]
+        [string]$Subject,
+
+        [Parameter(Mandatory)]
+        [string]$FriendlyName,
+
+        [Parameter(Mandatory)]
+        [string]$CertificatePath
+    )
+
+    $certificate = New-SelfSignedCertificate `
+        -Type CodeSigningCert `
+        -Subject $Subject `
+        -FriendlyName $FriendlyName `
+        -CertStoreLocation "Cert:\CurrentUser\My" `
+        -KeyAlgorithm RSA `
+        -KeyLength 3072 `
+        -HashAlgorithm SHA256 `
+        -KeyExportPolicy NonExportable `
+        -NotBefore (Get-Date).AddMinutes(-5) `
+        -NotAfter (Get-Date).AddHours(8)
+    if ($null -ne $certificate) {
+        $script:createdCertificates += $certificate
+    }
+    Assert-True (
+        $null -ne $certificate -and
+        $certificate.Subject -eq $Subject -and
+        $certificate.HasPrivateKey
+    ) "The disposable code-signing certificate was not created correctly."
+    Export-Certificate `
+        -Cert $certificate `
+        -FilePath $CertificatePath `
+        -Type CERT |
+        Out-Null
+    $trustedCertificate = Import-Certificate `
+        -FilePath $CertificatePath `
+        -CertStoreLocation "Cert:\LocalMachine\TrustedPeople"
+    Assert-True (
+        $trustedCertificate.Thumbprint -eq $certificate.Thumbprint
+    ) "The disposable certificate was not trusted correctly."
+    $rootCertificate = Import-Certificate `
+        -FilePath $CertificatePath `
+        -CertStoreLocation "Cert:\LocalMachine\Root"
+    Assert-True (
+        $rootCertificate.Thumbprint -eq $certificate.Thumbprint
+    ) "The disposable certificate was not rooted correctly."
+    return $certificate
+}
+
 if ($env:GITHUB_ACTIONS -ne "true" -or
     $env:CI -ne "true" -or
     $env:RUNNER_ENVIRONMENT -ne "github-hosted" -or
@@ -172,10 +244,18 @@ New-Item -ItemType Directory -Path $fixtureRoot, $logRoot | Out-Null
 $unsignedRoot = Join-Path $fixtureRoot "unsigned-$LowVersion"
 $signedLowRoot = Join-Path $fixtureRoot "signed-$LowVersion"
 $signedHighRoot = Join-Path $fixtureRoot "signed-$HighVersion"
+$wrongSignerRoot = Join-Path $fixtureRoot "wrong-signer-$LowVersion"
+$mixedPayloadRoot = Join-Path $fixtureRoot "mixed-$LowVersion-$HighVersion"
+$overrideRoot = Join-Path $ciRoot "payload-overrides"
+New-Item -ItemType Directory -Path $overrideRoot | Out-Null
+$signedLowLauncher = Join-Path $overrideRoot "accepted-low-launcher.exe"
+$signedHighLauncher = Join-Path $overrideRoot "accepted-high-launcher.exe"
+$wrongSignerLauncher = Join-Path $overrideRoot "wrong-signer-low-launcher.exe"
 $certificatePath = Join-Path $ciRoot "Librarian.Development.cer"
+$wrongCertificatePath = Join-Path $ciRoot "Librarian.WrongSigner.cer"
 $certificate = $null
-$trustedCertificate = $null
-$rootCertificate = $null
+$wrongCertificate = $null
+$createdCertificates = @()
 $failure = $null
 
 try {
@@ -190,59 +270,16 @@ try {
         -DestinationRoot $unsignedRoot
 
     $subject = "CN=Librarian Development"
-    $preexistingPersonal = @(
-        Get-ChildItem Cert:\CurrentUser\My |
-            Where-Object { $_.Subject -eq $subject }
-    )
-    $preexistingTrusted = @(
-        Get-ChildItem Cert:\LocalMachine\TrustedPeople |
-            Where-Object { $_.Subject -eq $subject }
-    )
-    $preexistingRooted = @(
-        Get-ChildItem Cert:\LocalMachine\Root |
-            Where-Object { $_.Subject -eq $subject }
-    )
-    Assert-True (
-        $preexistingPersonal.Count -eq 0 -and
-        $preexistingTrusted.Count -eq 0 -and
-        $preexistingRooted.Count -eq 0
-    ) "The disposable runner already contains a Librarian development certificate."
+    $wrongSubject = "CN=Librarian Wrong Signer"
+    Assert-CertificateSubjectAbsent -Subject $subject
+    Assert-CertificateSubjectAbsent -Subject $wrongSubject
 
     Write-Host ""
     Write-Host "==> Create ephemeral non-exportable development certificate"
-    $certificate = New-SelfSignedCertificate `
-        -Type CodeSigningCert `
+    $certificate = New-TrustedDisposableCodeSigningCertificate `
         -Subject $subject `
         -FriendlyName "Librarian issue 19 CI only" `
-        -CertStoreLocation "Cert:\CurrentUser\My" `
-        -KeyAlgorithm RSA `
-        -KeyLength 3072 `
-        -HashAlgorithm SHA256 `
-        -KeyExportPolicy NonExportable `
-        -NotBefore (Get-Date).AddMinutes(-5) `
-        -NotAfter (Get-Date).AddHours(8)
-    Assert-True (
-        $null -ne $certificate -and
-        $certificate.Subject -eq $subject -and
-        $certificate.HasPrivateKey
-    ) "The ephemeral development certificate was not created correctly."
-    Export-Certificate `
-        -Cert $certificate `
-        -FilePath $certificatePath `
-        -Type CERT |
-        Out-Null
-    $trustedCertificate = Import-Certificate `
-        -FilePath $certificatePath `
-        -CertStoreLocation "Cert:\LocalMachine\TrustedPeople"
-    Assert-True (
-        $trustedCertificate.Thumbprint -eq $certificate.Thumbprint
-    ) "The public development certificate was not trusted correctly."
-    $rootCertificate = Import-Certificate `
-        -FilePath $certificatePath `
-        -CertStoreLocation "Cert:\LocalMachine\Root"
-    Assert-True (
-        $rootCertificate.Thumbprint -eq $certificate.Thumbprint
-    ) "The public development certificate was not rooted correctly."
+        -CertificatePath $certificatePath
 
     Write-Host ""
     Write-Host "==> Build and validate signed low fixture"
@@ -257,6 +294,11 @@ try {
     Copy-InstallerFixture `
         -SourceRoot $installerRoot `
         -DestinationRoot $signedLowRoot
+    Copy-Item `
+        -LiteralPath (
+            Join-Path $installerRoot "payload\Librarian.IdentityLauncher.exe"
+        ) `
+        -Destination $signedLowLauncher
 
     Write-Host ""
     Write-Host "==> Build and validate signed high fixture"
@@ -271,12 +313,69 @@ try {
     Copy-InstallerFixture `
         -SourceRoot $installerRoot `
         -DestinationRoot $signedHighRoot
+    Copy-Item `
+        -LiteralPath (
+            Join-Path $installerRoot "payload\Librarian.IdentityLauncher.exe"
+        ) `
+        -Destination $signedHighLauncher
+
+    Write-Host ""
+    Write-Host "==> Create validly signed wrong-signer payload"
+    $wrongCertificate = New-TrustedDisposableCodeSigningCertificate `
+        -Subject $wrongSubject `
+        -FriendlyName "Librarian issue 19 wrong-signer fixture" `
+        -CertificatePath $wrongCertificatePath
+    Copy-Item `
+        -LiteralPath $signedLowLauncher `
+        -Destination $wrongSignerLauncher
+    $wrongSignature = Set-AuthenticodeSignature `
+        -FilePath $wrongSignerLauncher `
+        -Certificate $wrongCertificate `
+        -HashAlgorithm SHA256
+    Assert-True (
+        $wrongSignature.Status -eq
+            [System.Management.Automation.SignatureStatus]::Valid -and
+        $wrongSignature.SignerCertificate.Thumbprint -eq
+            $wrongCertificate.Thumbprint
+    ) "The deliberately wrong-signer launcher is not validly signed."
+
+    Write-Host ""
+    Write-Host "==> Build validly signed wrong-signer rejection fixture"
+    & (Join-Path $PSScriptRoot "build-installer.ps1") `
+        -Configuration Release `
+        -Platform x64 `
+        -ProductVersion $LowVersion `
+        -DevelopmentCertificateThumbprint $certificate.Thumbprint `
+        -CiOnlyPayloadOverrideRole IdentityLauncher `
+        -CiOnlyPayloadOverridePath $wrongSignerLauncher
+    Copy-InstallerFixture `
+        -SourceRoot $installerRoot `
+        -DestinationRoot $wrongSignerRoot
+
+    Write-Host ""
+    Write-Host "==> Build accepted-signer mixed-release rejection fixture"
+    & (Join-Path $PSScriptRoot "build-installer.ps1") `
+        -Configuration Release `
+        -Platform x64 `
+        -ProductVersion $LowVersion `
+        -DevelopmentCertificateThumbprint $certificate.Thumbprint `
+        -CiOnlyPayloadOverrideRole IdentityLauncher `
+        -CiOnlyPayloadOverridePath $signedHighLauncher
+    Copy-InstallerFixture `
+        -SourceRoot $installerRoot `
+        -DestinationRoot $mixedPayloadRoot
 
     Write-Host ""
     Write-Host "==> Exercise disposable signed installer lifecycle"
     & (Join-Path $PSScriptRoot "test-installer-lifecycle.ps1") `
         -UnsignedSetupPath (
             Join-Path $unsignedRoot "LibrarianSetup.exe"
+        ) `
+        -WrongSignerSetupPath (
+            Join-Path $wrongSignerRoot "LibrarianSetup.exe"
+        ) `
+        -MixedPayloadSetupPath (
+            Join-Path $mixedPayloadRoot "LibrarianSetup.exe"
         ) `
         -SignedLowMsiPath (
             Join-Path $signedLowRoot "Librarian.Package.msi"
@@ -298,11 +397,11 @@ try {
     $failure = $_
 } finally {
     $cleanupFailures = @()
-    if ($null -ne $certificate) {
+    foreach ($createdCertificate in $createdCertificates) {
         $certificatePaths = @(
-            "Cert:\LocalMachine\TrustedPeople\$($certificate.Thumbprint)",
-            "Cert:\LocalMachine\Root\$($certificate.Thumbprint)",
-            "Cert:\CurrentUser\My\$($certificate.Thumbprint)"
+            "Cert:\LocalMachine\TrustedPeople\$($createdCertificate.Thumbprint)",
+            "Cert:\LocalMachine\Root\$($createdCertificate.Thumbprint)",
+            "Cert:\CurrentUser\My\$($createdCertificate.Thumbprint)"
         )
         foreach ($certificatePathToRemove in $certificatePaths) {
             try {
@@ -328,7 +427,7 @@ try {
     }
     if ($cleanupFailures.Count -gt 0) {
         $cleanupMessage = (
-            "Ephemeral development-certificate cleanup failed: " +
+            "Ephemeral code-signing certificate cleanup failed: " +
             ($cleanupFailures -join " ")
         )
         if ($null -eq $failure) {

@@ -4,6 +4,12 @@ param(
     [string]$UnsignedSetupPath,
 
     [Parameter(Mandatory)]
+    [string]$WrongSignerSetupPath,
+
+    [Parameter(Mandatory)]
+    [string]$MixedPayloadSetupPath,
+
+    [Parameter(Mandatory)]
     [string]$SignedLowMsiPath,
 
     [Parameter(Mandatory)]
@@ -167,7 +173,7 @@ function Invoke-DisposableUserPowerShell {
         [IO.File]::WriteAllText(
             $probePath,
             $Script,
-            (New-Object Text.UTF8Encoding($false))
+            (New-Object Text.UTF8Encoding($true))
         )
         $process = Start-Process `
             -FilePath (
@@ -826,6 +832,12 @@ Assert-True (
 ) "The high fixture must change one of the three MSI version fields."
 
 $resolvedUnsignedSetup = (Resolve-Path -LiteralPath $UnsignedSetupPath).Path
+$resolvedWrongSignerSetup = (
+    Resolve-Path -LiteralPath $WrongSignerSetupPath
+).Path
+$resolvedMixedPayloadSetup = (
+    Resolve-Path -LiteralPath $MixedPayloadSetupPath
+).Path
 $resolvedSignedLowMsi = (Resolve-Path -LiteralPath $SignedLowMsiPath).Path
 $resolvedSignedLowSetup = (Resolve-Path -LiteralPath $SignedLowSetupPath).Path
 $resolvedSignedHighMsi = (Resolve-Path -LiteralPath $SignedHighMsiPath).Path
@@ -891,6 +903,38 @@ try {
             "/norestart",
             "/log",
             (Join-Path $resolvedLogDirectory "01-unsigned-rejected.log")
+        )
+    Assert-ProductAbsent `
+        -InstallFolder $installFolder `
+        -ChromeRegistryPath $chromeRegistryPath `
+        -EdgeRegistryPath $edgeRegistryPath `
+        -ProductRegistryPath $productRegistryPath
+
+    Invoke-FailingProcess `
+        -Label "Reject validly signed wrong-signer payload" `
+        -FilePath $resolvedWrongSignerSetup `
+        -Arguments @(
+            "/install",
+            "/quiet",
+            "/norestart",
+            "/log",
+            (Join-Path $resolvedLogDirectory "01b-wrong-signer-rejected.log")
+        )
+    Assert-ProductAbsent `
+        -InstallFolder $installFolder `
+        -ChromeRegistryPath $chromeRegistryPath `
+        -EdgeRegistryPath $edgeRegistryPath `
+        -ProductRegistryPath $productRegistryPath
+
+    Invoke-FailingProcess `
+        -Label "Reject mixed-release payload" `
+        -FilePath $resolvedMixedPayloadSetup `
+        -Arguments @(
+            "/install",
+            "/quiet",
+            "/norestart",
+            "/log",
+            (Join-Path $resolvedLogDirectory "01c-mixed-payload-rejected.log")
         )
     Assert-ProductAbsent `
         -InstallFolder $installFolder `
@@ -1369,7 +1413,7 @@ if ($null -ne $failure) {
 
 Write-Host ""
 Write-Host "Installer lifecycle validation passed."
-Write-Host "Unsigned and unexpected-provider installs: rejected"
+Write-Host "Unsigned, wrong-signer, mixed, and unexpected-provider installs: rejected"
 Write-Host "Clean install: passed"
 if ($SkipInteractiveDesktopLaunch) {
     Write-Host "Interactive desktop launch: delegated to test-windows-shell-ui.ps1"
