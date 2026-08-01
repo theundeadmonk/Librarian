@@ -4,6 +4,11 @@
   "platformOnlyTests": [
     {
       "platform": "windows",
+      "test": "librarian-vault-agent::bin:librarian-vault-agent::tests::admission_wait_includes_the_response_write_bound::test:active",
+      "rationale": "Exercises the Windows named-pipe agent admission timeout, including the bounded response-write interval that prevents a valid request from expiring while its response is serialized."
+    },
+    {
+      "platform": "windows",
       "test": "librarian-vault-agent::lib:librarian_vault_agent::windows_hello::tests::protected_store_round_trips_replaces_and_removes_without_plaintext::test:active",
       "rationale": "Exercises the Windows-only DPAPI-protected local-state store, exact current-user owner and protected DACL validation, guarded atomic replacement, and durable removal."
     },
@@ -111,6 +116,11 @@
       "platform": "windows",
       "test": "librarian-windows-ipc::lib:librarian_windows_ipc::platform::tests::first_instance_flag_blocks_a_duplicate_server::test:active",
       "rationale": "Exercises the protected session-local single-agent mutex and Windows FILE_FLAG_FIRST_PIPE_INSTANCE endpoint-squatting protection across the complete named-pipe listener pool."
+    },
+    {
+      "platform": "windows",
+      "test": "librarian-windows-ipc::lib:librarian_windows_ipc::platform::tests::lifecycle_signal_classification_is_fail_closed::test:active",
+      "rationale": "Exercises fail-closed classification of Windows power suspend, resume, and WTS session-lock lifecycle signals that require the agent to shut down and restart locked."
     },
     {
       "platform": "windows",
