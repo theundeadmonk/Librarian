@@ -1306,6 +1306,28 @@ try {
             )
         ) "The custom-action DLL still exports '$forbiddenExport'."
     }
+    $customActionImports = Invoke-CapturedProcess `
+        -FilePath $dumpbinCandidates[-1] `
+        -Arguments @("/nologo", "/imports", $customActionBinary) `
+        -WorkingDirectory $repoRoot
+    Assert-True (
+        $customActionImports.ExitCode -eq 0
+    ) "dumpbin failed to inspect the embedded custom-action imports."
+    foreach ($requiredSecurityApi in @(
+        "AdjustTokenPrivileges",
+        "ConvertStringSecurityDescriptorToSecurityDescriptorW",
+        "GetSecurityInfo",
+        "SetSecurityInfo"
+    )) {
+        Assert-True (
+            $customActionImports.StandardOutput -match (
+                "(?m)^\s+[0-9A-Fa-f]+\s+$requiredSecurityApi\s*$"
+            )
+        ) (
+            "The payload validator must import '$requiredSecurityApi' for " +
+            "child-object ACL replacement and verification."
+        )
+    }
 
     $baDataPath = Join-Path $bootstrapperApplicationRoot (
         "BootstrapperApplicationData.xml"

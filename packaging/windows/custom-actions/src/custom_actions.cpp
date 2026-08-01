@@ -1,7 +1,9 @@
 #include <windows.h>
+#include <aclapi.h>
 #include <bcrypt.h>
 #include <msi.h>
 #include <msiquery.h>
+#include <sddl.h>
 #include <shlobj.h>
 #include <softpub.h>
 #include <wincrypt.h>
@@ -21,6 +23,7 @@
 #include <iterator>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 extern "C" IMAGE_DOS_HEADER __ImageBase;
@@ -80,6 +83,114 @@ namespace
 
         file_handle(file_handle const&) = delete;
         file_handle& operator=(file_handle const&) = delete;
+
+        file_handle(file_handle&& other) noexcept :
+            value{std::exchange(other.value, INVALID_HANDLE_VALUE)}
+        {
+        }
+
+        file_handle& operator=(file_handle&& other) noexcept
+        {
+            if (this != &other)
+            {
+                if (value != INVALID_HANDLE_VALUE)
+                {
+                    CloseHandle(value);
+                }
+                value = std::exchange(other.value, INVALID_HANDLE_VALUE);
+            }
+            return *this;
+        }
+    };
+
+    struct local_memory
+    {
+        HLOCAL value{};
+
+        local_memory() = default;
+
+        ~local_memory()
+        {
+            if (value != nullptr)
+            {
+                LocalFree(value);
+            }
+        }
+
+        local_memory(local_memory const&) = delete;
+        local_memory& operator=(local_memory const&) = delete;
+    };
+
+    [[noreturn]] void fail(std::wstring_view message);
+
+    class privilege_scope
+    {
+    public:
+        explicit privilege_scope(wchar_t const* name)
+        {
+            if (!OpenProcessToken(
+                    GetCurrentProcess(),
+                    TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY,
+                    &token_))
+            {
+                fail(L"Setup could not open its security token.");
+            }
+
+            LUID identifier{};
+            if (!LookupPrivilegeValueW(nullptr, name, &identifier))
+            {
+                CloseHandle(token_);
+                token_ = nullptr;
+                fail(L"Setup could not resolve a required security privilege.");
+            }
+
+            TOKEN_PRIVILEGES requested{};
+            requested.PrivilegeCount = 1U;
+            requested.Privileges[0].Luid = identifier;
+            requested.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
+            DWORD previous_size = sizeof(previous_);
+            SetLastError(ERROR_SUCCESS);
+            if (!AdjustTokenPrivileges(
+                    token_,
+                    FALSE,
+                    &requested,
+                    sizeof(previous_),
+                    &previous_,
+                    &previous_size) ||
+                GetLastError() == ERROR_NOT_ALL_ASSIGNED)
+            {
+                CloseHandle(token_);
+                token_ = nullptr;
+                fail(L"Setup could not enable a required security privilege.");
+            }
+            enabled_ = true;
+        }
+
+        ~privilege_scope()
+        {
+            if (token_ != nullptr)
+            {
+                if (enabled_)
+                {
+                    static_cast<void>(AdjustTokenPrivileges(
+                        token_,
+                        FALSE,
+                        &previous_,
+                        0U,
+                        nullptr,
+                        nullptr));
+                }
+                CloseHandle(token_);
+            }
+        }
+
+        privilege_scope(privilege_scope const&) = delete;
+        privilege_scope& operator=(privilege_scope const&) = delete;
+
+    private:
+        HANDLE token_{};
+        TOKEN_PRIVILEGES previous_{};
+        bool enabled_{};
     };
 
     struct bcrypt_algorithm_handle
@@ -559,6 +670,208 @@ namespace
             L"Setup refused a redirected installation folder.");
     }
 
+    std::wstring normalized_security_descriptor(
+        PSECURITY_DESCRIPTOR descriptor)
+    {
+        LPWSTR raw_sddl = nullptr;
+        if (!ConvertSecurityDescriptorToStringSecurityDescriptorW(
+                descriptor,
+                SDDL_REVISION_1,
+                OWNER_SECURITY_INFORMATION |
+                    GROUP_SECURITY_INFORMATION |
+                    DACL_SECURITY_INFORMATION,
+                &raw_sddl,
+                nullptr))
+        {
+            fail(L"Setup could not verify an installed payload ACL.");
+        }
+        local_memory sddl;
+        sddl.value = raw_sddl;
+        return std::wstring{raw_sddl};
+    }
+
+    file_handle harden_payload_object(
+        std::filesystem::path const& path,
+        PSECURITY_DESCRIPTOR directory_descriptor,
+        PSECURITY_DESCRIPTOR file_descriptor)
+    {
+        file_handle object;
+        object.value = CreateFileW(
+            path.c_str(),
+            READ_CONTROL | WRITE_DAC | WRITE_OWNER,
+            FILE_SHARE_READ,
+            nullptr,
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+            nullptr);
+        if (object.value == INVALID_HANDLE_VALUE)
+        {
+            fail(L"Setup could not lock an installed payload object.");
+        }
+
+        FILE_ATTRIBUTE_TAG_INFO attributes{};
+        if (!GetFileInformationByHandleEx(
+                object.value,
+                FileAttributeTagInfo,
+                &attributes,
+                sizeof(attributes)) ||
+            (attributes.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0U)
+        {
+            fail(L"Setup refused a redirected installed payload object.");
+        }
+
+        PSECURITY_DESCRIPTOR const expected_descriptor =
+            (attributes.FileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0U ?
+                directory_descriptor :
+                file_descriptor;
+        PSID expected_owner = nullptr;
+        PSID expected_group = nullptr;
+        PACL expected_dacl = nullptr;
+        BOOL owner_defaulted = FALSE;
+        BOOL group_defaulted = FALSE;
+        BOOL dacl_present = FALSE;
+        BOOL dacl_defaulted = FALSE;
+        if (!GetSecurityDescriptorOwner(
+                expected_descriptor,
+                &expected_owner,
+                &owner_defaulted) ||
+            !GetSecurityDescriptorGroup(
+                expected_descriptor,
+                &expected_group,
+                &group_defaulted) ||
+            !GetSecurityDescriptorDacl(
+                expected_descriptor,
+                &dacl_present,
+                &expected_dacl,
+                &dacl_defaulted) ||
+            expected_owner == nullptr ||
+            expected_group == nullptr ||
+            !dacl_present ||
+            expected_dacl == nullptr)
+        {
+            fail(L"Setup received an invalid payload security descriptor.");
+        }
+
+        DWORD const set_result = SetSecurityInfo(
+            object.value,
+            SE_FILE_OBJECT,
+            OWNER_SECURITY_INFORMATION |
+                GROUP_SECURITY_INFORMATION |
+                DACL_SECURITY_INFORMATION |
+                PROTECTED_DACL_SECURITY_INFORMATION,
+            expected_owner,
+            expected_group,
+            expected_dacl,
+            nullptr);
+        if (set_result != ERROR_SUCCESS)
+        {
+            fail(L"Setup could not harden an installed payload ACL.");
+        }
+
+        PSID actual_owner = nullptr;
+        PSID actual_group = nullptr;
+        PACL actual_dacl = nullptr;
+        PSECURITY_DESCRIPTOR raw_actual_descriptor = nullptr;
+        DWORD const get_result = GetSecurityInfo(
+            object.value,
+            SE_FILE_OBJECT,
+            OWNER_SECURITY_INFORMATION |
+                GROUP_SECURITY_INFORMATION |
+                DACL_SECURITY_INFORMATION,
+            &actual_owner,
+            &actual_group,
+            &actual_dacl,
+            nullptr,
+            &raw_actual_descriptor);
+        local_memory actual_descriptor;
+        actual_descriptor.value = raw_actual_descriptor;
+        if (get_result != ERROR_SUCCESS || raw_actual_descriptor == nullptr ||
+            actual_owner == nullptr || actual_group == nullptr ||
+            actual_dacl == nullptr ||
+            normalized_security_descriptor(raw_actual_descriptor) !=
+                normalized_security_descriptor(expected_descriptor))
+        {
+            fail(L"Setup refused an incorrectly secured payload object.");
+        }
+        return object;
+    }
+
+    std::vector<file_handle> harden_payload_tree(
+        std::filesystem::path const& install_folder)
+    {
+        privilege_scope backup_privilege{SE_BACKUP_NAME};
+        privilege_scope restore_privilege{SE_RESTORE_NAME};
+        privilege_scope ownership_privilege{SE_TAKE_OWNERSHIP_NAME};
+
+        std::wstring const directory_sddl{
+            L"O:SYG:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)"
+            L"(A;OICI;GRGX;;;BU)"};
+        std::wstring const file_sddl{
+            L"O:SYG:SYD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;GRGX;;;BU)"};
+        PSECURITY_DESCRIPTOR raw_directory_descriptor = nullptr;
+        PSECURITY_DESCRIPTOR raw_file_descriptor = nullptr;
+        if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                directory_sddl.c_str(),
+                SDDL_REVISION_1,
+                &raw_directory_descriptor,
+                nullptr) ||
+            !ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                file_sddl.c_str(),
+                SDDL_REVISION_1,
+                &raw_file_descriptor,
+                nullptr))
+        {
+            if (raw_directory_descriptor != nullptr)
+            {
+                LocalFree(raw_directory_descriptor);
+            }
+            if (raw_file_descriptor != nullptr)
+            {
+                LocalFree(raw_file_descriptor);
+            }
+            fail(L"Setup could not construct the payload security descriptor.");
+        }
+        local_memory directory_descriptor;
+        directory_descriptor.value = raw_directory_descriptor;
+        local_memory file_descriptor;
+        file_descriptor.value = raw_file_descriptor;
+
+        std::vector<file_handle> locks;
+        locks.reserve(512U);
+        locks.push_back(harden_payload_object(
+            install_folder,
+            raw_directory_descriptor,
+            raw_file_descriptor));
+
+        std::error_code error;
+        std::filesystem::recursive_directory_iterator current{
+            install_folder,
+            std::filesystem::directory_options::none,
+            error};
+        std::filesystem::recursive_directory_iterator const end{};
+        if (error)
+        {
+            fail(L"Setup could not enumerate the installed payload tree.");
+        }
+        while (current != end)
+        {
+            if (locks.size() >= 4096U)
+            {
+                fail(L"Setup refused an unexpectedly large payload tree.");
+            }
+            locks.push_back(harden_payload_object(
+                current->path(),
+                raw_directory_descriptor,
+                raw_file_descriptor));
+            current.increment(error);
+            if (error)
+            {
+                fail(L"Setup could not enumerate the installed payload tree.");
+            }
+        }
+        return locks;
+    }
+
     PackageVersion parse_version(std::wstring_view text)
     {
         std::array<std::uint16_t, 4> parts{};
@@ -920,6 +1233,8 @@ namespace
         validation_action_data const& data)
     {
         validate_install_folder(data.install_folder);
+        [[maybe_unused]] std::vector<file_handle> const payload_locks =
+            harden_payload_tree(data.install_folder);
         sha256_digest const setup_signer = trusted_signer_hash(
             current_module_path(),
             L"Setup refused an untrusted validation module.");

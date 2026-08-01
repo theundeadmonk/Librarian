@@ -133,7 +133,13 @@ Program Files directory always receives a protected descriptor owned by SYSTEM:
 SYSTEM and Administrators have full control, while built-in Users have only
 generic read and execute rights. This replaces an unsafe inherited or
 pre-existing DACL instead of preserving an attacker-writable installation
-root.
+root. After Windows Installer writes the payload, the non-impersonated
+validator takes ownership of every non-reparse file and directory, replaces
+each child descriptor with the corresponding protected SYSTEM-owned DACL,
+reads it back for exact verification, and holds the complete tree closed to
+writes and deletion until signature and hash validation finishes. A retained
+same-version file therefore cannot preserve an explicit or protected
+user-writable ACL.
 
 The signed launcher repeats the path and hash checks in the interactive user's
 context. It rejects a newer identity and otherwise uses the documented
