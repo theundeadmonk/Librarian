@@ -26,8 +26,8 @@
         Type="raw" />
     </Property>
     <Launch
-      Condition="Installed OR (VersionNT64 AND WINDOWSBUILDNUMBER &gt;= 26100)"
-      Message="Librarian requires x64 Windows build 26100 or newer." />
+      Condition="Installed OR (VersionNT64 AND MsiNTProductType = 1 AND WINDOWSBUILDNUMBER &gt;= 26100)"
+      Message="Librarian requires an x64 Windows 11 workstation, build 26100 or newer." />
     <MajorUpgrade
       DowngradeErrorMessage="A newer version of Librarian is already installed."
       Schedule="afterInstallExecute" />

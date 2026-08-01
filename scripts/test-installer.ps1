@@ -789,8 +789,14 @@ try {
     Assert-True (
         $null -ne $minimumWindowsLaunch -and
         $minimumWindowsLaunch.GetAttribute("Condition") -eq
-            "Installed OR (VersionNT64 AND WINDOWSBUILDNUMBER >= 26100)"
-    ) "The MSI must reject unsupported Windows architectures and builds."
+            (
+                "Installed OR (VersionNT64 AND MsiNTProductType = 1 AND " +
+                "WINDOWSBUILDNUMBER >= 26100)"
+            )
+    ) (
+        "The MSI must reject unsupported Windows architectures, product " +
+        "types, and builds."
+    )
     $installFolderPermission = $coreCreateFolder.SelectSingleNode(
         "*[local-name()='PermissionEx']"
     )

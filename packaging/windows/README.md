@@ -95,10 +95,10 @@ never be installed.
 The structural suite decompiles the MSI, extracts the Burn bundle, checks the
 three product roles and launcher boundary, feature conditions, registry
 ownership, custom-action modes and exports, package identity, hashes,
-native-messaging origins, signing mode, the x64 Windows 11 build 26100 launch
-condition, the protected SYSTEM-owned Program Files ACL, self-contained Windows
-App SDK payload, hybrid CRT linkage, and upgrade sequence. It does not execute
-setup.
+native-messaging origins, signing mode, the x64 Windows 11 workstation build
+26100 launch condition, the protected SYSTEM-owned Program Files ACL,
+self-contained Windows App SDK payload, hybrid CRT linkage, and upgrade
+sequence. It does not execute setup.
 
 Windows Installer ICE validation also runs unless the caller explicitly passes
 `-SkipIceValidation`. Smart App Control can block ICE's temporary unsigned MSI
