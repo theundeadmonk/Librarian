@@ -6,7 +6,6 @@ These items are intentionally unresolved. They should be answered through feasib
 
 - Define the first-run onboarding flow and what “setup complete” means.
 - Design the desktop app's post-unlock home screen and account-management navigation.
-- Define the exact auto-lock behavior and default inactivity duration.
 - Define accessible wording for passkeys, authentication codes, recovery, and backup without security jargon.
 - Define the smallest useful set of settings; everything else should have an opinionated default.
 - Decide how to communicate that storing a password and its authentication secret together trades factor separation for simplicity.

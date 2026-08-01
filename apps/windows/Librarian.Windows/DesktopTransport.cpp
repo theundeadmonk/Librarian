@@ -38,7 +38,6 @@ namespace librarian::windows
         constexpr std::size_t frame_header_bytes = 40U;
         constexpr std::size_t maximum_payload_bytes = 65'536U;
         constexpr std::size_t maximum_descriptor_bytes = 4'096U;
-        constexpr std::size_t maximum_account_records = 100'000U;
         constexpr std::uint32_t frame_write_allowance_ms = 2'000U;
         constexpr std::uint16_t protocol_major = 1U;
         constexpr std::uint16_t protocol_minor = 1U;
@@ -2055,7 +2054,8 @@ namespace librarian::windows
                     VaultStatus::Locked);
             }
 
-            [[nodiscard]] AccountListResult ListAccounts() override
+            [[nodiscard]] AccountListResult ListAccounts(
+                std::uint32_t const offset) override
             {
                 std::scoped_lock request_lock{request_gate_};
                 if (closed_.load(std::memory_order_acquire))
@@ -2064,43 +2064,34 @@ namespace librarian::windows
                 }
                 try
                 {
-                    std::vector<AccountSummary> accounts;
-                    std::uint32_t offset = 0U;
-                    while (accounts.size() < maximum_account_records)
+                    auto body = list_body(offset);
+                    auto response = send_locked(
+                        operation::list_account_summaries,
+                        body.value(),
+                        5'000U);
+                    ClientError const error = map_public_error(
+                        response.error,
+                        operation::list_account_summaries);
+                    if (error != ClientError::None)
                     {
-                        auto body = list_body(offset);
-                        auto response = send_locked(
-                            operation::list_account_summaries,
-                            body.value(),
-                            5'000U);
-                        ClientError const error = map_public_error(
-                            response.error,
-                            operation::list_account_summaries);
-                        if (error != ClientError::None)
-                        {
-                            return {error, {}};
-                        }
-                        auto page = decode_account_page(response.body.value());
-                        if (page.accounts.size() >
-                            maximum_account_records - accounts.size())
-                        {
-                            fail(transport_error::invalid);
-                        }
-                        accounts.insert(
-                            accounts.end(),
-                            std::make_move_iterator(page.accounts.begin()),
-                            std::make_move_iterator(page.accounts.end()));
-                        if (!page.next_offset.has_value())
-                        {
-                            return {ClientError::None, std::move(accounts)};
-                        }
-                        if (page.accounts.empty() || *page.next_offset <= offset)
-                        {
-                            fail(transport_error::invalid);
-                        }
-                        offset = *page.next_offset;
+                        return {error, {}};
                     }
-                    fail(transport_error::invalid);
+                    auto page = decode_account_page(response.body.value());
+                    if (page.next_offset.has_value())
+                    {
+                        if (
+                            page.accounts.empty() ||
+                            page.accounts.size() > MAXDWORD - offset ||
+                            *page.next_offset != offset + page.accounts.size())
+                        {
+                            fail(transport_error::invalid);
+                        }
+                    }
+                    return {
+                        ClientError::None,
+                        std::move(page.accounts),
+                        page.next_offset,
+                    };
                 }
                 catch (transport_exception const& error)
                 {

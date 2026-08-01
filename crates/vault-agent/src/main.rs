@@ -16,7 +16,7 @@ use std::{
 
 #[cfg(windows)]
 use librarian_agent_protocol::{
-    CURRENT_VERSION, ClientHello, Connection, ConnectionLimits, EndpointDescriptor,
+    AgentState, CURRENT_VERSION, ClientHello, Connection, ConnectionLimits, EndpointDescriptor,
     FEATURE_WINDOWS_HELLO, Frame, FrameHeader, HANDSHAKE_TIMEOUT_MS, MessageKind,
     PASSKEY_TIMEOUT_MS, RequestEnvelope, ResponseEnvelope,
 };
@@ -121,8 +121,12 @@ fn run() -> Result<(), HostError> {
     let _published = PublishedEndpoint { store: &store };
 
     loop {
+        let inactivity_sensitive = matches!(
+            runtime.state(),
+            AgentState::Unlocking | AgentState::Unlocked | AgentState::Updating
+        );
         if lifecycle
-            .shutdown_requested()
+            .shutdown_requested(inactivity_sensitive)
             .map_err(|_| HostError::Identity)?
         {
             store.remove().map_err(|_| HostError::Discovery)?;

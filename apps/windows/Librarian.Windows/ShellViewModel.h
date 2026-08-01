@@ -37,6 +37,9 @@ namespace librarian::windows
         [[nodiscard]] bool BeginRetry();
         void CompleteRetry(ShellRequestOutcome outcome);
 
+        [[nodiscard]] bool BeginRefresh();
+        void CompleteRefresh(ShellRequestOutcome outcome);
+
         [[nodiscard]] bool BeginCreate();
         void CompleteCreate(ShellRequestOutcome outcome);
 
@@ -59,6 +62,10 @@ namespace librarian::windows
         void CancelAccountEditor();
         [[nodiscard]] bool BeginSaveAccount();
         void CompleteSaveAccount(ShellRequestOutcome outcome);
+        [[nodiscard]] std::optional<std::uint32_t> BeginNextAccountPage();
+        [[nodiscard]] std::optional<std::uint32_t> BeginPreviousAccountPage();
+        void CompleteNextAccountPage(AccountListResult result);
+        void CompletePreviousAccountPage(AccountListResult result);
 
         [[nodiscard]] ShellRequestOutcome ExecuteStatusRequest() const;
         [[nodiscard]] ShellRequestOutcome ExecuteCreateRequest(
@@ -73,6 +80,8 @@ namespace librarian::windows
         [[nodiscard]] ShellRequestOutcome ExecuteLockRequest() const;
         [[nodiscard]] ShellRequestOutcome ExecuteSaveAccountRequest(
             AccountDraft const& account) const;
+        [[nodiscard]] AccountListResult ExecuteAccountPageRequest(
+            std::uint32_t offset) const;
 
         void Close() noexcept;
 
@@ -81,6 +90,8 @@ namespace librarian::windows
         [[nodiscard]] std::vector<AccountSummary> const& Accounts() const noexcept;
         [[nodiscard]] bool IsAccountEditorVisible() const noexcept;
         [[nodiscard]] bool IsLockRequestPending() const noexcept;
+        [[nodiscard]] bool HasNextAccountPage() const noexcept;
+        [[nodiscard]] bool HasPreviousAccountPage() const noexcept;
 
     private:
         enum class PendingAction
@@ -88,6 +99,7 @@ namespace librarian::windows
             None,
             Initialize,
             RetryStatus,
+            RefreshStatus,
             Create,
             Unlock,
             UnlockWindowsHello,
@@ -95,6 +107,8 @@ namespace librarian::windows
             RemoveWindowsHello,
             Lock,
             SaveAccount,
+            NextAccountPage,
+            PreviousAccountPage,
         };
 
         [[nodiscard]] bool BeginStatusRequest(PendingAction action);
@@ -102,6 +116,12 @@ namespace librarian::windows
         void CompleteWindowsHelloRequest(PendingAction action, ShellRequestOutcome outcome);
         void CompleteStatusRequest(PendingAction action, ShellRequestOutcome outcome);
         [[nodiscard]] bool BeginLockRequest();
+        [[nodiscard]] std::optional<std::uint32_t> BeginAccountPageRequest(
+            PendingAction action,
+            std::uint32_t offset);
+        void CompleteAccountPageRequest(
+            PendingAction action,
+            AccountListResult result);
         [[nodiscard]] ShellRequestOutcome AddAccountRefresh(ClientResult result) const;
         void ApplyLockFailure(ClientError error);
         void Apply(ShellRequestOutcome outcome);
@@ -115,6 +135,10 @@ namespace librarian::windows
         PendingAction pending_action_{ PendingAction::None };
         std::wstring message_;
         std::vector<AccountSummary> accounts_;
+        std::optional<std::uint32_t> next_account_offset_;
+        std::optional<std::uint32_t> pending_account_offset_;
+        std::vector<std::uint32_t> previous_account_offsets_;
+        std::uint32_t current_account_offset_{ 0U };
         bool account_editor_visible_{ false };
         bool lock_intent_pending_{ false };
     };

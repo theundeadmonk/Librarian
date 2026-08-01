@@ -10,6 +10,7 @@
 #include "MainWindow.g.cpp"
 #endif
 
+#include <chrono>
 #include <memory>
 #include <cstdint>
 #include <string>
@@ -24,6 +25,8 @@ namespace winrt::Librarian::Windows::implementation
 {
     namespace
     {
+        constexpr DWORD InactivityLockMilliseconds = 15U * 60U * 1'000U;
+
         Visibility VisibleWhen(bool const value)
         {
             return value ? Visibility::Visible : Visibility::Collapsed;
@@ -59,6 +62,17 @@ namespace winrt::Librarian::Windows::implementation
         view_model_(librarian::windows::MakeDesktopClient())
     {
         InitializeComponent();
+        security_timer_ = DispatcherQueue().CreateTimer();
+        security_timer_.Interval(std::chrono::seconds(1));
+        security_timer_.IsRepeating(true);
+        auto const weak = get_weak();
+        security_timer_.Tick([weak](auto const&, auto const&)
+        {
+            if (auto const lifetime = weak.get())
+            {
+                lifetime->OnSecurityTimerTick();
+            }
+        });
         (void)view_model_.BeginInitialize();
         Render();
     }
@@ -70,6 +84,7 @@ namespace winrt::Librarian::Windows::implementation
         auto lifetime = get_strong();
         auto const dispatcher = DispatcherQueue();
         is_loaded_ = true;
+        security_timer_.Start();
         QueueFocusCurrentState();
 
         co_await resume_background();
@@ -101,10 +116,15 @@ namespace winrt::Librarian::Windows::implementation
         [[maybe_unused]] IInspectable const& sender,
         WindowActivatedEventArgs const& event)
     {
+        auto const was_active = is_active_;
         is_active_ = event.WindowActivationState() != WindowActivationState::Deactivated;
         if (is_active_)
         {
             QueueFocusForActivation();
+            if (is_loaded_ && !was_active)
+            {
+                RefreshAfterActivation();
+            }
         }
     }
 
@@ -114,6 +134,7 @@ namespace winrt::Librarian::Windows::implementation
     {
         is_closed_.store(true, std::memory_order_release);
         is_active_ = false;
+        security_timer_.Stop();
         if (!lock_request_in_flight_.load(std::memory_order_acquire))
         {
             CloseDesktopClient();
@@ -384,37 +405,7 @@ namespace winrt::Librarian::Windows::implementation
         [[maybe_unused]] IInspectable const& sender,
         [[maybe_unused]] RoutedEventArgs const& event)
     {
-        auto lifetime = get_strong();
-        auto const dispatcher = DispatcherQueue();
-
-        if (!view_model_.BeginLock())
-        {
-            co_return;
-        }
-
-        lock_request_in_flight_.store(true, std::memory_order_release);
-        Render();
-        co_await resume_background();
-        auto outcome = std::make_shared<librarian::windows::ShellRequestOutcome>(
-            lifetime->view_model_.ExecuteLockRequest());
-        lifetime->lock_request_in_flight_.store(false, std::memory_order_release);
-        if (lifetime->is_closed_.load(std::memory_order_acquire))
-        {
-            lifetime->CloseDesktopClient();
-            co_return;
-        }
-        if (!dispatcher.TryEnqueue([lifetime, outcome]
-        {
-            if (lifetime->is_closed_.load(std::memory_order_acquire))
-            {
-                return;
-            }
-            lifetime->view_model_.CompleteLock(std::move(*outcome));
-            lifetime->RenderSecurityTransitionIfOpen();
-        }))
-        {
-            co_return;
-        }
+        return LockVault();
     }
 
     fire_and_forget MainWindow::OnRetryClicked(
@@ -528,6 +519,20 @@ namespace winrt::Librarian::Windows::implementation
         }
     }
 
+    fire_and_forget MainWindow::OnPreviousAccountPageClicked(
+        [[maybe_unused]] IInspectable const& sender,
+        [[maybe_unused]] RoutedEventArgs const& event)
+    {
+        return NavigateAccountPage(false);
+    }
+
+    fire_and_forget MainWindow::OnNextAccountPageClicked(
+        [[maybe_unused]] IInspectable const& sender,
+        [[maybe_unused]] RoutedEventArgs const& event)
+    {
+        return NavigateAccountPage(true);
+    }
+
     void MainWindow::Render()
     {
         using librarian::windows::ShellState;
@@ -576,6 +581,11 @@ namespace winrt::Librarian::Windows::implementation
         AccountsListView().Items().Clear();
         EmptyAccountsTextBlock().Visibility(VisibleWhen(accounts.empty()));
         AccountsListView().Visibility(VisibleWhen(!accounts.empty()));
+        auto const has_previous = view_model_.HasPreviousAccountPage();
+        auto const has_next = view_model_.HasNextAccountPage();
+        AccountPaginationPanel().Visibility(VisibleWhen(has_previous || has_next));
+        PreviousAccountPageButton().Visibility(VisibleWhen(has_previous));
+        NextAccountPageButton().Visibility(VisibleWhen(has_next));
 
         for (auto const& account : accounts)
         {
@@ -747,6 +757,138 @@ namespace winrt::Librarian::Windows::implementation
         OriginTextBox().Text(L"");
         UsernameTextBox().Text(L"");
         AccountPasswordBox().Password(L"");
+    }
+
+    void MainWindow::OnSecurityTimerTick()
+    {
+        if (
+            is_closed_.load(std::memory_order_acquire) ||
+            view_model_.State() != librarian::windows::ShellState::Unlocked)
+        {
+            return;
+        }
+
+        LASTINPUTINFO information{ sizeof(LASTINPUTINFO), 0U };
+        auto const input_observed = GetLastInputInfo(&information) != FALSE;
+        auto const idle_milliseconds = GetTickCount() - information.dwTime;
+        if (!input_observed || idle_milliseconds >= InactivityLockMilliseconds)
+        {
+            LockVault();
+        }
+    }
+
+    fire_and_forget MainWindow::RefreshAfterActivation()
+    {
+        auto lifetime = get_strong();
+        auto const dispatcher = DispatcherQueue();
+        if (!view_model_.BeginRefresh())
+        {
+            co_return;
+        }
+
+        Render();
+        co_await resume_background();
+        if (lifetime->is_closed_.load(std::memory_order_acquire))
+        {
+            co_return;
+        }
+        auto outcome = std::make_shared<librarian::windows::ShellRequestOutcome>(
+            lifetime->view_model_.ExecuteStatusRequest());
+        if (lifetime->is_closed_.load(std::memory_order_acquire))
+        {
+            co_return;
+        }
+        if (!dispatcher.TryEnqueue([lifetime, outcome]
+        {
+            if (lifetime->is_closed_.load(std::memory_order_acquire))
+            {
+                return;
+            }
+            lifetime->view_model_.CompleteRefresh(std::move(*outcome));
+            lifetime->RenderSecurityTransitionIfOpen();
+        }))
+        {
+            co_return;
+        }
+    }
+
+    fire_and_forget MainWindow::LockVault()
+    {
+        auto lifetime = get_strong();
+        auto const dispatcher = DispatcherQueue();
+        if (!view_model_.BeginLock())
+        {
+            co_return;
+        }
+
+        lock_request_in_flight_.store(true, std::memory_order_release);
+        Render();
+        co_await resume_background();
+        auto outcome = std::make_shared<librarian::windows::ShellRequestOutcome>(
+            lifetime->view_model_.ExecuteLockRequest());
+        lifetime->lock_request_in_flight_.store(false, std::memory_order_release);
+        if (lifetime->is_closed_.load(std::memory_order_acquire))
+        {
+            lifetime->CloseDesktopClient();
+            co_return;
+        }
+        if (!dispatcher.TryEnqueue([lifetime, outcome]
+        {
+            if (lifetime->is_closed_.load(std::memory_order_acquire))
+            {
+                return;
+            }
+            lifetime->view_model_.CompleteLock(std::move(*outcome));
+            lifetime->RenderSecurityTransitionIfOpen();
+        }))
+        {
+            co_return;
+        }
+    }
+
+    fire_and_forget MainWindow::NavigateAccountPage(bool const next)
+    {
+        auto lifetime = get_strong();
+        auto const dispatcher = DispatcherQueue();
+        auto const offset = next ?
+            view_model_.BeginNextAccountPage() :
+            view_model_.BeginPreviousAccountPage();
+        if (!offset.has_value())
+        {
+            co_return;
+        }
+
+        Render();
+        co_await resume_background();
+        if (lifetime->is_closed_.load(std::memory_order_acquire))
+        {
+            co_return;
+        }
+        auto result = std::make_shared<librarian::windows::AccountListResult>(
+            lifetime->view_model_.ExecuteAccountPageRequest(*offset));
+        if (lifetime->is_closed_.load(std::memory_order_acquire))
+        {
+            co_return;
+        }
+        if (!dispatcher.TryEnqueue([lifetime, result, next]
+        {
+            if (lifetime->is_closed_.load(std::memory_order_acquire))
+            {
+                return;
+            }
+            if (next)
+            {
+                lifetime->view_model_.CompleteNextAccountPage(std::move(*result));
+            }
+            else
+            {
+                lifetime->view_model_.CompletePreviousAccountPage(std::move(*result));
+            }
+            lifetime->RenderSecurityTransitionIfOpen();
+        }))
+        {
+            co_return;
+        }
     }
 
     std::uintptr_t MainWindow::ParentWindowHandle() noexcept

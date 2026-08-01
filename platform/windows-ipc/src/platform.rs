@@ -62,6 +62,7 @@ use windows_sys::{
                 WTS_SESSIONSTATE_UNLOCK, WTSFreeMemory, WTSINFOEXW, WTSQuerySessionInformationW,
                 WTSSessionInfoEx,
             },
+            SystemInformation::GetTickCount,
             SystemServices::{ACCESS_ALLOWED_ACE_TYPE, SE_GROUP_LOGON_ID},
             Threading::{
                 CreateEventW, CreateMutexW, GetCurrentProcessId, GetCurrentThread, GetProcessTimes,
@@ -69,9 +70,12 @@ use windows_sys::{
                 QueryFullProcessImageNameW, WaitForMultipleObjects, WaitForSingleObject,
             },
         },
-        UI::WindowsAndMessaging::{
-            DEVICE_NOTIFY_CALLBACK, PBT_APMRESUMEAUTOMATIC, PBT_APMRESUMECRITICAL,
-            PBT_APMRESUMESTANDBY, PBT_APMRESUMESUSPEND, PBT_APMSUSPEND,
+        UI::{
+            Input::KeyboardAndMouse::{GetLastInputInfo, LASTINPUTINFO},
+            WindowsAndMessaging::{
+                DEVICE_NOTIFY_CALLBACK, PBT_APMRESUMEAUTOMATIC, PBT_APMRESUMECRITICAL,
+                PBT_APMRESUMESTANDBY, PBT_APMRESUMESUSPEND, PBT_APMSUSPEND,
+            },
         },
     },
     core::PWSTR,
@@ -89,6 +93,7 @@ const MAX_TOKEN_INFORMATION_BYTES: u32 = 1_048_576;
 const SYSTEM_SID: &str = "S-1-5-18";
 const AGENT_INSTANCE_NAME: &str = r"Local\Librarian.Agent.Singleton.v1";
 const PIPE_NAME_PREFIX: &str = r"\\.\pipe\LOCAL\Librarian.Agent.v1.";
+const INACTIVITY_LOCK_TIMEOUT: Duration = Duration::from_mins(15);
 const HEX: &[u8; 16] = b"0123456789abcdef";
 
 /// Redacted, stable transport failures. Raw Windows errors never cross the
@@ -197,6 +202,33 @@ fn power_event_requires_shutdown(event: u32) -> bool {
     )
 }
 
+fn idle_duration_reached(now: u32, last_input: u32, timeout: Duration) -> bool {
+    let Ok(timeout_ms) = u32::try_from(timeout.as_millis()) else {
+        return true;
+    };
+    now.wrapping_sub(last_input) >= timeout_ms
+}
+
+fn inactivity_requires_shutdown() -> Result<bool, TransportError> {
+    let mut information = LASTINPUTINFO {
+        cbSize: u32::try_from(size_of::<LASTINPUTINFO>()).map_err(|_| TransportError::Internal)?,
+        dwTime: 0,
+    };
+    // SAFETY: the correctly sized structure remains valid for the duration of
+    // the call and Windows initializes its last-input tick count.
+    if unsafe { GetLastInputInfo(&raw mut information) } == 0 {
+        return Err(TransportError::Internal);
+    }
+    // SAFETY: `GetTickCount` has no preconditions and shares the wrapping
+    // 32-bit tick domain used by `LASTINPUTINFO::dwTime`.
+    let now = unsafe { GetTickCount() };
+    Ok(idle_duration_reached(
+        now,
+        information.dwTime,
+        INACTIVITY_LOCK_TIMEOUT,
+    ))
+}
+
 unsafe extern "system" fn suspend_resume_callback(
     context: *const c_void,
     event: u32,
@@ -213,11 +245,7 @@ unsafe extern "system" fn suspend_resume_callback(
     ERROR_SUCCESS
 }
 
-/// Fail-closed monitor for sleep/resume and Windows session locking.
-///
-/// Windows' own inactivity policy eventually locks the session; no separate
-/// Librarian idle duration is invented here. A suspend or resume event also
-/// requests shutdown even when the user disabled lock-on-resume.
+/// Fail-closed monitor for inactivity, sleep/resume, and session locking.
 pub struct SessionSecurityMonitor {
     registration: HPOWERNOTIFY,
     shutdown_requested: Box<AtomicBool>,
@@ -260,17 +288,22 @@ impl SessionSecurityMonitor {
         })
     }
 
-    /// Reports sleep/resume or a locked current session. Observation failure
-    /// is an error so the caller can shut down rather than retain key state.
+    /// Reports sleep/resume or a locked session, plus 15 minutes of inactivity
+    /// when the caller indicates that its current state may retain secrets.
+    /// Observation failure is an error so the caller shuts down rather than
+    /// retaining key state.
     ///
     /// # Errors
     ///
     /// Returns `Internal` when the Windows session state cannot be queried.
-    pub fn shutdown_requested(&self) -> Result<bool, TransportError> {
+    pub fn shutdown_requested(&self, inactivity_sensitive: bool) -> Result<bool, TransportError> {
         if self.shutdown_requested.load(Ordering::Acquire) {
             return Ok(true);
         }
-        Ok(!current_session_is_unlocked()?)
+        if !current_session_is_unlocked()? {
+            return Ok(true);
+        }
+        Ok(inactivity_sensitive && inactivity_requires_shutdown()?)
     }
 }
 
@@ -1728,6 +1761,13 @@ mod tests {
         assert!(power_event_requires_shutdown(PBT_APMSUSPEND));
         assert!(power_event_requires_shutdown(PBT_APMRESUMEAUTOMATIC));
         assert!(!power_event_requires_shutdown(0));
+        assert!(!idle_duration_reached(900_000, 1, INACTIVITY_LOCK_TIMEOUT));
+        assert!(idle_duration_reached(900_001, 1, INACTIVITY_LOCK_TIMEOUT));
+        assert!(idle_duration_reached(
+            100,
+            u32::MAX - 899_900,
+            INACTIVITY_LOCK_TIMEOUT
+        ));
     }
 
     #[test]

@@ -401,54 +401,56 @@ try {
                 "'$($existingPackage.InstallLocation)'. Refusing to replace it."
             )
         }
-        Remove-AppxPackage -Package $existingPackage.PackageFullName
+        $package = $existingPackage
     }
 
-    if (Test-Path -LiteralPath $layoutDirectory) {
-        Remove-Item -LiteralPath $layoutDirectory -Recurse -Force
-    }
-    New-Item -ItemType Directory -Path $developmentRoot -Force | Out-Null
-    Copy-Item -LiteralPath $sourceLayout -Destination $layoutDirectory -Recurse
-    $layoutCreatedByScript = $true
-    Copy-Item `
-        -LiteralPath (Join-Path $payloadDirectory "Librarian.VaultAgent.exe") `
-        -Destination $agentPath `
-        -Force
-    Copy-Item `
-        -LiteralPath (Join-Path $payloadDirectory "Librarian.ChromiumNativeHost.exe") `
-        -Destination $hostPath `
-        -Force
+    if ($null -eq $package) {
+        if (Test-Path -LiteralPath $layoutDirectory) {
+            Remove-Item -LiteralPath $layoutDirectory -Recurse -Force
+        }
+        New-Item -ItemType Directory -Path $developmentRoot -Force | Out-Null
+        Copy-Item -LiteralPath $sourceLayout -Destination $layoutDirectory -Recurse
+        $layoutCreatedByScript = $true
+        Copy-Item `
+            -LiteralPath (Join-Path $payloadDirectory "Librarian.VaultAgent.exe") `
+            -Destination $agentPath `
+            -Force
+        Copy-Item `
+            -LiteralPath (Join-Path $payloadDirectory "Librarian.ChromiumNativeHost.exe") `
+            -Destination $hostPath `
+            -Force
 
-    [xml]$developmentManifest = Get-Content -LiteralPath $manifestPath -Raw
-    Add-DevelopmentApplications -Manifest $developmentManifest
-    $xmlSettings = [System.Xml.XmlWriterSettings]::new()
-    $xmlSettings.Encoding = [System.Text.UTF8Encoding]::new($false)
-    $xmlSettings.Indent = $true
-    $xmlSettings.NewLineChars = "`r`n"
-    $xmlSettings.NewLineHandling = [System.Xml.NewLineHandling]::Replace
-    $writer = [System.Xml.XmlWriter]::Create($manifestPath, $xmlSettings)
-    try {
-        $developmentManifest.Save($writer)
-    }
-    finally {
-        $writer.Dispose()
-    }
+        [xml]$developmentManifest = Get-Content -LiteralPath $manifestPath -Raw
+        Add-DevelopmentApplications -Manifest $developmentManifest
+        $xmlSettings = [System.Xml.XmlWriterSettings]::new()
+        $xmlSettings.Encoding = [System.Text.UTF8Encoding]::new($false)
+        $xmlSettings.Indent = $true
+        $xmlSettings.NewLineChars = "`r`n"
+        $xmlSettings.NewLineHandling = [System.Xml.NewLineHandling]::Replace
+        $writer = [System.Xml.XmlWriter]::Create($manifestPath, $xmlSettings)
+        try {
+            $developmentManifest.Save($writer)
+        }
+        finally {
+            $writer.Dispose()
+        }
 
-    $registeredByScript = $true
-    try {
-        Add-AppxPackage -Register $manifestPath
+        $registeredByScript = $true
+        try {
+            Add-AppxPackage -Register $manifestPath
+        }
+        catch {
+            throw (
+                "Unable to register the current-user development package. Verify " +
+                "Developer Mode, then retry. $($_.Exception.Message)"
+            )
+        }
+        $registeredPackages = @(Get-AppxPackage -Name $packageName)
+        if ($registeredPackages.Count -ne 1) {
+            throw "Expected one development registration; found $($registeredPackages.Count)."
+        }
+        $package = $registeredPackages[0]
     }
-    catch {
-        throw (
-            "Unable to register the current-user development package. Verify " +
-            "Developer Mode, then retry. $($_.Exception.Message)"
-        )
-    }
-    $registeredPackages = @(Get-AppxPackage -Name $packageName)
-    if ($registeredPackages.Count -ne 1) {
-        throw "Expected one development registration; found $($registeredPackages.Count)."
-    }
-    $package = $registeredPackages[0]
     if (
         $package.Status -ne "Ok" -or
         -not $package.IsDevelopmentMode -or
@@ -456,6 +458,38 @@ try {
         [string]$package.Version -ne [string]$release.productVersion
     ) {
         throw "The current-user development package registration is stale or unhealthy."
+    }
+
+    $registeredLayoutFiles = @(
+        @{
+            Path = $desktopPath
+            Sha256 = [string]$release.developmentLayout.desktopSha256
+        },
+        @{
+            Path = $agentPath
+            Sha256 = [string](@($release.components | Where-Object {
+                $_.role -eq "VaultAgent"
+            })[0].sha256)
+        },
+        @{
+            Path = $hostPath
+            Sha256 = [string](@($release.components | Where-Object {
+                $_.role -eq "ChromiumNativeHost"
+            })[0].sha256)
+        }
+    )
+    foreach ($registeredLayoutFile in $registeredLayoutFiles) {
+        if (
+            -not (Test-Path -LiteralPath $registeredLayoutFile.Path -PathType Leaf) -or
+            (Get-FileHash `
+                -LiteralPath $registeredLayoutFile.Path `
+                -Algorithm SHA256).Hash -cne $registeredLayoutFile.Sha256
+        ) {
+            throw (
+                "The existing development registration does not match the " +
+                "current Release fixture. Remove it explicitly, then retry."
+            )
+        }
     }
 
     $registeredApplications = @(Get-RegisteredApplications `

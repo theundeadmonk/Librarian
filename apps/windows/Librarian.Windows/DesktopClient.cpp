@@ -52,7 +52,8 @@ namespace librarian::windows
                 return ClosedOrUnavailable();
             }
 
-            [[nodiscard]] AccountListResult ListAccounts() override
+            [[nodiscard]] AccountListResult ListAccounts(
+                [[maybe_unused]] std::uint32_t const offset) override
             {
                 if (closed_.load(std::memory_order_acquire))
                 {

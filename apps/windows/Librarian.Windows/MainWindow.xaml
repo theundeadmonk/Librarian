@@ -200,6 +200,25 @@
                             SelectionMode="None"
                             TabIndex="5" />
 
+                        <StackPanel
+                            x:Name="AccountPaginationPanel"
+                            Orientation="Horizontal"
+                            Spacing="8"
+                            Visibility="Collapsed">
+                            <Button
+                                x:Name="PreviousAccountPageButton"
+                                AutomationProperties.Name="Show previous account page"
+                                Click="OnPreviousAccountPageClicked"
+                                Content="Previous"
+                                TabIndex="6" />
+                            <Button
+                                x:Name="NextAccountPageButton"
+                                AutomationProperties.Name="Show next account page"
+                                Click="OnNextAccountPageClicked"
+                                Content="Next"
+                                TabIndex="7" />
+                        </StackPanel>
+
                         <Border
                             x:Name="AccountEditorPanel"
                             BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
@@ -216,37 +235,37 @@
                                     x:Name="ServiceNameTextBox"
                                     AutomationProperties.Name="Service name"
                                     Header="Service name"
-                                    TabIndex="6" />
+                                    TabIndex="8" />
                                 <TextBox
                                     x:Name="OriginTextBox"
                                     AutomationProperties.Name="Website origin"
                                     Header="Website origin"
                                     PlaceholderText="https://example.com"
-                                    TabIndex="7" />
+                                    TabIndex="9" />
                                 <TextBox
                                     x:Name="UsernameTextBox"
                                     AutomationProperties.Name="Username"
                                     Header="Username"
-                                    TabIndex="8" />
+                                    TabIndex="10" />
                                 <PasswordBox
                                     x:Name="AccountPasswordBox"
                                     AutomationProperties.Name="Account password"
                                     Header="Password"
                                     PasswordRevealMode="Hidden"
-                                    TabIndex="9" />
+                                    TabIndex="11" />
                                 <StackPanel Spacing="8">
                                     <Button
                                         AutomationProperties.Name="Save website account"
                                         Click="OnSaveAccountClicked"
                                         Content="Save"
                                         HorizontalAlignment="Left"
-                                        TabIndex="10" />
+                                        TabIndex="12" />
                                     <Button
                                         AutomationProperties.Name="Cancel account editing"
                                         Click="OnCancelAccountClicked"
                                         Content="Cancel"
                                         HorizontalAlignment="Left"
-                                        TabIndex="11" />
+                                        TabIndex="13" />
                                 </StackPanel>
                             </StackPanel>
                         </Border>
