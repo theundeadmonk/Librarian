@@ -979,7 +979,7 @@ namespace
             }
             count = count * 10U +
                     static_cast<std::size_t>(character - L'0');
-            if (count > 256U)
+            if (count > 1024U)
             {
                 fail(
                     L"Setup received too many payload manifest entries.");
@@ -995,26 +995,64 @@ namespace
     std::filesystem::path parse_manifest_file_name(
         std::wstring const& value)
     {
-        if (value.empty() || value.size() > 255U ||
-            std::ranges::any_of(value, [](wchar_t character) {
-                return !((character >= L'A' && character <= L'Z') ||
-                         (character >= L'a' && character <= L'z') ||
-                         (character >= L'0' && character <= L'9') ||
-                         character == L'_' || character == L'-' ||
-                         character == L'.');
-            }))
+        if (value.empty() || value.size() > 1024U)
         {
             fail(L"Setup received an invalid payload manifest filename.");
         }
 
-        std::filesystem::path const file_name{value};
-        std::wstring const extension = file_name.extension().native();
-        if (_wcsicmp(extension.c_str(), L".exe") != 0 &&
-            _wcsicmp(extension.c_str(), L".dll") != 0 &&
-            _wcsicmp(extension.c_str(), L".msix") != 0 &&
-            _wcsicmp(extension.c_str(), L".json") != 0)
+        std::size_t start = 0U;
+        while (start < value.size())
         {
-            fail(L"Setup received an unsupported payload manifest entry.");
+            std::size_t const separator = value.find(L'\\', start);
+            std::size_t const end = separator == std::wstring::npos ?
+                                        value.size() :
+                                        separator;
+            std::wstring_view const segment{value.data() + start, end - start};
+            bool const reserved_device_name = [&]() {
+                std::size_t const dot = segment.find(L'.');
+                std::wstring base{segment.substr(0U, dot)};
+                std::ranges::transform(
+                    base,
+                    base.begin(),
+                    [](wchar_t character) {
+                        return character >= L'a' && character <= L'z' ?
+                                   static_cast<wchar_t>(character - L'a' + L'A') :
+                                   character;
+                    });
+                return base == L"CON" || base == L"PRN" ||
+                       base == L"AUX" || base == L"NUL" ||
+                       (base.size() == 4U &&
+                        (base.starts_with(L"COM") || base.starts_with(L"LPT")) &&
+                        base[3] >= L'1' && base[3] <= L'9');
+            }();
+            if (segment.empty() || segment.size() > 255U ||
+                segment == L"." || segment == L".." ||
+                segment.back() == L'.' || reserved_device_name ||
+                std::ranges::any_of(segment, [](wchar_t character) {
+                    return !((character >= L'A' && character <= L'Z') ||
+                             (character >= L'a' && character <= L'z') ||
+                             (character >= L'0' && character <= L'9') ||
+                             character == L'_' || character == L'-' ||
+                             character == L'.');
+                }))
+            {
+                fail(L"Setup received an invalid payload manifest filename.");
+            }
+            if (separator == std::wstring::npos)
+            {
+                break;
+            }
+            start = separator + 1U;
+            if (start == value.size())
+            {
+                fail(L"Setup received an invalid payload manifest filename.");
+            }
+        }
+
+        std::filesystem::path const file_name{value};
+        if (!file_name.is_relative() || file_name.has_root_path())
+        {
+            fail(L"Setup received an invalid payload manifest filename.");
         }
         return file_name;
     }
@@ -1148,7 +1186,7 @@ namespace
             std::istreambuf_iterator<char>{stream},
             std::istreambuf_iterator<char>{}};
         if (stream.bad() || contents.empty() ||
-            contents.size() > 64U * 1024U ||
+            contents.size() > 256U * 1024U ||
             std::ranges::any_of(contents, [](unsigned char value) {
                 return value < 0x20U || value > 0x7EU;
             }))
@@ -1161,7 +1199,7 @@ namespace
             contents.end()};
         std::vector<std::wstring> const fields =
             split_manifest(wide_contents);
-        if (fields.size() < 5U || fields[0] != L"v3" ||
+        if (fields.size() < 5U || fields[0] != L"v4" ||
             std::ranges::any_of(
                 fields,
                 [](std::wstring const& field) { return field.empty(); }))

@@ -137,8 +137,8 @@ namespace
             std::istreambuf_iterator<char>{stream},
             std::istreambuf_iterator<char>{}};
         if (stream.bad() || contents.empty() ||
-            contents.size() > 64U * 1024U ||
-            !contents.starts_with("v3|"))
+            contents.size() > 256U * 1024U ||
+            !contents.starts_with("v4|"))
         {
             return false;
         }

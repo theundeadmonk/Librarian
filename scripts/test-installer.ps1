@@ -183,6 +183,91 @@ function Get-ExtractedMsiFile {
     return $path
 }
 
+function Test-PayloadManifestRelativePath {
+    param(
+        [Parameter(Mandatory)]
+        [string]$Path
+    )
+
+    if ([string]::IsNullOrEmpty($Path) -or $Path.Length -gt 1024) {
+        return $false
+    }
+    $segments = [regex]::Split($Path, '\\')
+    foreach ($segment in $segments) {
+        if (
+            [string]::IsNullOrEmpty($segment) -or
+            $segment.Length -gt 255 -or
+            $segment -in @(".", "..") -or
+            $segment.EndsWith(".", [StringComparison]::Ordinal) -or
+            $segment -notmatch '^[A-Za-z0-9_.-]+$'
+        ) {
+            return $false
+        }
+        $baseName = ($segment -split '\.', 2)[0]
+        if ($baseName -match '^(?i:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$') {
+            return $false
+        }
+    }
+    return $true
+}
+
+function Get-InstalledMsiPayloadFiles {
+    param(
+        [Parameter(Mandatory)]
+        [xml]$DecompiledMsi,
+
+        [Parameter(Mandatory)]
+        [string]$ExtractRoot
+    )
+
+    $installedFiles = foreach (
+        $file in @($DecompiledMsi.SelectNodes("//*[local-name()='File']"))
+    ) {
+        $directorySegments = [Collections.Generic.List[string]]::new()
+        $ancestor = $file.ParentNode
+        $insideInstallFolder = $false
+        while ($null -ne $ancestor) {
+            if ($ancestor.LocalName -eq "Directory") {
+                if ($ancestor.GetAttribute("Id") -eq "INSTALLFOLDER") {
+                    $insideInstallFolder = $true
+                    break
+                }
+                $directoryName = $ancestor.GetAttribute("Name")
+                if ([string]::IsNullOrWhiteSpace($directoryName)) {
+                    throw "An MSI payload directory has no install name."
+                }
+                $directorySegments.Insert(0, $directoryName)
+            }
+            $ancestor = $ancestor.ParentNode
+        }
+        if (-not $insideInstallFolder) {
+            throw (
+                "MSI file '$($file.GetAttribute('Id'))' is installed outside " +
+                "INSTALLFOLDER and cannot be payload-bound."
+            )
+        }
+
+        $fileName = $file.GetAttribute("Name")
+        [void]$directorySegments.Add($fileName)
+        $installedPath = $directorySegments -join "\"
+        if (-not (Test-PayloadManifestRelativePath -Path $installedPath)) {
+            throw "MSI payload path '$installedPath' is not manifest-safe."
+        }
+
+        $source = $file.GetAttribute("Source")
+        $relativeSource = $source -replace '^SourceDir[\\/]', ""
+        $extractedPath = Join-Path $ExtractRoot $relativeSource
+        if (-not (Test-Path -LiteralPath $extractedPath -PathType Leaf)) {
+            throw "Extracted MSI file '$installedPath' is missing at '$extractedPath'."
+        }
+        [pscustomobject]@{
+            InstalledPath = $installedPath
+            ExtractedPath = $extractedPath
+        }
+    }
+    return @($installedFiles)
+}
+
 function Get-MsiSequence {
     param(
         [Parameter(Mandatory)]
@@ -489,6 +574,24 @@ try {
         -WorkingDirectory $repoRoot
 
     [xml]$decompiled = Get-Content -LiteralPath $decompiledPath -Raw
+    $installedMsiPayloadFiles = @(
+        Get-InstalledMsiPayloadFiles `
+            -DecompiledMsi $decompiled `
+            -ExtractRoot $msiExtractRoot
+    )
+    $installedMsiPayloadsByPath =
+        [Collections.Generic.Dictionary[string, object]]::new(
+            [StringComparer]::OrdinalIgnoreCase
+        )
+    foreach ($installedFile in $installedMsiPayloadFiles) {
+        if ($installedMsiPayloadsByPath.ContainsKey($installedFile.InstalledPath)) {
+            throw "The MSI contains duplicate payload path '$($installedFile.InstalledPath)'."
+        }
+        $installedMsiPayloadsByPath.Add(
+            $installedFile.InstalledPath,
+            $installedFile
+        )
+    }
     $package = $decompiled.SelectSingleNode("/*[local-name()='Wix']/*[local-name()='Package']")
     Assert-True ($null -ne $package) "The decompiled MSI has no Package element."
     Assert-True (
@@ -976,14 +1079,14 @@ try {
     )
     Assert-True (
         $payloadHashFields.Count -ge 5 -and
-        $payloadHashFields[0] -ceq "v3" -and
+        $payloadHashFields[0] -ceq "v4" -and
         $payloadHashFields[1] -ceq $ExpectedProductVersion
     ) "The MSI payload hash manifest header is invalid."
     $payloadHashCount = 0
     Assert-True (
         [int]::TryParse($payloadHashFields[2], [ref]$payloadHashCount) -and
         $payloadHashCount -gt 0 -and
-        $payloadHashCount -le 256 -and
+        $payloadHashCount -le 1024 -and
         $payloadHashFields.Count -eq (3 + (2 * $payloadHashCount))
     ) "The MSI payload hash manifest entry count is invalid."
 
@@ -992,16 +1095,19 @@ try {
         $fileName = $payloadHashFields[3 + (2 * $index)]
         $expectedHash = $payloadHashFields[4 + (2 * $index)]
         Assert-True (
-            $fileName -match '^[A-Za-z0-9_.-]+\.(?i:exe|dll|msix|json)$' -and
+            (Test-PayloadManifestRelativePath -Path $fileName) -and
             $expectedHash -match '^[0-9A-F]{64}$' -and
             -not $payloadManifestHashes.Contains($fileName)
         ) "The MSI payload hash manifest has an invalid or duplicate entry."
-        $boundPath = Get-ExtractedMsiFile `
-            -DecompiledMsi $decompiled `
-            -ExtractRoot $msiExtractRoot `
-            -Name $fileName
+        Assert-True (
+            $installedMsiPayloadsByPath.ContainsKey($fileName)
+        ) "The payload hash manifest names uninstalled file '$fileName'."
+        $boundFile = $installedMsiPayloadsByPath[$fileName]
+        Assert-True (
+            $boundFile.InstalledPath -ceq $fileName
+        ) "The payload hash manifest path casing differs from the MSI."
         $actualHash = (
-            Get-FileHash -LiteralPath $boundPath -Algorithm SHA256
+            Get-FileHash -LiteralPath $boundFile.ExtractedPath -Algorithm SHA256
         ).Hash
         Assert-True (
             $actualHash -ceq $expectedHash
@@ -1010,19 +1116,16 @@ try {
     }
 
     $expectedBoundPayloads = @(
-        $decompiled.SelectNodes("//*[local-name()='File']") |
-            ForEach-Object { $_.GetAttribute("Name") } |
-            Where-Object {
-                [IO.Path]::GetExtension($_) -in
-                    @(".exe", ".dll", ".msix", ".json")
-            } |
-            Sort-Object -Unique
+        $installedMsiPayloadFiles |
+            ForEach-Object { $_.InstalledPath } |
+            Where-Object { $_ -cne "Librarian.PayloadHashes" } |
+            Sort-Object
     )
     Assert-True (
         $payloadManifestHashes.Count -eq $expectedBoundPayloads.Count
     ) (
-        "The MSI payload hash manifest does not bind every executable or " +
-        "JSON dependency."
+        "The MSI payload hash manifest does not bind every installed payload " +
+        "file except itself."
     )
     foreach ($fileName in $expectedBoundPayloads) {
         Assert-True (

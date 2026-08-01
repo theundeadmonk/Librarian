@@ -397,6 +397,34 @@ function Copy-RuntimeTree {
     }
 }
 
+function Test-PayloadManifestRelativePath {
+    param(
+        [Parameter(Mandatory)]
+        [string]$Path
+    )
+
+    if ([string]::IsNullOrEmpty($Path) -or $Path.Length -gt 1024) {
+        return $false
+    }
+    $segments = [regex]::Split($Path, '\\')
+    foreach ($segment in $segments) {
+        if (
+            [string]::IsNullOrEmpty($segment) -or
+            $segment.Length -gt 255 -or
+            $segment -in @(".", "..") -or
+            $segment.EndsWith(".", [StringComparison]::Ordinal) -or
+            $segment -notmatch '^[A-Za-z0-9_.-]+$'
+        ) {
+            return $false
+        }
+        $baseName = ($segment -split '\.', 2)[0]
+        if ($baseName -match '^(?i:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$') {
+            return $false
+        }
+    }
+    return $true
+}
+
 function Get-WorkspaceVersion {
     param(
         [Parameter(Mandatory)]
@@ -940,41 +968,76 @@ if (($browserManifestFiles.Name -join "`n") -cne
         "unexpected. Found: $($browserManifestFiles.Name -join ', ')."
     )
 }
+$payloadHashManifestPath = Join-Path (
+    $payloadDirectory
+) "Librarian.PayloadHashes"
+$payloadDirectoryFullPath = [IO.Path]::GetFullPath($payloadDirectory).TrimEnd('\')
 $boundPayloadFiles = @(
     @(
-        Get-ChildItem -LiteralPath $payloadDirectory -File |
+        Get-ChildItem -LiteralPath $payloadDirectory -Recurse -File |
             Where-Object {
-                $_.Extension -in @(".exe", ".dll", ".msix", ".json")
+                -not [string]::Equals(
+                    $_.FullName,
+                    $payloadHashManifestPath,
+                    [StringComparison]::OrdinalIgnoreCase
+                )
+            } |
+            ForEach-Object {
+                [pscustomobject]@{
+                    RelativePath = $_.FullName.Substring(
+                        $payloadDirectoryFullPath.Length + 1
+                    )
+                    FullName = $_.FullName
+                }
             }
-        $browserManifestFiles
-    ) | Sort-Object -Property Name
+        $browserManifestFiles | ForEach-Object {
+            [pscustomobject]@{
+                RelativePath = $_.Name
+                FullName = $_.FullName
+            }
+        }
+    ) | Sort-Object -Property RelativePath
 )
-if ($boundPayloadFiles.Count -eq 0 -or $boundPayloadFiles.Count -gt 256) {
-    throw "The integrity-bound payload set is empty or exceeds 256 files."
+if ($boundPayloadFiles.Count -eq 0 -or $boundPayloadFiles.Count -gt 1024) {
+    throw "The integrity-bound payload set is empty or exceeds 1024 files."
+}
+$duplicateBoundPayloads = @(
+    $boundPayloadFiles |
+        Group-Object -Property RelativePath |
+        Where-Object { $_.Count -gt 1 }
+)
+if ($duplicateBoundPayloads.Count -ne 0) {
+    throw (
+        "The integrity-bound payload set contains duplicate relative paths: " +
+        (($duplicateBoundPayloads.Name | Sort-Object) -join ", ")
+    )
 }
 foreach ($componentPath in @(
     $componentPaths.Values
     "Librarian.Release.json"
     $browserManifestNames
 )) {
-    if ($componentPath -notin $boundPayloadFiles.Name) {
+    if ($componentPath -notin $boundPayloadFiles.RelativePath) {
         throw "The integrity-bound payload manifest is missing '$componentPath'."
     }
 }
 $boundPayloadFields = foreach ($file in $boundPayloadFiles) {
-    if ($file.Name -notmatch '^[A-Za-z0-9_.-]+$') {
-        throw "The integrity-bound filename '$($file.Name)' is not manifest-safe."
+    if (-not (Test-PayloadManifestRelativePath -Path $file.RelativePath)) {
+        throw (
+            "The integrity-bound relative path '$($file.RelativePath)' is not " +
+            "manifest-safe."
+        )
     }
-    $file.Name
+    $file.RelativePath
     (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash
 }
-$payloadHashManifestPath = Join-Path (
-    $payloadDirectory
-) "Librarian.PayloadHashes"
 $payloadHashManifest = (
-    "v3|$ProductVersion|$($boundPayloadFiles.Count)|" +
+    "v4|$ProductVersion|$($boundPayloadFiles.Count)|" +
     ($boundPayloadFields -join "|")
 )
+if ([Text.Encoding]::ASCII.GetByteCount($payloadHashManifest) -gt 256KB) {
+    throw "The integrity-bound payload manifest exceeds 256 KiB."
+}
 [IO.File]::WriteAllText(
     $payloadHashManifestPath,
     $payloadHashManifest,

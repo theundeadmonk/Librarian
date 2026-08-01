@@ -205,8 +205,9 @@ browser-extension choices.
 - A developer may use a clearly non-production self-signed certificate for
   local validation. Setup must never add a certificate to a trust store
   silently.
-- Setup verifies expected signatures, identities, versions, and payload hashes
-  before registration. Downgrades and mixed release sets fail closed.
+- Setup verifies expected signatures, identities, versions, and hashes for every
+  installed payload file before registration. Downgrades, mixed release sets,
+  and retained unverified resources fail closed.
 - The shared four-part version keeps its revision field at zero because Windows
   Installer major-upgrade comparison uses only the first three fields.
 - Windows Installer Restart Manager remains enabled to coordinate running

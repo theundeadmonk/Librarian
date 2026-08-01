@@ -116,16 +116,19 @@ localized file and fail-closed normalizes only these eight pinned Microsoft
 suite. Structural validation requires all eight normalized rows, rejects the
 original LCIDs and overlong values, and never globally suppresses ICE03.
 
-Every shipped executable dependency (`.exe`, `.dll`, and `.msix`) is named and
-hashed in a bounded fixed-format manifest installed beside the binaries. Only
-that manifest's SHA-256 is passed through deferred custom-action data. The
-System-context custom action first uses Windows `WinVerifyTrust` to require its
-own module and Librarian's five identity-bearing payloads (launcher, desktop,
-vault agent, native host, and identity package) to have a valid chain, the
-expected code-signing publisher, and one matching signer certificate. It then
-validates the protected manifest path, rejects reparse points, verifies the
-manifest hash, and verifies every named executable dependency before setup can
-complete. It does not stage, provision, register, or remove package identity.
+Every shipped payload file, including nested WinUI resources, localization
+files, metadata, and executable dependencies, is named by a canonical relative
+path and hashed in a bounded fixed-format manifest installed beside the
+binaries. Only that manifest's SHA-256 is passed through deferred custom-action
+data. The System-context custom action first uses Windows `WinVerifyTrust` to
+require its own module and Librarian's five identity-bearing payloads (launcher,
+desktop, vault agent, native host, and identity package) to have a valid chain,
+the expected code-signing publisher, and one matching signer certificate. It
+then validates the protected manifest path, rejects reparse points, verifies
+the manifest hash, and verifies every named payload file before setup can
+complete. This prevents Windows Installer file-versioning rules from preserving
+an unverified pre-existing resource during repair or upgrade. It does not
+stage, provision, register, or remove package identity.
 
 The MSI refuses new installation on 32-bit Windows and Windows builds below
 26100 before it writes machine state. Its created

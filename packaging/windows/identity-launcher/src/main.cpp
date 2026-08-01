@@ -312,7 +312,7 @@ namespace
             }
             count = count * 10U +
                     static_cast<std::size_t>(character - '0');
-            if (count > 256U)
+            if (count > 1024U)
             {
                 fail(L"Librarian found too many payload manifest entries.");
             }
@@ -327,27 +327,65 @@ namespace
     std::filesystem::path parse_manifest_file_name(
         std::string const& value)
     {
-        if (value.empty() || value.size() > 255U ||
-            std::ranges::any_of(value, [](char character) {
-                return !((character >= 'A' && character <= 'Z') ||
-                         (character >= 'a' && character <= 'z') ||
-                         (character >= '0' && character <= '9') ||
-                         character == '_' || character == '-' ||
-                         character == '.');
-            }))
+        if (value.empty() || value.size() > 1024U)
         {
             fail(L"Librarian found an invalid payload manifest filename.");
         }
 
+        std::size_t start = 0U;
+        while (start < value.size())
+        {
+            std::size_t const separator = value.find('\\', start);
+            std::size_t const end = separator == std::string::npos ?
+                                        value.size() :
+                                        separator;
+            std::string_view const segment{value.data() + start, end - start};
+            bool const reserved_device_name = [&]() {
+                std::size_t const dot = segment.find('.');
+                std::string base{segment.substr(0U, dot)};
+                std::ranges::transform(
+                    base,
+                    base.begin(),
+                    [](char character) {
+                        return character >= 'a' && character <= 'z' ?
+                                   static_cast<char>(character - 'a' + 'A') :
+                                   character;
+                    });
+                return base == "CON" || base == "PRN" ||
+                       base == "AUX" || base == "NUL" ||
+                       (base.size() == 4U &&
+                        (base.starts_with("COM") || base.starts_with("LPT")) &&
+                        base[3] >= '1' && base[3] <= '9');
+            }();
+            if (segment.empty() || segment.size() > 255U ||
+                segment == "." || segment == ".." ||
+                segment.back() == '.' || reserved_device_name ||
+                std::ranges::any_of(segment, [](char character) {
+                    return !((character >= 'A' && character <= 'Z') ||
+                             (character >= 'a' && character <= 'z') ||
+                             (character >= '0' && character <= '9') ||
+                             character == '_' || character == '-' ||
+                             character == '.');
+                }))
+            {
+                fail(L"Librarian found an invalid payload manifest filename.");
+            }
+            if (separator == std::string::npos)
+            {
+                break;
+            }
+            start = separator + 1U;
+            if (start == value.size())
+            {
+                fail(L"Librarian found an invalid payload manifest filename.");
+            }
+        }
+
         std::filesystem::path const file_name{
             std::wstring{value.begin(), value.end()}};
-        std::wstring const extension = file_name.extension().native();
-        if (_wcsicmp(extension.c_str(), L".exe") != 0 &&
-            _wcsicmp(extension.c_str(), L".dll") != 0 &&
-            _wcsicmp(extension.c_str(), L".msix") != 0 &&
-            _wcsicmp(extension.c_str(), L".json") != 0)
+        if (!file_name.is_relative() || file_name.has_root_path())
         {
-            fail(L"Librarian found an unsupported payload manifest entry.");
+            fail(L"Librarian found an invalid payload manifest filename.");
         }
         return file_name;
     }
@@ -436,7 +474,7 @@ namespace
             std::istreambuf_iterator<char>{stream},
             std::istreambuf_iterator<char>{}};
         if (stream.bad() || contents.empty() ||
-            contents.size() > 64U * 1024U ||
+            contents.size() > 256U * 1024U ||
             std::ranges::any_of(contents, [](unsigned char value) {
                 return value < 0x20U || value > 0x7EU;
             }))
@@ -445,7 +483,7 @@ namespace
         }
 
         std::vector<std::string> const fields = split_manifest(contents);
-        if (fields.size() < 5U || fields[0] != "v3" ||
+        if (fields.size() < 5U || fields[0] != "v4" ||
             std::ranges::any_of(
                 fields,
                 [](std::string const& field) { return field.empty(); }))
