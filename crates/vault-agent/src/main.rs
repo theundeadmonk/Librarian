@@ -1,6 +1,7 @@
 //! Production process boundary for the trusted local vault agent.
 
 #![forbid(unsafe_code)]
+#![cfg_attr(all(windows, not(test)), windows_subsystem = "windows")]
 
 #[cfg(windows)]
 use std::{

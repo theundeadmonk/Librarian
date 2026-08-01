@@ -529,10 +529,6 @@ public static class LibrarianDevelopmentPackageActivator
 "@
     }
 
-    $agentProcessId = [LibrarianDevelopmentPackageActivator]::Activate(
-        "$($package.PackageFamilyName)!VaultAgent"
-    )
-    $agentProcess = Get-Process -Id $agentProcessId -ErrorAction SilentlyContinue
     $desktopProcessId = [LibrarianDevelopmentPackageActivator]::Activate(
         "$($package.PackageFamilyName)!Desktop"
     )
@@ -572,6 +568,12 @@ finally {
     try {
         try {
             Stop-ExpectedProcess -Process $desktopProcess -ExpectedPath $desktopPath
+            $agentProcess = Get-Process -Name "Librarian.VaultAgent" -ErrorAction SilentlyContinue |
+                Where-Object {
+                    $null -ne $_.Path -and
+                    (Test-SamePath -First $_.Path -Second $agentPath)
+                } |
+                Select-Object -First 1
             Stop-ExpectedProcess -Process $agentProcess -ExpectedPath $agentPath
         }
         finally {

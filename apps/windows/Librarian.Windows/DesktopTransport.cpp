@@ -39,6 +39,7 @@ namespace librarian::windows
         constexpr std::size_t maximum_payload_bytes = 65'536U;
         constexpr std::size_t maximum_descriptor_bytes = 4'096U;
         constexpr std::size_t maximum_account_records = 100'000U;
+        constexpr std::uint32_t frame_write_allowance_ms = 2'000U;
         constexpr std::uint16_t protocol_major = 1U;
         constexpr std::uint16_t protocol_minor = 1U;
         constexpr std::uint16_t windows_hello_feature = 1U;
@@ -1602,7 +1603,7 @@ namespace librarian::windows
             HRESULT const creation = CoCreateInstance(
                 CLSID_ApplicationActivationManager,
                 nullptr,
-                CLSCTX_INPROC_SERVER,
+                CLSCTX_LOCAL_SERVER,
                 IID_PPV_ARGS(&manager));
             if (FAILED(creation) || manager == nullptr)
             {
@@ -1764,7 +1765,7 @@ namespace librarian::windows
             return writer.take();
         }
 
-        VaultStatus decode_status_body(std::span<std::uint8_t const> const body)
+        ClientResult decode_status_body(std::span<std::uint8_t const> const body)
         {
             cbor_reader reader{body};
             if (reader.array() != 2U)
@@ -1777,11 +1778,14 @@ namespace librarian::windows
             switch (state)
             {
             case 2U:
-                return VaultStatus::FirstRun;
+                return {ClientError::None, VaultStatus::FirstRun};
             case 3U:
-                return VaultStatus::Locked;
+                return {ClientError::None, VaultStatus::Locked};
+            case 4U:
+            case 6U:
+                return {ClientError::Busy, VaultStatus::Locked};
             case 5U:
-                return VaultStatus::Unlocked;
+                return {ClientError::None, VaultStatus::Unlocked};
             default:
                 fail(transport_error::unavailable);
             }
@@ -2044,7 +2048,11 @@ namespace librarian::windows
 
             [[nodiscard]] ClientResult Lock() override
             {
-                return execute_status(operation::lock, empty_body(), 30'000U);
+                return execute_empty(
+                    operation::lock,
+                    empty_body(),
+                    30'000U,
+                    VaultStatus::Locked);
             }
 
             [[nodiscard]] AccountListResult ListAccounts() override
@@ -2240,10 +2248,7 @@ namespace librarian::windows
                     {
                         return {error, VaultStatus::Locked};
                     }
-                    return {
-                        ClientError::None,
-                        decode_status_body(response.body.value()),
-                    };
+                    return decode_status_body(response.body.value());
                 }
                 catch (transport_exception const& error)
                 {
@@ -2326,7 +2331,9 @@ namespace librarian::windows
                     1U,
                     request.value(),
                     timeout_ms);
-                auto const response = read_frame(connection, timeout_ms + 1'000U);
+                auto const response = read_frame(
+                    connection,
+                    timeout_ms + frame_write_allowance_ms);
                 if (response.kind != message_kind::response ||
                     response.major != protocol_major ||
                     response.minor != protocol_minor ||
