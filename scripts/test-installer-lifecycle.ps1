@@ -32,13 +32,16 @@ param(
 
     [switch]$SkipInteractiveDesktopLaunch,
 
-    [switch]$ConfirmDisposableVm
+    [switch]$ConfirmDisposableVm,
+
+    [switch]$ConfirmDisposableWindows11Runner
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
 . (Join-Path $PSScriptRoot "native-process-arguments.ps1")
+. (Join-Path $PSScriptRoot "installer-runner-guard.ps1")
 
 function Assert-True {
     param(
@@ -649,14 +652,9 @@ function Assert-Sentinel {
     ) "The disposable user-data sentinel was not preserved."
 }
 
-$isGitHubHostedRunner = (
-    $env:GITHUB_ACTIONS -eq "true" -and
-    $env:CI -eq "true" -and
-    $env:RUNNER_ENVIRONMENT -eq "github-hosted" -and
-    $env:RUNNER_OS -eq "Windows" -and
-    $env:RUNNER_ARCH -eq "X64" -and
-    $env:GITHUB_REPOSITORY -eq "theundeadmonk/Librarian"
-)
+$runnerMode = Get-DisposableWindows11RunnerMode `
+    -ConfirmSelfHosted:$ConfirmDisposableWindows11Runner
+$isDisposableGitHubRunner = $null -ne $runnerMode
 $isDisposableLocalVm = $false
 if ($ConfirmDisposableVm) {
     $computerSystem = Get-CimInstance Win32_ComputerSystem
@@ -668,10 +666,10 @@ if ($ConfirmDisposableVm) {
         $env:USERNAME -eq "librarian-test"
     )
 }
-if (-not $isGitHubHostedRunner -and -not $isDisposableLocalVm) {
+if (-not $isDisposableGitHubRunner -and -not $isDisposableLocalVm) {
     throw (
         "The installer lifecycle suite is destructive and may run only on " +
-        "the disposable GitHub-hosted runner or an explicitly confirmed " +
+        "a disposable Windows 11 GitHub Actions runner or an explicitly confirmed " +
         "Windows 11 Enterprise Evaluation VMware guest using the " +
         "'librarian-test' account."
     )
@@ -679,7 +677,7 @@ if (-not $isGitHubHostedRunner -and -not $isDisposableLocalVm) {
 if ($isDisposableLocalVm) {
     Write-Host "Runner mode: disposable local VMware guest"
 } else {
-    Write-Host "Runner mode: disposable GitHub-hosted runner"
+    Write-Host "Runner mode: $runnerMode"
 }
 Assert-True (
     [Environment]::Is64BitProcess

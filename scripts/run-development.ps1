@@ -304,6 +304,15 @@ try {
         throw "The development payload contains a passkey provider before issue #18."
     }
 
+    $sourceDesktopPath = Join-Path $sourceLayout "Librarian.Windows.exe"
+    if (
+        [string]$release.developmentLayout.desktopSha256 -notmatch "^[0-9A-F]{64}$" -or
+        (Get-FileHash -LiteralPath $sourceDesktopPath -Algorithm SHA256).Hash -cne
+        [string]$release.developmentLayout.desktopSha256
+    ) {
+        throw "The generated Windows desktop is stale or does not match the Release fixture."
+    }
+
     [xml]$sourceManifest = Get-Content -LiteralPath $sourceManifestPath -Raw
     $sourceNamespaceManager = Get-ManifestContext -Manifest $sourceManifest
     $sourceIdentity = $sourceManifest.SelectSingleNode(
@@ -403,10 +412,12 @@ try {
     $layoutCreatedByScript = $true
     Copy-Item `
         -LiteralPath (Join-Path $payloadDirectory "Librarian.VaultAgent.exe") `
-        -Destination $agentPath
+        -Destination $agentPath `
+        -Force
     Copy-Item `
         -LiteralPath (Join-Path $payloadDirectory "Librarian.ChromiumNativeHost.exe") `
-        -Destination $hostPath
+        -Destination $hostPath `
+        -Force
 
     [xml]$developmentManifest = Get-Content -LiteralPath $manifestPath -Raw
     Add-DevelopmentApplications -Manifest $developmentManifest

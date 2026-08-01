@@ -37,6 +37,7 @@ $ErrorActionPreference = "Stop"
 
 . (Join-Path $PSScriptRoot "native-process-arguments.ps1")
 . (Join-Path $PSScriptRoot "certificate-helpers.ps1")
+. (Join-Path $PSScriptRoot "installer-runner-guard.ps1")
 
 function Invoke-CheckedProcess {
     param(
@@ -594,17 +595,14 @@ if ($hasCiOnlyPayloadOverrideRole -ne $hasCiOnlyPayloadOverridePath) {
     )
 }
 $hasCiOnlyPayloadOverride = $hasCiOnlyPayloadOverrideRole
-if ($hasCiOnlyPayloadOverride -and (
-    $env:GITHUB_ACTIONS -ne "true" -or
-    $env:CI -ne "true" -or
-    $env:RUNNER_ENVIRONMENT -ne "github-hosted" -or
-    $env:RUNNER_OS -ne "Windows" -or
-    $env:RUNNER_ARCH -ne "X64" -or
-    $env:GITHUB_REPOSITORY -ne "theundeadmonk/Librarian"
-)) {
+if (
+    $hasCiOnlyPayloadOverride -and
+    -not (Test-InstallerLifecycleRunnerMode `
+        -ExpectedMode $env:LIBRARIAN_INSTALLER_LIFECYCLE_RUNNER_MODE)
+) {
     throw (
         "Deliberately invalid payload overrides may be built only by the " +
-        "disposable GitHub-hosted installer lifecycle job."
+        "disposable Windows 11 installer lifecycle job."
     )
 }
 
@@ -904,6 +902,13 @@ $releaseManifest = [ordered]@{
     platform = $Platform
     signingMode = $signingMode
     components = @($components)
+    developmentLayout = [ordered]@{
+        desktopSha256 = (
+            Get-FileHash `
+                -LiteralPath (Join-Path $desktopOutput "Librarian.Windows.exe") `
+                -Algorithm SHA256
+        ).Hash
+    }
     browser = [ordered]@{
         hostName = "com.theundeadmonk.librarian"
         chromeOrigin = "chrome-extension://$ChromeExtensionId/"

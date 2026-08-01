@@ -438,6 +438,18 @@ if ($Configuration -eq "Release") {
             "-ValidateOnly"
         ) `
         -WorkingDirectory $repoRoot
+
+    Invoke-CheckedProcess `
+        -Label "Installer runner guard tests" `
+        -FilePath $powerShellHost `
+        -Arguments @(
+            "-NoProfile"
+            "-ExecutionPolicy"
+            "Bypass"
+            "-File"
+            "scripts\test-installer-runner-guard.ps1"
+        ) `
+        -WorkingDirectory $repoRoot
 }
 
 $gitMetadata = Join-Path $repoRoot ".git"

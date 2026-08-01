@@ -4,11 +4,15 @@ param(
     [string]$LowVersion,
 
     [ValidatePattern("^\d+\.\d+\.\d+\.\d+$")]
-    [string]$HighVersion
+    [string]$HighVersion,
+
+    [switch]$ConfirmDisposableWindows11Runner
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
+
+. (Join-Path $PSScriptRoot "installer-runner-guard.ps1")
 
 function Assert-True {
     param(
@@ -190,15 +194,15 @@ function New-TrustedDisposableCodeSigningCertificate {
     return $certificate
 }
 
-if ($env:GITHUB_ACTIONS -ne "true" -or
-    $env:CI -ne "true" -or
-    $env:RUNNER_ENVIRONMENT -ne "github-hosted" -or
-    $env:RUNNER_OS -ne "Windows" -or
-    $env:RUNNER_ARCH -ne "X64" -or
-    $env:GITHUB_REPOSITORY -ne "theundeadmonk/Librarian") {
+$runnerMode = Get-DisposableWindows11RunnerMode `
+    -ConfirmSelfHosted:$ConfirmDisposableWindows11Runner
+if ($null -eq $runnerMode) {
     throw (
         "Development-certificate creation and installer execution are allowed " +
-        "only on a disposable GitHub Actions runner."
+        "only on a disposable Windows 11 GitHub Actions runner. A self-hosted " +
+        "runner also requires -ConfirmDisposableWindows11Runner and the " +
+        "provisioner-set LIBRARIAN_DISPOSABLE_WINDOWS11_RUNNER=true marker " +
+        "and a runner name beginning with 'librarian-disposable-win11-'."
     )
 }
 Assert-True (
@@ -257,6 +261,8 @@ $certificate = $null
 $wrongCertificate = $null
 $createdCertificates = @()
 $failure = $null
+$previousRunnerMode = $env:LIBRARIAN_INSTALLER_LIFECYCLE_RUNNER_MODE
+$env:LIBRARIAN_INSTALLER_LIFECYCLE_RUNNER_MODE = $runnerMode
 
 try {
     Write-Host "==> Preserve and revalidate unsigned build fixture"
@@ -392,10 +398,12 @@ try {
         -LowVersion $LowVersion `
         -HighVersion $HighVersion `
         -LogDirectory $logRoot `
-        -SkipInteractiveDesktopLaunch
+        -SkipInteractiveDesktopLaunch `
+        -ConfirmDisposableWindows11Runner:($runnerMode -eq "self-hosted-windows11")
 } catch {
     $failure = $_
 } finally {
+    $env:LIBRARIAN_INSTALLER_LIFECYCLE_RUNNER_MODE = $previousRunnerMode
     $cleanupFailures = @()
     foreach ($createdCertificate in $createdCertificates) {
         $certificatePaths = @(

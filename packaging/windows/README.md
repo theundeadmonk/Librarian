@@ -158,6 +158,15 @@ guard. The entry point verifies removal of all six
 `TrustedPeople`, `Root`, and personal certificate-store entries in a `finally`
 block. It does not export a PFX or private key.
 
+The entry point runs only on an x64 Windows 11 workstation GitHub Actions
+runner at build 26100 or newer. A self-hosted runner additionally requires the
+explicit `-ConfirmDisposableWindows11Runner` switch, a provisioner-set
+`LIBRARIAN_DISPOSABLE_WINDOWS11_RUNNER=true` marker, and a runner name beginning
+with `librarian-disposable-win11-`. Windows Server and general-purpose
+self-hosted runners fail before certificate creation or installer execution.
+The entry point passes a bounded runner-mode marker only to its nested fixture
+builds and lifecycle process.
+
 The lifecycle suite rejects unsigned, validly signed wrong-signer,
 accepted-signer mixed-release, and unexpected-provider installs without
 leaving product state. It then validates a clean installation, registers the

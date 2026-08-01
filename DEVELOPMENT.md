@@ -82,6 +82,10 @@ open for manual testing. Close the Librarian window to stop the session. If the
 command created the package registration, it removes that registration before
 exiting.
 
+The generated Release manifest also binds the exact WinUI loose-layout desktop
+hash. Rebuilding or modifying only the app layout or only the installer fixture
+therefore fails validation instead of launching a mixed development set.
+
 This workflow does not install the MSI, write machine-wide browser integration,
 or exercise install, upgrade, repair, rollback, or uninstall transactions. It
 refuses to replace a development identity registered from another directory.

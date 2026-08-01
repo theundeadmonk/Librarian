@@ -665,6 +665,7 @@ namespace
         std::vector<Package> unhealthy_exact_packages;
         for (Package const& package : current_user_packages(manager))
         {
+            validate_external_location(package, install_folder);
             std::uint64_t const actual =
                 comparable_version(package.Id().Version());
             if (actual > expected)
@@ -675,7 +676,6 @@ namespace
             }
             if (actual == expected)
             {
-                validate_external_location(package, install_folder);
                 if (package.Status().VerifyIsOK())
                 {
                     exact_registered = true;

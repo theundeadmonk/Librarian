@@ -903,6 +903,9 @@ try {
         $releaseManifest.productVersion -eq $ExpectedProductVersion
     ) "The release manifest has an unexpected product version."
     Assert-True (
+        $releaseManifest.developmentLayout.desktopSha256 -match '^[0-9A-F]{64}$'
+    ) "The release manifest must bind the loose-layout desktop hash."
+    Assert-True (
         $releaseManifest.passkeyProvider.included -eq $false
     ) "The release manifest must state that the passkey provider is absent."
 
