@@ -43,6 +43,15 @@ namespace librarian::windows
         [[nodiscard]] bool BeginUnlock();
         void CompleteUnlock(ShellRequestOutcome outcome);
 
+        [[nodiscard]] bool BeginWindowsHelloUnlock();
+        void CompleteWindowsHelloUnlock(ShellRequestOutcome outcome);
+
+        [[nodiscard]] bool BeginWindowsHelloEnrollment();
+        void CompleteWindowsHelloEnrollment(ShellRequestOutcome outcome);
+
+        [[nodiscard]] bool BeginWindowsHelloRemoval();
+        void CompleteWindowsHelloRemoval(ShellRequestOutcome outcome);
+
         [[nodiscard]] bool BeginLock();
         void CompleteLock(ShellRequestOutcome outcome);
 
@@ -56,6 +65,11 @@ namespace librarian::windows
             SecretText const& master_password) const;
         [[nodiscard]] ShellRequestOutcome ExecuteUnlockRequest(
             SecretText const& master_password) const;
+        [[nodiscard]] ShellRequestOutcome ExecuteWindowsHelloUnlockRequest(
+            std::uintptr_t parent_window) const;
+        [[nodiscard]] ShellRequestOutcome ExecuteWindowsHelloEnrollmentRequest(
+            std::uintptr_t parent_window) const;
+        [[nodiscard]] ShellRequestOutcome ExecuteWindowsHelloRemovalRequest() const;
         [[nodiscard]] ShellRequestOutcome ExecuteLockRequest() const;
         [[nodiscard]] ShellRequestOutcome ExecuteSaveAccountRequest(
             AccountDraft const& account) const;
@@ -76,11 +90,16 @@ namespace librarian::windows
             RetryStatus,
             Create,
             Unlock,
+            UnlockWindowsHello,
+            EnrollWindowsHello,
+            RemoveWindowsHello,
             Lock,
             SaveAccount,
         };
 
         [[nodiscard]] bool BeginStatusRequest(PendingAction action);
+        [[nodiscard]] bool BeginWindowsHelloRequest(PendingAction action);
+        void CompleteWindowsHelloRequest(PendingAction action, ShellRequestOutcome outcome);
         void CompleteStatusRequest(PendingAction action, ShellRequestOutcome outcome);
         [[nodiscard]] bool BeginLockRequest();
         [[nodiscard]] ShellRequestOutcome AddAccountRefresh(ClientResult result) const;

@@ -26,6 +26,15 @@ namespace winrt::Librarian::Windows::implementation
         winrt::fire_and_forget OnUnlockClicked(
             winrt::Windows::Foundation::IInspectable const&,
             Microsoft::UI::Xaml::RoutedEventArgs const&);
+        winrt::fire_and_forget OnWindowsHelloUnlockClicked(
+            winrt::Windows::Foundation::IInspectable const&,
+            Microsoft::UI::Xaml::RoutedEventArgs const&);
+        winrt::fire_and_forget OnWindowsHelloEnrollClicked(
+            winrt::Windows::Foundation::IInspectable const&,
+            Microsoft::UI::Xaml::RoutedEventArgs const&);
+        winrt::fire_and_forget OnWindowsHelloRemoveClicked(
+            winrt::Windows::Foundation::IInspectable const&,
+            Microsoft::UI::Xaml::RoutedEventArgs const&);
         winrt::fire_and_forget OnLockClicked(
             winrt::Windows::Foundation::IInspectable const&,
             Microsoft::UI::Xaml::RoutedEventArgs const&);
@@ -53,6 +62,7 @@ namespace winrt::Librarian::Windows::implementation
         void CloseDesktopClient() noexcept;
         void ClearSetupPasswords();
         void ClearAccountEditor();
+        [[nodiscard]] std::uintptr_t ParentWindowHandle() noexcept;
 
         librarian::windows::ShellViewModel view_model_;
         std::atomic_bool is_closed_{ false };

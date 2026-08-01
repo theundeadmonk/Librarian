@@ -1,6 +1,7 @@
 #pragma once
 
 #include <memory>
+#include <cstdint>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -14,6 +15,7 @@ namespace librarian::windows
         Busy,
         Cancelled,
         InvalidCredentials,
+        WindowsHelloUnavailable,
         Locked,
         Unexpected,
     };
@@ -94,6 +96,9 @@ namespace librarian::windows
         [[nodiscard]] virtual ClientResult GetStatus() = 0;
         [[nodiscard]] virtual ClientResult CreateVault(SecretText const& master_password) = 0;
         [[nodiscard]] virtual ClientResult Unlock(SecretText const& master_password) = 0;
+        [[nodiscard]] virtual ClientResult UnlockWindowsHello(std::uintptr_t parent_window) = 0;
+        [[nodiscard]] virtual ClientResult EnrollWindowsHello(std::uintptr_t parent_window) = 0;
+        [[nodiscard]] virtual ClientResult RemoveWindowsHello() = 0;
         [[nodiscard]] virtual ClientResult Lock() = 0;
         [[nodiscard]] virtual AccountListResult ListAccounts() = 0;
         [[nodiscard]] virtual ClientResult SaveAccount(AccountDraft const& account) = 0;

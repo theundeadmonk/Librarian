@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [ValidateSet("Debug", "Release")]
+    [ValidateSet("Release")]
     [string]$Configuration = "Release",
 
     [ValidateSet("x64")]
@@ -11,49 +11,23 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
-$layoutDirectory = Join-Path $repoRoot "$Platform\$Configuration\Librarian.Windows"
-$manifestPath = Join-Path $layoutDirectory "AppxManifest.xml"
-$executablePath = Join-Path $layoutDirectory "Librarian.Windows.exe"
+$developmentRunner = Join-Path $PSScriptRoot "run-development.ps1"
+$developmentLayout = Join-Path $repoRoot "artifacts\development\Librarian"
+$desktopPath = Join-Path $developmentLayout "Librarian.Windows.exe"
+$logDirectory = Join-Path $repoRoot "artifacts\logs"
+$runId = [DateTime]::UtcNow.ToString("yyyyMMdd-HHmmss-ffff")
+$runnerOutput = Join-Path $logDirectory "windows-shell-ui-$runId.out.log"
+$runnerError = Join-Path $logDirectory "windows-shell-ui-$runId.err.log"
+$runnerProcess = $null
+$desktopProcess = $null
 
-foreach ($requiredPath in @($manifestPath, $executablePath)) {
-    if (-not (Test-Path -LiteralPath $requiredPath -PathType Leaf)) {
-        throw "Required Windows shell output is missing: $requiredPath. Run the Release|x64 build first."
-    }
+if (-not (Test-Path -LiteralPath $developmentRunner -PathType Leaf)) {
+    throw "The development package runner is missing: $developmentRunner"
 }
-
 if (-not [Environment]::UserInteractive) {
     throw "The Windows shell UI smoke test requires an interactive desktop session."
 }
-
-[xml]$manifest = Get-Content -LiteralPath $manifestPath -Raw
-$namespaceManager = [System.Xml.XmlNamespaceManager]::new($manifest.NameTable)
-$namespaceManager.AddNamespace(
-    "foundation",
-    "http://schemas.microsoft.com/appx/manifest/foundation/windows10"
-)
-
-$identity = $manifest.SelectSingleNode(
-    "/foundation:Package/foundation:Identity",
-    $namespaceManager
-)
-$application = $manifest.SelectSingleNode(
-    "/foundation:Package/foundation:Applications/foundation:Application",
-    $namespaceManager
-)
-if ($null -eq $identity -or $null -eq $application) {
-    throw "The generated package manifest does not contain one package identity and application."
-}
-
-$packageName = [string]$identity.Name
-$applicationId = [string]$application.Id
-$registeredByScript = $false
-$package = $null
-$process = $null
-$registrationMutex = [System.Threading.Mutex]::new(
-    $false,
-    "Local\Librarian.WindowsShellUi.PackageRegistration"
-)
-$registrationMutexHeld = $false
+New-Item -ItemType Directory -Path $logDirectory -Force | Out-Null
 
 function Test-SamePath {
     param(
@@ -71,211 +45,108 @@ function Test-SamePath {
     )
 }
 
-function Get-RegisteredApplicationIds {
-    param(
-        [Parameter(Mandatory)]
-        [string]$PackageFullName
-    )
+function Get-ExpectedDesktopProcess {
+    if (-not (Test-Path -LiteralPath $desktopPath -PathType Leaf)) {
+        return $null
+    }
 
-    [xml]$registeredManifest = Get-AppxPackageManifest -Package $PackageFullName
-    $registeredNamespaceManager = [System.Xml.XmlNamespaceManager]::new(
-        $registeredManifest.NameTable
-    )
-    $registeredNamespaceManager.AddNamespace(
-        "foundation",
-        "http://schemas.microsoft.com/appx/manifest/foundation/windows10"
-    )
+    return Get-Process -Name "Librarian.Windows" -ErrorAction SilentlyContinue |
+        Where-Object {
+            try {
+                Test-SamePath -First $_.Path -Second $desktopPath
+            }
+            catch {
+                $false
+            }
+        } |
+        Select-Object -First 1
+}
 
-    return @(
-        $registeredManifest.SelectNodes(
-            "/foundation:Package/foundation:Applications/foundation:Application",
-            $registeredNamespaceManager
-        ) |
-            ForEach-Object { [string]$_.Id }
-    )
+function Close-ExpectedDesktop {
+    param([System.Diagnostics.Process]$Process)
+
+    if ($null -eq $Process) {
+        return
+    }
+    try {
+        $Process.Refresh()
+        if ($Process.HasExited) {
+            return
+        }
+        if ($Process.CloseMainWindow()) {
+            try {
+                Wait-Process -Id $Process.Id -Timeout 10 -ErrorAction Stop
+                return
+            }
+            catch {
+                # Fall through to the bounded expected-process cleanup.
+            }
+        }
+        $current = Get-Process -Id $Process.Id -ErrorAction SilentlyContinue
+        if (
+            $null -ne $current -and
+            (Test-SamePath -First $current.Path -Second $desktopPath)
+        ) {
+            Stop-Process -Id $current.Id -Force
+        }
+    }
+    catch {
+        # The development runner performs its own final process cleanup.
+    }
 }
 
 try {
-    try {
-        $registrationMutexHeld = $registrationMutex.WaitOne(
-            [TimeSpan]::FromSeconds(30)
-        )
-    }
-    catch [System.Threading.AbandonedMutexException] {
-        $registrationMutexHeld = $true
-    }
-    if (-not $registrationMutexHeld) {
-        throw "Timed out waiting for exclusive Windows shell package registration ownership."
-    }
+    $runnerArguments = @(
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        ('"{0}"' -f $developmentRunner),
+        "-Configuration",
+        $Configuration,
+        "-Platform",
+        $Platform
+    )
+    $runnerProcess = Start-Process `
+        -FilePath "powershell.exe" `
+        -ArgumentList $runnerArguments `
+        -PassThru `
+        -WindowStyle Hidden `
+        -RedirectStandardOutput $runnerOutput `
+        -RedirectStandardError $runnerError
 
-    $existingPackages = @(Get-AppxPackage -Name $packageName)
-    if ($existingPackages.Count -gt 1) {
-        throw "More than one package is registered for the development identity '$packageName'."
-    }
-
-    if ($existingPackages.Count -eq 1) {
-        $package = $existingPackages[0]
-        if (-not (Test-SamePath -First $package.InstallLocation -Second $layoutDirectory)) {
+    $deadline = [DateTime]::UtcNow.AddSeconds(30)
+    do {
+        Start-Sleep -Milliseconds 100
+        $runnerProcess.Refresh()
+        if ($runnerProcess.HasExited) {
+            $runnerProcess.WaitForExit()
             throw (
-                "The development identity '$packageName' is already registered from " +
-                "'$($package.InstallLocation)'. Refusing to replace it with '$layoutDirectory'."
+                "The development package runner exited before Librarian started. " +
+                "Logs: $runnerOutput, $runnerError"
             )
         }
-        if ($package.Status -ne "Ok") {
-            throw "The existing development package is not healthy: $($package.Status)."
-        }
-        if (-not $package.IsDevelopmentMode) {
-            throw "The existing package uses the development identity but is not development-mode."
-        }
+        $desktopProcess = Get-ExpectedDesktopProcess
+    } while ($null -eq $desktopProcess -and [DateTime]::UtcNow -lt $deadline)
 
-        try {
-            Add-AppxPackage -Register $manifestPath
-        }
-        catch {
-            throw (
-                "Unable to refresh the loose Windows shell registration. Close Librarian " +
-                "and retry. $($_.Exception.Message)"
-            )
-        }
-
-        $refreshedPackages = @(Get-AppxPackage -Name $packageName)
-        if ($refreshedPackages.Count -ne 1) {
-            throw (
-                "Expected one development package after refreshing registration; found " +
-                "$($refreshedPackages.Count)."
-            )
-        }
-        $package = $refreshedPackages[0]
-        if (
-            -not $package.IsDevelopmentMode -or
-            $package.Status -ne "Ok" -or
-            -not (Test-SamePath -First $package.InstallLocation -Second $layoutDirectory)
-        ) {
-            throw "The development package was not healthy after refreshing registration."
-        }
-
-        $registeredApplicationIds = @(
-            Get-RegisteredApplicationIds -PackageFullName $package.PackageFullName
-        )
-        if (
-            $registeredApplicationIds.Count -ne 1 -or
-            $registeredApplicationIds[0] -ne $applicationId
-        ) {
-            throw (
-                "The refreshed development package registration does not expose " +
-                "application '$applicationId'."
-            )
-        }
-    }
-    else {
-        $registeredByScript = $true
-        try {
-            Add-AppxPackage -Register $manifestPath
-        }
-        catch {
-            throw (
-                "Unable to register the loose Windows shell layout. Verify Developer Mode and " +
-                "Windows App Runtime 2.3.1, then retry. $($_.Exception.Message)"
-            )
-        }
-
-        $package = Get-AppxPackage -Name $packageName
-        if ($null -eq $package -or $package.Status -ne "Ok") {
-            throw "The development package was not healthy after loose registration."
-        }
+    if ($null -eq $desktopProcess) {
+        throw "Librarian did not start within 30 seconds. Runner logs: $runnerOutput, $runnerError"
     }
 
     Add-Type -AssemblyName UIAutomationClient
     Add-Type -AssemblyName UIAutomationTypes
-    Add-Type -TypeDefinition @"
-using System;
-using System.Runtime.InteropServices;
-
-[Flags]
-public enum PackageActivateOptions
-{
-    None = 0
-}
-
-[ComImport]
-[Guid("2e941141-7f97-4756-ba1d-9decde894a3d")]
-[InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-public interface IApplicationActivationManager
-{
-    [PreserveSig]
-    int ActivateApplication(
-        [MarshalAs(UnmanagedType.LPWStr)] string applicationUserModelId,
-        [MarshalAs(UnmanagedType.LPWStr)] string arguments,
-        PackageActivateOptions options,
-        out uint processId);
-}
-
-[ComImport]
-[Guid("45BA127D-10A8-46EA-8AB7-56EA9078943C")]
-public class ApplicationActivationManager
-{
-}
-
-public static class PackageActivator
-{
-    public static uint Activate(string applicationUserModelId)
-    {
-        var manager =
-            (IApplicationActivationManager)new ApplicationActivationManager();
-        try
-        {
-            uint processId;
-            var result = manager.ActivateApplication(
-                applicationUserModelId,
-                null,
-                PackageActivateOptions.None,
-                out processId);
-            Marshal.ThrowExceptionForHR(result);
-            return processId;
-        }
-        finally
-        {
-            Marshal.FinalReleaseComObject(manager);
-        }
-    }
-}
-"@
-
-    $knownProcessIds = @(
-        Get-CimInstance Win32_Process -Filter "Name='Librarian.Windows.exe'" |
-            Where-Object {
-                $null -ne $_.ExecutablePath -and
-                (Test-SamePath -First $_.ExecutablePath -Second $executablePath)
-            } |
-            Select-Object -ExpandProperty ProcessId
-    )
-    if ($knownProcessIds.Count -ne 0) {
-        throw "Close the existing Librarian development app before running the UI smoke test."
-    }
-
-    $applicationUserModelId = "$($package.PackageFamilyName)!$applicationId"
-    $activatedProcessId = [PackageActivator]::Activate($applicationUserModelId)
-    $process = Get-Process -Id $activatedProcessId -ErrorAction Stop
-    $process.Refresh()
-    if (-not (Test-SamePath -First $process.Path -Second $executablePath)) {
-        throw (
-            "Package activation started process $activatedProcessId from '$($process.Path)' " +
-            "instead of '$executablePath'."
-        )
-    }
 
     $window = $null
     $deadline = [DateTime]::UtcNow.AddSeconds(20)
     do {
         Start-Sleep -Milliseconds 250
-        $process.Refresh()
-        if ($process.HasExited) {
-            throw "Librarian exited before exposing a window. Exit code: $($process.ExitCode)."
+        $desktopProcess.Refresh()
+        if ($desktopProcess.HasExited) {
+            throw "Librarian exited before exposing an accessibility window."
         }
-
         $processCondition = [System.Windows.Automation.PropertyCondition]::new(
             [System.Windows.Automation.AutomationElement]::ProcessIdProperty,
-            $process.Id
+            $desktopProcess.Id
         )
         $window = [System.Windows.Automation.AutomationElement]::RootElement.FindFirst(
             [System.Windows.Automation.TreeScope]::Children,
@@ -290,8 +161,8 @@ public static class PackageActivator
     $nativeWindowTitle = ""
     $deadline = [DateTime]::UtcNow.AddSeconds(5)
     do {
-        $process.Refresh()
-        $nativeWindowTitle = $process.MainWindowTitle
+        $desktopProcess.Refresh()
+        $nativeWindowTitle = $desktopProcess.MainWindowTitle
         if ($nativeWindowTitle -eq "Librarian") {
             break
         }
@@ -299,6 +170,8 @@ public static class PackageActivator
     } while ([DateTime]::UtcNow -lt $deadline)
 
     $accessibleNames = @()
+    $firstRun = $false
+    $locked = $false
     $deadline = [DateTime]::UtcNow.AddSeconds(10)
     do {
         $elements = $window.FindAll(
@@ -311,38 +184,70 @@ public static class PackageActivator
                 $accessibleNames += $element.Current.Name
             }
         }
-
-        if (
-            $accessibleNames -contains "Vault agent unavailable" -and
-            $accessibleNames -contains "Retry vault agent connection"
-        ) {
+        $firstRun = (
+            $accessibleNames -contains "First-run setup" -and
+            $accessibleNames -contains "Create local vault"
+        )
+        $locked = (
+            $accessibleNames -contains "Vault locked" -and
+            $accessibleNames -contains "Unlock with Windows Hello"
+        )
+        if ($firstRun -or $locked) {
             break
         }
-
         Start-Sleep -Milliseconds 100
-        $process.Refresh()
-        if ($process.HasExited) {
-            throw "Librarian exited before reaching its final fail-closed UI state."
+        $desktopProcess.Refresh()
+        if ($desktopProcess.HasExited) {
+            throw "Librarian exited before reaching its agent-backed UI state."
         }
     } while ([DateTime]::UtcNow -lt $deadline)
 
-    $retryElement = $window.FindFirst(
+    if (-not $firstRun -and -not $locked) {
+        $knownStateLabels = @(
+            "First-run setup",
+            "Vault locked",
+            "Accounts",
+            "Librarian needs attention",
+            "Vault agent unavailable"
+        )
+        $observedStateLabels = @(
+            $knownStateLabels | Where-Object { $accessibleNames -contains $_ }
+        )
+        $observedState = if ($observedStateLabels.Count -eq 0) {
+            "none"
+        }
+        else {
+            $observedStateLabels -join ", "
+        }
+        throw (
+            "Librarian did not reach the first-run or locked agent-backed UI state. " +
+            "Observed shell state: $observedState."
+        )
+    }
+
+    $expectedFocusName = if ($firstRun) {
+        "New master password"
+    }
+    else {
+        "Unlock with Windows Hello"
+    }
+    $focusElement = $window.FindFirst(
         [System.Windows.Automation.TreeScope]::Descendants,
         [System.Windows.Automation.PropertyCondition]::new(
             [System.Windows.Automation.AutomationElement]::NameProperty,
-            "Retry vault agent connection"
+            $expectedFocusName
         )
     )
-    if ($null -eq $retryElement) {
-        throw "The retry action was named but could not be resolved as an automation element."
+    if ($null -eq $focusElement) {
+        throw "The expected initial control could not be resolved as an automation element."
     }
 
-    $retryHasKeyboardFocus = $false
+    $initialControlHasKeyboardFocus = $false
     $focusedDetail = "No global focused automation element was reported."
     $deadline = [DateTime]::UtcNow.AddSeconds(5)
     do {
         Start-Sleep -Milliseconds 100
-        $retryHasKeyboardFocus = $retryElement.Current.HasKeyboardFocus
+        $initialControlHasKeyboardFocus = $focusElement.Current.HasKeyboardFocus
         $focusedElement = [System.Windows.Automation.AutomationElement]::FocusedElement
         if ($null -ne $focusedElement) {
             $focusedDetail = (
@@ -353,99 +258,59 @@ public static class PackageActivator
             )
         }
     } while (
-        -not $retryHasKeyboardFocus -and
+        -not $initialControlHasKeyboardFocus -and
         [DateTime]::UtcNow -lt $deadline
     )
 
     $checks = [ordered]@{
         "Window title" = $nativeWindowTitle -eq "Librarian"
-        "Fail-closed state" = $accessibleNames -contains "Vault agent unavailable"
-        "Retry action" = $accessibleNames -contains "Retry vault agent connection"
-        "Initial keyboard focus" = $retryHasKeyboardFocus
+        "Agent-backed state" = $firstRun -or $locked
+        "Master-password fallback" = (
+            $accessibleNames -contains "New master password" -or
+            $accessibleNames -contains "Master password"
+        )
+        "Initial keyboard focus" = $initialControlHasKeyboardFocus
+    }
+    $failedChecks = @($checks.GetEnumerator() | Where-Object { -not $_.Value })
+    if ($failedChecks.Count -ne 0) {
+        $failedNames = ($failedChecks | ForEach-Object { $_.Key }) -join ", "
+        throw "Windows shell UI smoke checks failed: $failedNames. $focusedDetail"
     }
 
-    foreach ($check in $checks.GetEnumerator()) {
-        if (-not $check.Value) {
-            $focusDetail = if ($check.Key -eq "Initial keyboard focus") {
-                " $focusedDetail"
-            }
-            else {
-                ""
-            }
-            throw "Windows shell UI smoke check failed: $($check.Key).$focusDetail"
-        }
-        Write-Host "[PASS] $($check.Key)"
+    Close-ExpectedDesktop -Process $desktopProcess
+    $desktopProcess = $null
+    if (-not $runnerProcess.WaitForExit(30000)) {
+        throw "The development runner did not finish cleanup within 30 seconds."
+    }
+    $runnerProcess.WaitForExit()
+    $runnerProcess.Refresh()
+    $runnerOutputText = Get-Content -LiteralPath $runnerOutput -Raw
+    $runnerErrorText = Get-Content -LiteralPath $runnerError -Raw
+    if (
+        -not [string]::IsNullOrWhiteSpace($runnerErrorText) -or
+        $runnerOutputText -notmatch "Librarian development session ended\."
+    ) {
+        throw (
+            "The development runner did not report successful cleanup. " +
+            "Logs: $runnerOutput, $runnerError"
+        )
     }
 
-    Write-Host "Windows shell packaged UI smoke test passed."
+    Write-Host "Windows shell UI smoke test passed."
+    Write-Host "State: $(if ($firstRun) { 'First run' } else { 'Locked' })"
+    Write-Host "Initial focus: $expectedFocusName"
 }
 finally {
-    try {
+    Close-ExpectedDesktop -Process $desktopProcess
+    if ($null -ne $runnerProcess) {
         try {
-            if ($null -ne $process) {
-                $process.Refresh()
-                if (-not $process.HasExited) {
-                    $actualPath = $process.Path
-                    if (Test-SamePath -First $actualPath -Second $executablePath) {
-                        Stop-Process -Id $process.Id -Force
-                        Wait-Process -Id $process.Id -Timeout 10 -ErrorAction SilentlyContinue
-                    }
-                    else {
-                        Write-Warning (
-                            "Did not stop process $($process.Id) because its executable path changed to " +
-                            "'$actualPath'."
-                        )
-                    }
-                }
+            $runnerProcess.Refresh()
+            if (-not $runnerProcess.HasExited) {
+                Wait-Process -Id $runnerProcess.Id -Timeout 30 -ErrorAction SilentlyContinue
             }
         }
-        finally {
-            if ($registeredByScript) {
-                try {
-                    $packageToRemove = $package
-                    if ($null -eq $packageToRemove) {
-                        $packageToRemove = Get-AppxPackage -Name $packageName |
-                            Where-Object {
-                                $_.IsDevelopmentMode -and
-                                (Test-SamePath -First $_.InstallLocation -Second $layoutDirectory)
-                            } |
-                            Select-Object -First 1
-                    }
-
-                    if (
-                        $null -ne $packageToRemove -and
-                        $packageToRemove.IsDevelopmentMode -and
-                        (Test-SamePath -First $packageToRemove.InstallLocation -Second $layoutDirectory)
-                    ) {
-                        Remove-AppxPackage -Package $packageToRemove.PackageFullName
-                    }
-
-                    $remainingRegistration = Get-AppxPackage -Name $packageName |
-                        Where-Object {
-                            $_.IsDevelopmentMode -and
-                            (Test-SamePath -First $_.InstallLocation -Second $layoutDirectory)
-                        } |
-                        Select-Object -First 1
-                    if ($null -ne $remainingRegistration) {
-                        throw (
-                            "The temporary development package remains registered as " +
-                            "'$($remainingRegistration.PackageFullName)'."
-                        )
-                    }
-                }
-                catch {
-                    throw (
-                        "The UI smoke test could not remove the development package registration it " +
-                        "created: $($_.Exception.Message)"
-                    )
-                }
-            }
+        catch {
+            # Preserve the runner so it can finish its own package cleanup.
         }
-    }
-    finally {
-        if ($registrationMutexHeld) {
-            $registrationMutex.ReleaseMutex()
-        }
-        $registrationMutex.Dispose()
     }
 }

@@ -23,6 +23,7 @@ rustix = { version = "=1.1.4", features = ["fs"] }
 
 [target.'cfg(windows)'.dependencies]
 librarian-windows-hello-agent = { path = "../../platform/windows-hello-agent" }
+librarian-windows-ipc = { path = "../../platform/windows-ipc" }
 same-file = "=1.0.6"
 
 [lints]

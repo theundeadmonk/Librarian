@@ -436,6 +436,7 @@ dependencies = [
  "librarian-vault-core",
  "librarian-vault-format",
  "librarian-windows-hello-agent",
+ "librarian-windows-ipc",
  "minicbor",
  "rusqlite",
  "rustix",

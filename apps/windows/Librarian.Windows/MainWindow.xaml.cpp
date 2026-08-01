@@ -1,6 +1,7 @@
 #include "pch.h"
 #include "MainWindow.xaml.h"
 
+#include <microsoft.ui.xaml.window.h>
 #include <winrt/Microsoft.UI.Dispatching.h>
 #include <winrt/Microsoft.UI.Xaml.Automation.h>
 #include <winrt/Microsoft.UI.Xaml.Input.h>
@@ -10,6 +11,7 @@
 #endif
 
 #include <memory>
+#include <cstdint>
 #include <string>
 #include <utility>
 
@@ -219,6 +221,158 @@ namespace winrt::Librarian::Windows::implementation
                 return;
             }
             lifetime->view_model_.CompleteUnlock(std::move(*outcome));
+            lifetime->RenderSecurityTransitionIfOpen();
+        }))
+        {
+            co_return;
+        }
+    }
+
+    fire_and_forget MainWindow::OnWindowsHelloUnlockClicked(
+        [[maybe_unused]] IInspectable const& sender,
+        [[maybe_unused]] RoutedEventArgs const& event)
+    {
+        auto lifetime = get_strong();
+        auto const dispatcher = DispatcherQueue();
+        auto const parent_window = ParentWindowHandle();
+
+        if (!view_model_.BeginWindowsHelloUnlock())
+        {
+            co_return;
+        }
+
+        Render();
+        co_await resume_background();
+        if (lifetime->is_closed_.load(std::memory_order_acquire))
+        {
+            co_return;
+        }
+        auto outcome = std::make_shared<librarian::windows::ShellRequestOutcome>(
+            lifetime->view_model_.ExecuteWindowsHelloUnlockRequest(parent_window));
+        if (lifetime->is_closed_.load(std::memory_order_acquire))
+        {
+            co_return;
+        }
+        if (!dispatcher.TryEnqueue([lifetime, outcome]
+        {
+            if (lifetime->is_closed_.load(std::memory_order_acquire))
+            {
+                return;
+            }
+            lifetime->view_model_.CompleteWindowsHelloUnlock(std::move(*outcome));
+            lifetime->RenderSecurityTransitionIfOpen();
+        }))
+        {
+            co_return;
+        }
+    }
+
+    fire_and_forget MainWindow::OnWindowsHelloEnrollClicked(
+        [[maybe_unused]] IInspectable const& sender,
+        [[maybe_unused]] RoutedEventArgs const& event)
+    {
+        auto lifetime = get_strong();
+        auto confirmation = ContentDialog();
+        confirmation.XamlRoot(RootLayout().XamlRoot());
+        confirmation.Title(box_value(L"Enable Windows Hello unlock?"));
+        confirmation.Content(box_value(
+            L"Windows will ask you to create or verify a passkey for this vault. "
+            L"Your master password remains the recovery and fallback unlock method."));
+        confirmation.PrimaryButtonText(L"Enable");
+        confirmation.CloseButtonText(L"Cancel");
+        confirmation.DefaultButton(ContentDialogButton::Close);
+
+        if (co_await confirmation.ShowAsync() != ContentDialogResult::Primary)
+        {
+            co_return;
+        }
+        if (lifetime->is_closed_.load(std::memory_order_acquire))
+        {
+            co_return;
+        }
+
+        auto const dispatcher = DispatcherQueue();
+        auto const parent_window = ParentWindowHandle();
+        if (!view_model_.BeginWindowsHelloEnrollment())
+        {
+            co_return;
+        }
+
+        Render();
+        co_await resume_background();
+        if (lifetime->is_closed_.load(std::memory_order_acquire))
+        {
+            co_return;
+        }
+        auto outcome = std::make_shared<librarian::windows::ShellRequestOutcome>(
+            lifetime->view_model_.ExecuteWindowsHelloEnrollmentRequest(parent_window));
+        if (lifetime->is_closed_.load(std::memory_order_acquire))
+        {
+            co_return;
+        }
+        if (!dispatcher.TryEnqueue([lifetime, outcome]
+        {
+            if (lifetime->is_closed_.load(std::memory_order_acquire))
+            {
+                return;
+            }
+            lifetime->view_model_.CompleteWindowsHelloEnrollment(std::move(*outcome));
+            lifetime->RenderSecurityTransitionIfOpen();
+        }))
+        {
+            co_return;
+        }
+    }
+
+    fire_and_forget MainWindow::OnWindowsHelloRemoveClicked(
+        [[maybe_unused]] IInspectable const& sender,
+        [[maybe_unused]] RoutedEventArgs const& event)
+    {
+        auto lifetime = get_strong();
+        auto confirmation = ContentDialog();
+        confirmation.XamlRoot(RootLayout().XamlRoot());
+        confirmation.Title(box_value(L"Remove Windows Hello unlock?"));
+        confirmation.Content(box_value(
+            L"This removes the Windows Hello convenience unlock. "
+            L"Your vault and master-password unlock remain unchanged."));
+        confirmation.PrimaryButtonText(L"Remove");
+        confirmation.CloseButtonText(L"Cancel");
+        confirmation.DefaultButton(ContentDialogButton::Close);
+
+        if (co_await confirmation.ShowAsync() != ContentDialogResult::Primary)
+        {
+            co_return;
+        }
+        if (lifetime->is_closed_.load(std::memory_order_acquire))
+        {
+            co_return;
+        }
+
+        auto const dispatcher = DispatcherQueue();
+        if (!view_model_.BeginWindowsHelloRemoval())
+        {
+            co_return;
+        }
+
+        Render();
+        co_await resume_background();
+        if (lifetime->is_closed_.load(std::memory_order_acquire))
+        {
+            co_return;
+        }
+        auto outcome = std::make_shared<librarian::windows::ShellRequestOutcome>(
+            lifetime->view_model_.ExecuteWindowsHelloRemovalRequest());
+        if (lifetime->is_closed_.load(std::memory_order_acquire))
+        {
+            co_return;
+        }
+        if (!dispatcher.TryEnqueue([lifetime, outcome]
+        {
+            if (lifetime->is_closed_.load(std::memory_order_acquire))
+            {
+                return;
+            }
+            lifetime->view_model_.CompleteWindowsHelloRemoval(std::move(*outcome));
             lifetime->RenderSecurityTransitionIfOpen();
         }))
         {
@@ -470,7 +624,7 @@ namespace winrt::Librarian::Windows::implementation
         case ShellState::FirstRun:
             return SetupPasswordBox().Focus(FocusState::Programmatic);
         case ShellState::Locked:
-            return MasterPasswordBox().Focus(FocusState::Programmatic);
+            return WindowsHelloUnlockButton().Focus(FocusState::Programmatic);
         case ShellState::Unlocking:
         case ShellState::Saving:
             return UnlockingProgressRing().Focus(FocusState::Programmatic);
@@ -593,5 +747,28 @@ namespace winrt::Librarian::Windows::implementation
         OriginTextBox().Text(L"");
         UsernameTextBox().Text(L"");
         AccountPasswordBox().Password(L"");
+    }
+
+    std::uintptr_t MainWindow::ParentWindowHandle() noexcept
+    {
+        try
+        {
+            auto const window_native = this->try_as<::IWindowNative>();
+            if (!window_native)
+            {
+                return 0U;
+            }
+
+            HWND window_handle{};
+            if (FAILED(window_native->get_WindowHandle(&window_handle)))
+            {
+                return 0U;
+            }
+            return reinterpret_cast<std::uintptr_t>(window_handle);
+        }
+        catch (...)
+        {
+            return 0U;
+        }
     }
 }

@@ -87,19 +87,29 @@
                         x:Name="LockedPanel"
                         Spacing="12"
                         Visibility="Collapsed">
+                        <Button
+                            x:Name="WindowsHelloUnlockButton"
+                            AutomationProperties.Name="Unlock with Windows Hello"
+                            Click="OnWindowsHelloUnlockClicked"
+                            Content="Unlock with Windows Hello"
+                            HorizontalAlignment="Left"
+                            TabIndex="1" />
+                        <TextBlock
+                            Text="Or use your master password."
+                            TextWrapping="Wrap" />
                         <PasswordBox
                             x:Name="MasterPasswordBox"
                             AutomationProperties.Name="Master password"
                             Header="Master password"
                             PasswordRevealMode="Hidden"
-                            TabIndex="1" />
+                            TabIndex="2" />
                         <Button
                             x:Name="UnlockButton"
                             AutomationProperties.Name="Unlock local vault"
                             Click="OnUnlockClicked"
                             Content="Unlock"
                             HorizontalAlignment="Left"
-                            TabIndex="2" />
+                            TabIndex="3" />
                     </StackPanel>
 
                     <StackPanel
@@ -148,6 +158,36 @@
                                 TabIndex="2" />
                         </StackPanel>
 
+                        <Border
+                            BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                            BorderThickness="1"
+                            CornerRadius="8"
+                            Padding="16">
+                            <StackPanel Spacing="8">
+                                <TextBlock
+                                    AutomationProperties.HeadingLevel="Level3"
+                                    Style="{StaticResource BodyStrongTextBlockStyle}"
+                                    Text="Windows Hello unlock" />
+                                <TextBlock
+                                    Text="Use a Windows Hello passkey as a convenience unlock. Your master password remains available."
+                                    TextWrapping="Wrap" />
+                                <Button
+                                    x:Name="WindowsHelloEnrollButton"
+                                    AutomationProperties.Name="Enable or replace Windows Hello unlock"
+                                    Click="OnWindowsHelloEnrollClicked"
+                                    Content="Enable or replace"
+                                    HorizontalAlignment="Left"
+                                    TabIndex="3" />
+                                <Button
+                                    x:Name="WindowsHelloRemoveButton"
+                                    AutomationProperties.Name="Remove Windows Hello unlock"
+                                    Click="OnWindowsHelloRemoveClicked"
+                                    Content="Remove"
+                                    HorizontalAlignment="Left"
+                                    TabIndex="4" />
+                            </StackPanel>
+                        </Border>
+
                         <TextBlock
                             x:Name="EmptyAccountsTextBlock"
                             Text="No accounts are stored in this vault yet."
@@ -158,7 +198,7 @@
                             AutomationProperties.Name="Website accounts"
                             IsItemClickEnabled="False"
                             SelectionMode="None"
-                            TabIndex="3" />
+                            TabIndex="5" />
 
                         <Border
                             x:Name="AccountEditorPanel"
@@ -176,37 +216,37 @@
                                     x:Name="ServiceNameTextBox"
                                     AutomationProperties.Name="Service name"
                                     Header="Service name"
-                                    TabIndex="4" />
+                                    TabIndex="6" />
                                 <TextBox
                                     x:Name="OriginTextBox"
                                     AutomationProperties.Name="Website origin"
                                     Header="Website origin"
                                     PlaceholderText="https://example.com"
-                                    TabIndex="5" />
+                                    TabIndex="7" />
                                 <TextBox
                                     x:Name="UsernameTextBox"
                                     AutomationProperties.Name="Username"
                                     Header="Username"
-                                    TabIndex="6" />
+                                    TabIndex="8" />
                                 <PasswordBox
                                     x:Name="AccountPasswordBox"
                                     AutomationProperties.Name="Account password"
                                     Header="Password"
                                     PasswordRevealMode="Hidden"
-                                    TabIndex="7" />
+                                    TabIndex="9" />
                                 <StackPanel Spacing="8">
                                     <Button
                                         AutomationProperties.Name="Save website account"
                                         Click="OnSaveAccountClicked"
                                         Content="Save"
                                         HorizontalAlignment="Left"
-                                        TabIndex="8" />
+                                        TabIndex="10" />
                                     <Button
                                         AutomationProperties.Name="Cancel account editing"
                                         Click="OnCancelAccountClicked"
                                         Content="Cancel"
                                         HorizontalAlignment="Left"
-                                        TabIndex="9" />
+                                        TabIndex="11" />
                                 </StackPanel>
                             </StackPanel>
                         </Border>

@@ -89,10 +89,11 @@ therefore fails validation instead of launching a mixed development set.
 This workflow does not install the MSI, write machine-wide browser integration,
 or exercise install, upgrade, repair, rollback, or uninstall transactions. It
 refuses to replace a development identity registered from another directory.
-Developer Mode is required. At the current foundation stage, the vault-agent
-executable exits after its bounded startup status and the desktop therefore
-shows its intentional fail-closed agent-unavailable state; later product issues
-will connect the already implemented agent protocol and UI surfaces.
+Developer Mode is required. The packaged desktop and vault agent communicate
+over the authenticated local transport. The desktop can create or unlock the
+local vault, manage the current website-account subset, and enroll, use, or
+remove the optional Windows Hello convenience unlock. Use disposable test
+values only; the product remains development-only.
 
 ## Interactive Windows shell smoke test
 
@@ -104,10 +105,11 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\test-windows-s
 ```
 
 The smoke test uses the generated loose package layout, starts Librarian
-through its package application ID, and verifies the fail-closed state, retry
-action, accessibility tree, and initial keyboard focus. It refuses to replace a
-development package registered from another location. If it creates the loose
-registration, it removes that registration when the test finishes; an existing
+through its package application ID, and verifies an agent-backed first-run or
+locked state, the master-password fallback, accessibility tree, and initial
+keyboard focus. It refuses to replace a development package registered from
+another location. If it creates the loose registration, it removes that
+registration when the test finishes; an existing
 registration for the same build layout is preserved.
 
 This interactive test is the authoritative desktop-launch check. GitHub-hosted
@@ -158,18 +160,18 @@ single website-account CRUD subset from issues #10 and #11. Each mutation
 commits one opaque record envelope and the next encrypted manifest generation
 in the same immediate transaction. Account origins use the pinned WHATWG URL
 parser and are stored as exact normalized HTTP(S) origins. Browser site access,
-production authenticated IPC, native messaging, Windows Hello, and production
-passkey storage remain disabled until their security gates and implementation
-issues are complete. The Windows local-IPC probe validates operating-system
-assumptions with disposable marker bytes; it is not the issue #13 production
-transport. The Windows Hello native component owns platform-credential
-enrollment, PRF evaluation, strict authenticator-response validation, and
-credential removal. Its build-time test executable uses synthetic responses
-and invalid-argument paths only; it never displays a prompt or creates a
-credential. The WinUI-to-agent enrollment and unlock path remains disabled
-until the native ceremony runs inside the trusted agent; raw PRF results must
-never cross desktop-controlled IPC. Tests use uniquely identifiable disposable
-values; do not use the current build with real credentials.
+native messaging, and production passkey storage remain disabled until their
+security gates and implementation issues are complete. The packaged desktop now
+reaches the vault agent through the authenticated issue #13 transport. The
+Windows Hello native component owns platform-credential enrollment, PRF
+evaluation, strict authenticator-response validation, and credential removal
+inside the trusted agent; raw PRF results never cross desktop-controlled IPC.
+Its build-time test executable uses synthetic responses and invalid-argument
+paths only; it never displays a prompt or creates a credential. Interactive
+development sessions may display the real Windows-owned prompt and create a
+disposable development credential only after explicit user consent. Tests use
+uniquely identifiable disposable values; do not use the current build with real
+credentials.
 
 ## Dependency updates
 

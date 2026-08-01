@@ -1,4 +1,5 @@
 #include "DesktopClient.h"
+#include "DesktopTransport.h"
 
 #include <Windows.h>
 
@@ -25,6 +26,23 @@ namespace librarian::windows
 
             [[nodiscard]] ClientResult Unlock(
                 [[maybe_unused]] SecretText const& master_password) override
+            {
+                return ClosedOrUnavailable();
+            }
+
+            [[nodiscard]] ClientResult UnlockWindowsHello(
+                [[maybe_unused]] std::uintptr_t const parent_window) override
+            {
+                return ClosedOrUnavailable();
+            }
+
+            [[nodiscard]] ClientResult EnrollWindowsHello(
+                [[maybe_unused]] std::uintptr_t const parent_window) override
+            {
+                return ClosedOrUnavailable();
+            }
+
+            [[nodiscard]] ClientResult RemoveWindowsHello() override
             {
                 return ClosedOrUnavailable();
             }
@@ -134,6 +152,10 @@ namespace librarian::windows
 
     std::shared_ptr<IDesktopClient> MakeDesktopClient()
     {
+        if (auto client = TryMakePackagedDesktopClient())
+        {
+            return client;
+        }
         return std::make_shared<UnavailableDesktopClient>();
     }
 }

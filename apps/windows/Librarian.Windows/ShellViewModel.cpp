@@ -13,6 +13,16 @@ namespace librarian::windows
             L"Unlock Librarian with your master password.";
         constexpr wchar_t UnlockingMessage[] =
             L"Librarian is completing a security-sensitive request.";
+        constexpr wchar_t WindowsHelloMessage[] =
+            L"Complete the Windows Hello prompt to continue.";
+        constexpr wchar_t WindowsHelloFallbackMessage[] =
+            L"Windows Hello could not complete the request. The vault is unchanged, and your master password still works.";
+        constexpr wchar_t WindowsHelloCancelledMessage[] =
+            L"Windows Hello was canceled. The vault is unchanged, and your master password still works.";
+        constexpr wchar_t WindowsHelloEnrolledMessage[] =
+            L"Windows Hello unlock is enabled. Your master password remains available.";
+        constexpr wchar_t WindowsHelloRemovedMessage[] =
+            L"Windows Hello unlock was removed. Your master password and vault are unchanged.";
         constexpr wchar_t LockingMessage[] =
             L"Librarian is locking the vault through the local vault agent.";
         constexpr wchar_t SavingMessage[] =
@@ -130,6 +140,74 @@ namespace librarian::windows
 
         pending_action_ = PendingAction::None;
         Apply(std::move(outcome));
+    }
+
+    bool ShellViewModel::BeginWindowsHelloUnlock()
+    {
+        if (state_ != ShellState::Locked)
+        {
+            return false;
+        }
+        return BeginWindowsHelloRequest(PendingAction::UnlockWindowsHello);
+    }
+
+    void ShellViewModel::CompleteWindowsHelloUnlock(ShellRequestOutcome outcome)
+    {
+        CompleteWindowsHelloRequest(
+            PendingAction::UnlockWindowsHello,
+            std::move(outcome));
+    }
+
+    bool ShellViewModel::BeginWindowsHelloEnrollment()
+    {
+        if (state_ != ShellState::Unlocked)
+        {
+            return false;
+        }
+        return BeginWindowsHelloRequest(PendingAction::EnrollWindowsHello);
+    }
+
+    void ShellViewModel::CompleteWindowsHelloEnrollment(ShellRequestOutcome outcome)
+    {
+        if (pending_action_ != PendingAction::EnrollWindowsHello)
+        {
+            return;
+        }
+        bool const succeeded = outcome.request.error == ClientError::None &&
+            outcome.request.status == VaultStatus::Unlocked;
+        CompleteWindowsHelloRequest(
+            PendingAction::EnrollWindowsHello,
+            std::move(outcome));
+        if (succeeded && state_ == ShellState::Unlocked)
+        {
+            message_ = WindowsHelloEnrolledMessage;
+        }
+    }
+
+    bool ShellViewModel::BeginWindowsHelloRemoval()
+    {
+        if (state_ != ShellState::Unlocked)
+        {
+            return false;
+        }
+        return BeginWindowsHelloRequest(PendingAction::RemoveWindowsHello);
+    }
+
+    void ShellViewModel::CompleteWindowsHelloRemoval(ShellRequestOutcome outcome)
+    {
+        if (pending_action_ != PendingAction::RemoveWindowsHello)
+        {
+            return;
+        }
+        bool const succeeded = outcome.request.error == ClientError::None &&
+            outcome.request.status == VaultStatus::Unlocked;
+        CompleteWindowsHelloRequest(
+            PendingAction::RemoveWindowsHello,
+            std::move(outcome));
+        if (succeeded && state_ == ShellState::Unlocked)
+        {
+            message_ = WindowsHelloRemovedMessage;
+        }
     }
 
     bool ShellViewModel::BeginLock()
@@ -260,6 +338,44 @@ namespace librarian::windows
         }
     }
 
+    ShellRequestOutcome ShellViewModel::ExecuteWindowsHelloUnlockRequest(
+        std::uintptr_t const parent_window) const
+    {
+        try
+        {
+            return AddAccountRefresh(client_->UnlockWindowsHello(parent_window));
+        }
+        catch (...)
+        {
+            return { { ClientError::Unexpected, VaultStatus::Locked }, std::nullopt };
+        }
+    }
+
+    ShellRequestOutcome ShellViewModel::ExecuteWindowsHelloEnrollmentRequest(
+        std::uintptr_t const parent_window) const
+    {
+        try
+        {
+            return AddAccountRefresh(client_->EnrollWindowsHello(parent_window));
+        }
+        catch (...)
+        {
+            return { { ClientError::Unexpected, VaultStatus::Locked }, std::nullopt };
+        }
+    }
+
+    ShellRequestOutcome ShellViewModel::ExecuteWindowsHelloRemovalRequest() const
+    {
+        try
+        {
+            return AddAccountRefresh(client_->RemoveWindowsHello());
+        }
+        catch (...)
+        {
+            return { { ClientError::Unexpected, VaultStatus::Locked }, std::nullopt };
+        }
+    }
+
     ShellRequestOutcome ShellViewModel::ExecuteLockRequest() const
     {
         try
@@ -329,6 +445,37 @@ namespace librarian::windows
         state_ = ShellState::Unlocking;
         message_ = UnlockingMessage;
         return true;
+    }
+
+    bool ShellViewModel::BeginWindowsHelloRequest(PendingAction const action)
+    {
+        if (pending_action_ != PendingAction::None)
+        {
+            return false;
+        }
+        resume_state_ = state_;
+        pending_action_ = action;
+        account_editor_visible_ = false;
+        state_ = ShellState::Unlocking;
+        message_ = WindowsHelloMessage;
+        return true;
+    }
+
+    void ShellViewModel::CompleteWindowsHelloRequest(
+        PendingAction const action,
+        ShellRequestOutcome outcome)
+    {
+        if (pending_action_ != action)
+        {
+            return;
+        }
+        bool const cancelled = outcome.request.error == ClientError::Cancelled;
+        pending_action_ = PendingAction::None;
+        Apply(std::move(outcome));
+        if (cancelled)
+        {
+            message_ = WindowsHelloCancelledMessage;
+        }
     }
 
     void ShellViewModel::CompleteStatusRequest(
@@ -458,6 +605,18 @@ namespace librarian::windows
             return;
         }
 
+        if (error == ClientError::WindowsHelloUnavailable)
+        {
+            state_ = resume_state_;
+            message_ = WindowsHelloFallbackMessage;
+            if (state_ != ShellState::Unlocked)
+            {
+                account_editor_visible_ = false;
+                accounts_.clear();
+            }
+            return;
+        }
+
         account_editor_visible_ = false;
         accounts_.clear();
 
@@ -479,6 +638,8 @@ namespace librarian::windows
         case ClientError::InvalidCredentials:
             state_ = ShellState::Locked;
             message_ = InvalidCredentialsMessage;
+            break;
+        case ClientError::WindowsHelloUnavailable:
             break;
         case ClientError::Locked:
             state_ = ShellState::Locked;
