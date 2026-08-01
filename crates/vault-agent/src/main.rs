@@ -16,15 +16,16 @@ use std::{
 #[cfg(windows)]
 use librarian_agent_protocol::{
     CURRENT_VERSION, ClientHello, Connection, ConnectionLimits, EndpointDescriptor,
-    FEATURE_WINDOWS_HELLO, Frame, FrameHeader, HANDSHAKE_TIMEOUT_MS, MessageKind, RequestEnvelope,
-    ResponseEnvelope,
+    FEATURE_WINDOWS_HELLO, Frame, FrameHeader, HANDSHAKE_TIMEOUT_MS, MessageKind,
+    PASSKEY_TIMEOUT_MS, RequestEnvelope, ResponseEnvelope,
 };
 #[cfg(windows)]
 use librarian_vault_agent::{AgentRuntime, DispatchError};
 #[cfg(windows)]
 use librarian_windows_ipc::{
     ComponentRole, EndpointDescriptorStore, ListenerPool, PeerObservation, PeerPolicy,
-    PipeConnection, TransportError, current_process_observation, observe_pipe_client,
+    PipeConnection, SessionSecurityMonitor, TransportError, current_process_observation,
+    observe_pipe_client,
 };
 #[cfg(windows)]
 use sha2::{Digest, Sha256};
@@ -101,6 +102,7 @@ fn run() -> Result<(), HostError> {
     let observation = current.observation();
     let (package_full_name, package_family_name, install_root) = validate_agent(observation)?;
     let paths = local_state_paths(package_family_name)?;
+    let lifecycle = SessionSecurityMonitor::register().map_err(|_| HostError::Identity)?;
     let runtime = Arc::new(
         AgentRuntime::start_with_windows_hello(&paths.vault, &paths.windows_hello_state)
             .map_err(|_| HostError::Runtime)?,
@@ -118,6 +120,14 @@ fn run() -> Result<(), HostError> {
     let _published = PublishedEndpoint { store: &store };
 
     loop {
+        if lifecycle
+            .shutdown_requested()
+            .map_err(|_| HostError::Identity)?
+        {
+            store.remove().map_err(|_| HostError::Discovery)?;
+            runtime.shutdown().map_err(|_| HostError::Runtime)?;
+            return Ok(());
+        }
         reap_finished(&mut workers);
         drain_recycled(&mut pool, &recycle_rx)?;
         if pool.available_listeners() == 0 {
@@ -377,7 +387,12 @@ fn serve_frames(
                 let worker_pipe = Arc::clone(pipe);
                 let worker_connection = Arc::clone(connection);
                 let (admission_tx, admission_rx) = mpsc::sync_channel(1);
+                let admission_timeout = admission_timeout(&envelope);
                 workers.push(thread::spawn(move || {
+                    if worker_pipe.ensure_peer_alive().is_err() {
+                        let _ = admission_tx.send(false);
+                        return;
+                    }
                     let callback_tx = admission_tx.clone();
                     let result = worker_runtime.dispatch_with_admission(
                         &worker_connection,
@@ -399,9 +414,7 @@ fn serve_frames(
                         let _ = admission_tx.send(false);
                     }
                 }));
-                if admission_rx.recv_timeout(Duration::from_millis(u64::from(HANDSHAKE_TIMEOUT_MS)))
-                    != Ok(true)
-                {
+                if admission_rx.recv_timeout(admission_timeout) != Ok(true) {
                     break;
                 }
             }
@@ -415,6 +428,12 @@ fn serve_frames(
     for worker in workers {
         let _ = worker.join();
     }
+}
+
+#[cfg(windows)]
+fn admission_timeout(envelope: &RequestEnvelope) -> Duration {
+    Duration::from_millis(u64::from(envelope.timeout_ms().min(PASSKEY_TIMEOUT_MS)))
+        .saturating_add(FRAME_WRITE_TIMEOUT)
 }
 
 #[cfg(windows)]
@@ -451,4 +470,24 @@ fn sha256_file(path: &Path) -> Result<[u8; 32], HostError> {
         hasher.update(&buffer[..read]);
     }
     Ok(hasher.finalize().into())
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::*;
+    use librarian_agent_protocol::OperationCode;
+
+    #[test]
+    fn admission_wait_includes_the_response_write_bound() {
+        let request = RequestEnvelope::new(
+            OperationCode::Status,
+            0,
+            5_000,
+            None,
+            Zeroizing::new(Vec::new()),
+        )
+        .expect("status envelope");
+
+        assert_eq!(admission_timeout(&request), Duration::from_secs(7));
+    }
 }

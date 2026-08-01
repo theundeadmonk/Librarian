@@ -24,6 +24,6 @@ pub use discovery::{DiscoveryError, EndpointDescriptorStore};
 
 #[cfg(windows)]
 pub use platform::{
-    ListenerPool, PeerHandle, PipeConnection, TransportError, current_process_observation,
-    observe_pipe_client, observe_pipe_server,
+    ListenerPool, PeerHandle, PipeConnection, SessionSecurityMonitor, TransportError,
+    current_process_observation, observe_pipe_client, observe_pipe_server,
 };

@@ -38,6 +38,7 @@ namespace librarian::windows
         constexpr std::size_t frame_header_bytes = 40U;
         constexpr std::size_t maximum_payload_bytes = 65'536U;
         constexpr std::size_t maximum_descriptor_bytes = 4'096U;
+        constexpr std::size_t maximum_account_records = 100'000U;
         constexpr std::uint16_t protocol_major = 1U;
         constexpr std::uint16_t protocol_minor = 1U;
         constexpr std::uint16_t windows_hello_feature = 1U;
@@ -2057,7 +2058,7 @@ namespace librarian::windows
                 {
                     std::vector<AccountSummary> accounts;
                     std::uint32_t offset = 0U;
-                    for (std::size_t page_count = 0U; page_count < 100U; ++page_count)
+                    while (accounts.size() < maximum_account_records)
                     {
                         auto body = list_body(offset);
                         auto response = send_locked(
@@ -2072,6 +2073,11 @@ namespace librarian::windows
                             return {error, {}};
                         }
                         auto page = decode_account_page(response.body.value());
+                        if (page.accounts.size() >
+                            maximum_account_records - accounts.size())
+                        {
+                            fail(transport_error::invalid);
+                        }
                         accounts.insert(
                             accounts.end(),
                             std::make_move_iterator(page.accounts.begin()),
@@ -2080,7 +2086,7 @@ namespace librarian::windows
                         {
                             return {ClientError::None, std::move(accounts)};
                         }
-                        if (*page.next_offset <= offset)
+                        if (page.accounts.empty() || *page.next_offset <= offset)
                         {
                             fail(transport_error::invalid);
                         }
