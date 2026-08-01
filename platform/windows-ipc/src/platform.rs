@@ -5,7 +5,10 @@ use std::{
     os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle as StdOwnedHandle},
     path::PathBuf,
     ptr, slice,
-    sync::Mutex,
+    sync::{
+        Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
     thread,
     time::{Duration, Instant},
 };
@@ -50,11 +53,28 @@ use windows_sys::{
                 ImpersonateNamedPipeClient, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS,
                 PIPE_TYPE_BYTE, PIPE_WAIT, WaitNamedPipeW,
             },
+            Power::{
+                DEVICE_NOTIFY_SUBSCRIBE_PARAMETERS, HPOWERNOTIFY,
+                PowerRegisterSuspendResumeNotification, PowerUnregisterSuspendResumeNotification,
+            },
+            RemoteDesktop::{
+                WTS_CURRENT_SERVER_HANDLE, WTS_CURRENT_SESSION, WTS_SESSIONSTATE_LOCK,
+                WTS_SESSIONSTATE_UNLOCK, WTSFreeMemory, WTSINFOEXW, WTSQuerySessionInformationW,
+                WTSSessionInfoEx,
+            },
+            SystemInformation::GetTickCount,
             SystemServices::{ACCESS_ALLOWED_ACE_TYPE, SE_GROUP_LOGON_ID},
             Threading::{
                 CreateEventW, CreateMutexW, GetCurrentProcessId, GetCurrentThread, GetProcessTimes,
                 OpenProcess, OpenProcessToken, OpenThreadToken, PROCESS_QUERY_LIMITED_INFORMATION,
                 QueryFullProcessImageNameW, WaitForMultipleObjects, WaitForSingleObject,
+            },
+        },
+        UI::{
+            Input::KeyboardAndMouse::{GetLastInputInfo, LASTINPUTINFO},
+            WindowsAndMessaging::{
+                DEVICE_NOTIFY_CALLBACK, PBT_APMRESUMEAUTOMATIC, PBT_APMRESUMECRITICAL,
+                PBT_APMRESUMESTANDBY, PBT_APMRESUMESUSPEND, PBT_APMSUSPEND,
             },
         },
     },
@@ -73,6 +93,7 @@ const MAX_TOKEN_INFORMATION_BYTES: u32 = 1_048_576;
 const SYSTEM_SID: &str = "S-1-5-18";
 const AGENT_INSTANCE_NAME: &str = r"Local\Librarian.Agent.Singleton.v1";
 const PIPE_NAME_PREFIX: &str = r"\\.\pipe\LOCAL\Librarian.Agent.v1.";
+const INACTIVITY_LOCK_TIMEOUT: Duration = Duration::from_mins(15);
 const HEX: &[u8; 16] = b"0123456789abcdef";
 
 /// Redacted, stable transport failures. Raw Windows errors never cross the
@@ -109,6 +130,188 @@ impl std::error::Error for TransportError {}
 impl From<FrameError> for TransportError {
     fn from(_: FrameError) -> Self {
         Self::MalformedFrame
+    }
+}
+
+struct WtsAllocation(*mut c_void);
+
+impl Drop for WtsAllocation {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            // SAFETY: `WTSQuerySessionInformationW` allocated this buffer and
+            // transfers ownership to the caller for exactly one free.
+            unsafe { WTSFreeMemory(self.0) };
+        }
+    }
+}
+
+fn session_flags_are_unlocked(level: u32, flags: i32) -> Result<bool, TransportError> {
+    if level != 1 {
+        return Err(TransportError::Internal);
+    }
+    match u32::try_from(flags).map_err(|_| TransportError::Internal)? {
+        WTS_SESSIONSTATE_UNLOCK => Ok(true),
+        WTS_SESSIONSTATE_LOCK => Ok(false),
+        _ => Err(TransportError::Internal),
+    }
+}
+
+fn current_session_is_unlocked() -> Result<bool, TransportError> {
+    let mut buffer = ptr::null_mut();
+    let mut bytes = 0_u32;
+    // SAFETY: the current-session query initializes the buffer and byte count;
+    // the returned allocation is retained until the typed fields are copied.
+    if unsafe {
+        WTSQuerySessionInformationW(
+            WTS_CURRENT_SERVER_HANDLE,
+            WTS_CURRENT_SESSION,
+            WTSSessionInfoEx,
+            &raw mut buffer,
+            &raw mut bytes,
+        )
+    } == 0
+        || buffer.is_null()
+        || usize::try_from(bytes).map_err(|_| TransportError::Internal)? < size_of::<WTSINFOEXW>()
+    {
+        return Err(TransportError::Internal);
+    }
+    let allocation = WtsAllocation(buffer.cast());
+    // SAFETY: the API returned at least one complete `WTSINFOEXW`. The binding
+    // types the allocation as UTF-16, so copy it without assuming alignment.
+    let information = unsafe { ptr::read_unaligned(buffer.cast::<WTSINFOEXW>()) };
+    let level = information.Level;
+    if level != 1 {
+        drop(allocation);
+        return Err(TransportError::Internal);
+    }
+    // SAFETY: `Level == 1` selects `WTSInfoExLevel1` in the documented union.
+    let flags = unsafe { information.Data.WTSInfoExLevel1.SessionFlags };
+    let result = session_flags_are_unlocked(level, flags);
+    drop(allocation);
+    result
+}
+
+fn power_event_requires_shutdown(event: u32) -> bool {
+    matches!(
+        event,
+        PBT_APMSUSPEND
+            | PBT_APMRESUMEAUTOMATIC
+            | PBT_APMRESUMECRITICAL
+            | PBT_APMRESUMESTANDBY
+            | PBT_APMRESUMESUSPEND
+    )
+}
+
+fn idle_duration_reached(now: u32, last_input: u32, timeout: Duration) -> bool {
+    let Ok(timeout_ms) = u32::try_from(timeout.as_millis()) else {
+        return true;
+    };
+    now.wrapping_sub(last_input) >= timeout_ms
+}
+
+fn inactivity_requires_shutdown() -> Result<bool, TransportError> {
+    let mut information = LASTINPUTINFO {
+        cbSize: u32::try_from(size_of::<LASTINPUTINFO>()).map_err(|_| TransportError::Internal)?,
+        dwTime: 0,
+    };
+    // SAFETY: the correctly sized structure remains valid for the duration of
+    // the call and Windows initializes its last-input tick count.
+    if unsafe { GetLastInputInfo(&raw mut information) } == 0 {
+        return Err(TransportError::Internal);
+    }
+    // SAFETY: `GetTickCount` has no preconditions and shares the wrapping
+    // 32-bit tick domain used by `LASTINPUTINFO::dwTime`.
+    let now = unsafe { GetTickCount() };
+    Ok(idle_duration_reached(
+        now,
+        information.dwTime,
+        INACTIVITY_LOCK_TIMEOUT,
+    ))
+}
+
+unsafe extern "system" fn suspend_resume_callback(
+    context: *const c_void,
+    event: u32,
+    _setting: *const c_void,
+) -> u32 {
+    if context.is_null() {
+        return 1;
+    }
+    if power_event_requires_shutdown(event) {
+        // SAFETY: registration owns a stable boxed `AtomicBool` until after
+        // `PowerUnregisterSuspendResumeNotification` returns.
+        unsafe { &*context.cast::<AtomicBool>() }.store(true, Ordering::Release);
+    }
+    ERROR_SUCCESS
+}
+
+/// Fail-closed monitor for inactivity, sleep/resume, and session locking.
+pub struct SessionSecurityMonitor {
+    registration: HPOWERNOTIFY,
+    shutdown_requested: Box<AtomicBool>,
+}
+
+impl SessionSecurityMonitor {
+    /// Registers process-local suspend/resume notification and verifies that
+    /// the current Windows session is still unlocked.
+    ///
+    /// # Errors
+    ///
+    /// Fails closed when either Windows lifecycle signal cannot be observed.
+    pub fn register() -> Result<Self, TransportError> {
+        if !current_session_is_unlocked()? {
+            return Err(TransportError::Unavailable);
+        }
+        let shutdown_requested = Box::new(AtomicBool::new(false));
+        let mut parameters = DEVICE_NOTIFY_SUBSCRIBE_PARAMETERS {
+            Callback: Some(suspend_resume_callback),
+            Context: std::ptr::from_ref(shutdown_requested.as_ref())
+                .cast_mut()
+                .cast(),
+        };
+        let mut registration = ptr::null_mut();
+        // SAFETY: callback parameters and the registration output are valid;
+        // the boxed callback context remains stable through unregistration.
+        let result = unsafe {
+            PowerRegisterSuspendResumeNotification(
+                DEVICE_NOTIFY_CALLBACK,
+                std::ptr::from_mut(&mut parameters).cast(),
+                &raw mut registration,
+            )
+        };
+        if result != ERROR_SUCCESS || registration.is_null() {
+            return Err(TransportError::Internal);
+        }
+        Ok(Self {
+            registration: registration as HPOWERNOTIFY,
+            shutdown_requested,
+        })
+    }
+
+    /// Reports sleep/resume or a locked session, plus 15 minutes of inactivity
+    /// when the caller indicates that its current state may retain secrets.
+    /// Observation failure is an error so the caller shuts down rather than
+    /// retaining key state.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Internal` when the Windows session state cannot be queried.
+    pub fn shutdown_requested(&self, inactivity_sensitive: bool) -> Result<bool, TransportError> {
+        if self.shutdown_requested.load(Ordering::Acquire) {
+            return Ok(true);
+        }
+        if !current_session_is_unlocked()? {
+            return Ok(true);
+        }
+        Ok(inactivity_sensitive && inactivity_requires_shutdown()?)
+    }
+}
+
+impl Drop for SessionSecurityMonitor {
+    fn drop(&mut self) {
+        // SAFETY: this is the unique registration handle returned for the
+        // callback context retained by this monitor.
+        let _ = unsafe { PowerUnregisterSuspendResumeNotification(self.registration) };
     }
 }
 
@@ -1546,6 +1749,26 @@ mod tests {
     };
 
     static AGENT_INSTANCE_TEST: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn lifecycle_signal_classification_is_fail_closed() {
+        assert_eq!(session_flags_are_unlocked(1, 1), Ok(true));
+        assert_eq!(session_flags_are_unlocked(1, 0), Ok(false));
+        assert_eq!(
+            session_flags_are_unlocked(2, 1),
+            Err(TransportError::Internal)
+        );
+        assert!(power_event_requires_shutdown(PBT_APMSUSPEND));
+        assert!(power_event_requires_shutdown(PBT_APMRESUMEAUTOMATIC));
+        assert!(!power_event_requires_shutdown(0));
+        assert!(!idle_duration_reached(900_000, 1, INACTIVITY_LOCK_TIMEOUT));
+        assert!(idle_duration_reached(900_001, 1, INACTIVITY_LOCK_TIMEOUT));
+        assert!(idle_duration_reached(
+            100,
+            u32::MAX - 899_900,
+            INACTIVITY_LOCK_TIMEOUT
+        ));
+    }
 
     #[test]
     fn random_pipe_names_are_scoped_and_distinct() {

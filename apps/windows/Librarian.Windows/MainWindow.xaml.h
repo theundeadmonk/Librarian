@@ -26,6 +26,15 @@ namespace winrt::Librarian::Windows::implementation
         winrt::fire_and_forget OnUnlockClicked(
             winrt::Windows::Foundation::IInspectable const&,
             Microsoft::UI::Xaml::RoutedEventArgs const&);
+        winrt::fire_and_forget OnWindowsHelloUnlockClicked(
+            winrt::Windows::Foundation::IInspectable const&,
+            Microsoft::UI::Xaml::RoutedEventArgs const&);
+        winrt::fire_and_forget OnWindowsHelloEnrollClicked(
+            winrt::Windows::Foundation::IInspectable const&,
+            Microsoft::UI::Xaml::RoutedEventArgs const&);
+        winrt::fire_and_forget OnWindowsHelloRemoveClicked(
+            winrt::Windows::Foundation::IInspectable const&,
+            Microsoft::UI::Xaml::RoutedEventArgs const&);
         winrt::fire_and_forget OnLockClicked(
             winrt::Windows::Foundation::IInspectable const&,
             Microsoft::UI::Xaml::RoutedEventArgs const&);
@@ -41,10 +50,20 @@ namespace winrt::Librarian::Windows::implementation
         winrt::fire_and_forget OnSaveAccountClicked(
             winrt::Windows::Foundation::IInspectable const&,
             Microsoft::UI::Xaml::RoutedEventArgs const&);
+        winrt::fire_and_forget OnPreviousAccountPageClicked(
+            winrt::Windows::Foundation::IInspectable const&,
+            Microsoft::UI::Xaml::RoutedEventArgs const&);
+        winrt::fire_and_forget OnNextAccountPageClicked(
+            winrt::Windows::Foundation::IInspectable const&,
+            Microsoft::UI::Xaml::RoutedEventArgs const&);
 
     private:
         void Render();
         void RenderAccounts();
+        void OnSecurityTimerTick();
+        winrt::fire_and_forget RefreshAfterActivation();
+        winrt::fire_and_forget LockVault();
+        winrt::fire_and_forget NavigateAccountPage(bool next);
         [[nodiscard]] bool FocusCurrentState();
         void QueueFocusCurrentState();
         void QueueFocusForActivation();
@@ -53,11 +72,13 @@ namespace winrt::Librarian::Windows::implementation
         void CloseDesktopClient() noexcept;
         void ClearSetupPasswords();
         void ClearAccountEditor();
+        [[nodiscard]] std::uintptr_t ParentWindowHandle() noexcept;
 
         librarian::windows::ShellViewModel view_model_;
         std::atomic_bool is_closed_{ false };
         std::atomic_bool client_closed_{ false };
         std::atomic_bool lock_request_in_flight_{ false };
+        Microsoft::UI::Dispatching::DispatcherQueueTimer security_timer_{ nullptr };
         bool is_loaded_{ false };
         bool is_active_{ false };
     };

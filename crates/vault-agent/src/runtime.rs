@@ -645,6 +645,27 @@ impl AgentRuntime {
         envelope: &RequestEnvelope,
         write_response: impl FnOnce(&ResponseEnvelope) -> Result<T, DispatchError>,
     ) -> Result<T, DispatchError> {
+        self.dispatch_with_admission(connection, header, envelope, || {}, write_response)
+    }
+
+    /// Admits and executes one authenticated request while notifying the
+    /// transport after the request identifier has been issued.
+    ///
+    /// A concurrent transport reader must not process a later cancellation
+    /// until this callback runs. Fatal admission errors return without calling
+    /// it, while every admitted or public-rejection path calls it exactly once.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same connection-fatal failures as [`Self::dispatch`].
+    pub fn dispatch_with_admission<T>(
+        &self,
+        connection: &Connection,
+        header: &FrameHeader,
+        envelope: &RequestEnvelope,
+        on_admitted: impl FnOnce(),
+        write_response: impl FnOnce(&ResponseEnvelope) -> Result<T, DispatchError>,
+    ) -> Result<T, DispatchError> {
         let correlation = correlation_id()?;
         let context = match self.admit_request(connection, header, envelope, correlation)? {
             RequestAdmission::Admitted(context) => context,
@@ -652,10 +673,12 @@ impl AgentRuntime {
                 response,
                 _commit: _commit_gate,
             } => {
+                on_admitted();
                 let response = Self::bounded_response(connection, response, correlation)?;
                 return write_response(&response);
             }
         };
+        on_admitted();
         let outcome = if context.permit.operation().requires_idempotency_key() {
             let idempotency_key = envelope.idempotency_key().ok_or(DispatchError::Internal)?;
             let request_fingerprint =
@@ -4059,6 +4082,92 @@ mod tests {
         assert_eq!(response.error(), Some(PublicErrorCode::Cancelled));
         assert_eq!(client.in_flight_count(), 0);
         assert!(!client.is_closed());
+    }
+
+    #[test]
+    fn transport_admission_callback_follows_request_id_issuance() {
+        let directory = TestDirectory::new();
+        let runtime = AgentRuntime::start(directory.vault_path()).expect("runtime");
+        let client = connection(&runtime, 75);
+        let operation = OperationRequest::Status;
+        let body = operation.encode().expect("status body");
+        let request = RequestEnvelope::new(
+            OperationCode::Status,
+            runtime.unlock_epoch(),
+            5_000,
+            None,
+            body,
+        )
+        .expect("status request");
+        let header = FrameHeader::new(
+            MessageKind::Request,
+            CURRENT_VERSION,
+            request.encode().expect("status request bytes").len(),
+            *client.connection_id(),
+            1,
+        )
+        .expect("status header");
+        let callback_count = AtomicUsize::new(0);
+
+        runtime
+            .dispatch_with_admission(
+                &client,
+                &header,
+                &request,
+                || {
+                    assert_eq!(client.in_flight_count(), 1);
+                    callback_count.fetch_add(1, Ordering::AcqRel);
+                },
+                copy_response,
+            )
+            .expect("status response");
+
+        assert_eq!(callback_count.load(Ordering::Acquire), 1);
+        assert_eq!(client.in_flight_count(), 0);
+    }
+
+    #[test]
+    fn transport_admission_callback_skips_connection_fatal_headers() {
+        let directory = TestDirectory::new();
+        let runtime = AgentRuntime::start(directory.vault_path()).expect("runtime");
+        let client = connection(&runtime, 76);
+        let operation = OperationRequest::Status;
+        let body = operation.encode().expect("status body");
+        let request = RequestEnvelope::new(
+            OperationCode::Status,
+            runtime.unlock_epoch(),
+            5_000,
+            None,
+            body,
+        )
+        .expect("status request");
+        let mut wrong_connection = *client.connection_id();
+        wrong_connection[0] ^= 0xff;
+        let header = FrameHeader::new(
+            MessageKind::Request,
+            CURRENT_VERSION,
+            request.encode().expect("status request bytes").len(),
+            wrong_connection,
+            1,
+        )
+        .expect("wrong-connection header");
+        let callback_count = AtomicUsize::new(0);
+
+        let result = runtime.dispatch_with_admission(
+            &client,
+            &header,
+            &request,
+            || {
+                callback_count.fetch_add(1, Ordering::AcqRel);
+            },
+            copy_response,
+        );
+
+        assert!(matches!(
+            result,
+            Err(DispatchError::Connection(ConnectionError::InvalidFrame))
+        ));
+        assert_eq!(callback_count.load(Ordering::Acquire), 0);
     }
 
     #[test]

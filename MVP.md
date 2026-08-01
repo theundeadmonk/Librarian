@@ -216,7 +216,8 @@ The extension must not silently save every QR code it sees. Automatically findin
 - Windows Hello is the normal convenience-unlock method after initial setup.
 - Windows Hello releases locally protected key material; it is not a portable recovery mechanism.
 - The extension asks the native app to unlock and never imitates an unlock form inside the webpage or extension overlay.
-- Automatic locking after inactivity, Windows sleep, and sign-out is required; exact timing remains open.
+- Librarian locks after 15 minutes without Windows keyboard, mouse, or touch input.
+  Windows sleep, session lock, and sign-out lock it immediately.
 
 ### 9. Back up and restore the vault
 

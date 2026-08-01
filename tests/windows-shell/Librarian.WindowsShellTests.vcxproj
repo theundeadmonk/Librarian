@@ -44,10 +44,16 @@
       <LanguageStandard>stdcpp20</LanguageStandard>
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
+    <Link>
+      <AdditionalDependencies>Advapi32.lib;Bcrypt.lib;Ole32.lib;Shell32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+    </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClInclude Include="..\..\apps\windows\Librarian.Windows\DesktopClient.h">
       <Link>DesktopClient.h</Link>
+    </ClInclude>
+    <ClInclude Include="..\..\apps\windows\Librarian.Windows\DesktopTransport.h">
+      <Link>DesktopTransport.h</Link>
     </ClInclude>
     <ClInclude Include="..\..\apps\windows\Librarian.Windows\ShellViewModel.h">
       <Link>ShellViewModel.h</Link>
@@ -57,6 +63,9 @@
     <ClCompile Include="main.cpp" />
     <ClCompile Include="..\..\apps\windows\Librarian.Windows\DesktopClient.cpp">
       <Link>DesktopClient.cpp</Link>
+    </ClCompile>
+    <ClCompile Include="..\..\apps\windows\Librarian.Windows\DesktopTransport.cpp">
+      <Link>DesktopTransport.cpp</Link>
     </ClCompile>
     <ClCompile Include="..\..\apps\windows\Librarian.Windows\ShellViewModel.cpp">
       <Link>ShellViewModel.cpp</Link>

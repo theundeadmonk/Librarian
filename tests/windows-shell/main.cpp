@@ -53,6 +53,9 @@ namespace
         ClientResult status_result{ ClientError::None, VaultStatus::Locked };
         ClientResult create_result{ ClientError::None, VaultStatus::Unlocked };
         ClientResult unlock_result{ ClientError::None, VaultStatus::Unlocked };
+        ClientResult windows_hello_unlock_result{ ClientError::None, VaultStatus::Unlocked };
+        ClientResult windows_hello_enroll_result{ ClientError::None, VaultStatus::Unlocked };
+        ClientResult windows_hello_remove_result{ ClientError::None, VaultStatus::Unlocked };
         ClientResult lock_result{ ClientError::None, VaultStatus::Locked };
         ClientResult save_result{ ClientError::None, VaultStatus::Unlocked };
         AccountListResult list_result{};
@@ -60,7 +63,12 @@ namespace
         bool password_matched{ false };
         int status_calls{ 0 };
         int unlock_calls{ 0 };
+        int windows_hello_unlock_calls{ 0 };
+        int windows_hello_enroll_calls{ 0 };
+        int windows_hello_remove_calls{ 0 };
+        std::uintptr_t windows_hello_parent_window{ 0U };
         int lock_calls{ 0 };
+        std::vector<std::uint32_t> list_offsets;
         int save_calls{ 0 };
         int close_calls{ 0 };
         std::atomic_bool closed{ false };
@@ -96,6 +104,31 @@ namespace
             return unlock_result;
         }
 
+        [[nodiscard]] ClientResult UnlockWindowsHello(
+            std::uintptr_t const parent_window) override
+        {
+            ++windows_hello_unlock_calls;
+            windows_hello_parent_window = parent_window;
+            return closed.load(std::memory_order_acquire) ?
+                Closed() : windows_hello_unlock_result;
+        }
+
+        [[nodiscard]] ClientResult EnrollWindowsHello(
+            std::uintptr_t const parent_window) override
+        {
+            ++windows_hello_enroll_calls;
+            windows_hello_parent_window = parent_window;
+            return closed.load(std::memory_order_acquire) ?
+                Closed() : windows_hello_enroll_result;
+        }
+
+        [[nodiscard]] ClientResult RemoveWindowsHello() override
+        {
+            ++windows_hello_remove_calls;
+            return closed.load(std::memory_order_acquire) ?
+                Closed() : windows_hello_remove_result;
+        }
+
         [[nodiscard]] ClientResult Lock() override
         {
             ++lock_calls;
@@ -106,8 +139,10 @@ namespace
             return lock_result;
         }
 
-        [[nodiscard]] AccountListResult ListAccounts() override
+        [[nodiscard]] AccountListResult ListAccounts(
+            std::uint32_t const offset) override
         {
+            list_offsets.push_back(offset);
             if (closed.load(std::memory_order_acquire))
             {
                 return { ClientError::Cancelled, {} };
@@ -247,6 +282,73 @@ namespace
         test.Check(model.Accounts().empty(), "lock clears account summaries from the view model");
     }
 
+    void TestActivationRefreshFailsClosed(TestContext& test)
+    {
+        auto client = ClientWithStatus(VaultStatus::Unlocked);
+        client->list_result.accounts.push_back(
+            { L"record", L"Example", L"https://example.com", L"person" });
+        ShellViewModel model{ client };
+        InitializeModel(model);
+
+        client->status_result = { ClientError::AgentUnavailable, VaultStatus::Locked };
+        test.Check(model.BeginRefresh(), "window reactivation begins a status refresh");
+        test.Check(
+            model.Accounts().empty(),
+            "window reactivation clears cached account summaries before transport I/O");
+        model.CompleteRefresh(model.ExecuteStatusRequest());
+        test.Check(
+            model.State() == ShellState::AgentUnavailable,
+            "lifecycle agent shutdown remains fail closed after reactivation");
+    }
+
+    void TestAccountPagingIsBounded(TestContext& test)
+    {
+        auto client = ClientWithStatus(VaultStatus::Unlocked);
+        client->list_result.accounts.push_back(
+            { L"first", L"First", L"https://first.example", L"person" });
+        client->list_result.next_offset = 100U;
+        ShellViewModel model{ client };
+        InitializeModel(model);
+
+        test.Check(
+            client->list_offsets == std::vector<std::uint32_t>{ 0U },
+            "initial account loading requests only the first bounded page");
+        test.Check(model.HasNextAccountPage(), "first account page exposes next navigation");
+        test.Check(
+            !model.HasPreviousAccountPage(),
+            "first account page has no previous navigation");
+
+        client->list_result.accounts = {
+            { L"second", L"Second", L"https://second.example", L"person" },
+        };
+        client->list_result.next_offset.reset();
+        auto const next_offset = model.BeginNextAccountPage();
+        test.Check(next_offset == 100U, "next navigation uses the server continuation offset");
+        model.CompleteNextAccountPage(
+            model.ExecuteAccountPageRequest(next_offset.value_or(0U)));
+        test.Check(
+            model.Accounts().size() == 1 && model.Accounts().front().id == L"second",
+            "next navigation replaces rather than accumulates account controls");
+        test.Check(
+            model.HasPreviousAccountPage() && !model.HasNextAccountPage(),
+            "last account page exposes only previous navigation");
+
+        client->list_result.accounts = {
+            { L"first", L"First", L"https://first.example", L"person" },
+        };
+        client->list_result.next_offset = 100U;
+        auto const previous_offset = model.BeginPreviousAccountPage();
+        test.Check(previous_offset == 0U, "previous navigation restores the prior page offset");
+        model.CompletePreviousAccountPage(
+            model.ExecuteAccountPageRequest(previous_offset.value_or(0U)));
+        test.Check(
+            model.Accounts().size() == 1 && model.Accounts().front().id == L"first",
+            "previous navigation restores the prior bounded page");
+        test.Check(
+            !model.HasPreviousAccountPage() && model.HasNextAccountPage(),
+            "returning to the first page restores its navigation state");
+    }
+
     void TestUnlockFailuresAreSafe(TestContext& test)
     {
         {
@@ -282,6 +384,143 @@ namespace
             test.Check(
                 model.State() == ShellState::Error,
                 "unexpected unlock uses the distinct error state");
+        }
+    }
+
+    void TestWindowsHelloLifecycle(TestContext& test)
+    {
+        constexpr std::uintptr_t parent_window = 0x1234U;
+        auto client = ClientWithStatus(VaultStatus::Locked);
+        client->list_result.accounts.push_back(
+            { L"record", L"Example", L"https://example.com", L"person" });
+        ShellViewModel model{ client };
+        InitializeModel(model);
+
+        test.Check(
+            !model.BeginWindowsHelloEnrollment(),
+            "Windows Hello enrollment is unavailable while locked");
+        test.Check(
+            !model.BeginWindowsHelloRemoval(),
+            "Windows Hello removal is unavailable while locked");
+        test.Check(model.BeginWindowsHelloUnlock(), "locked vault begins Windows Hello unlock");
+        test.Check(
+            model.State() == ShellState::Unlocking,
+            "Windows Hello unlock uses the busy security state");
+        model.CompleteWindowsHelloUnlock(
+            model.ExecuteWindowsHelloUnlockRequest(parent_window));
+
+        test.Check(
+            client->windows_hello_unlock_calls == 1,
+            "Windows Hello unlock is submitted exactly once");
+        test.Check(
+            client->windows_hello_parent_window == parent_window,
+            "Windows Hello unlock forwards the native parent window");
+        test.Check(
+            model.State() == ShellState::Unlocked,
+            "successful Windows Hello unlock opens accounts");
+        test.Check(
+            model.Accounts().size() == 1,
+            "successful Windows Hello unlock refreshes account summaries");
+
+        test.Check(
+            model.BeginWindowsHelloEnrollment(),
+            "unlocked vault begins Windows Hello enrollment");
+        model.CompleteWindowsHelloEnrollment(
+            model.ExecuteWindowsHelloEnrollmentRequest(parent_window));
+        test.Check(
+            client->windows_hello_enroll_calls == 1,
+            "Windows Hello enrollment is submitted exactly once");
+        test.Check(
+            model.State() == ShellState::Unlocked && model.Accounts().size() == 1,
+            "successful enrollment preserves the unlocked account surface");
+        test.Check(
+            model.Message().find(L"enabled") != std::wstring::npos &&
+                model.Message().find(L"master password") != std::wstring::npos,
+            "successful enrollment confirms the master-password fallback");
+
+        test.Check(
+            model.BeginWindowsHelloRemoval(),
+            "unlocked vault begins Windows Hello removal");
+        model.CompleteWindowsHelloRemoval(model.ExecuteWindowsHelloRemovalRequest());
+        test.Check(
+            client->windows_hello_remove_calls == 1,
+            "Windows Hello removal is submitted exactly once");
+        test.Check(
+            model.State() == ShellState::Unlocked && model.Accounts().size() == 1,
+            "successful removal preserves the unlocked account surface");
+        test.Check(
+            model.Message().find(L"removed") != std::wstring::npos &&
+                model.Message().find(L"vault") != std::wstring::npos,
+            "successful removal confirms the vault is unchanged");
+    }
+
+    void TestWindowsHelloFailuresPreserveFallback(TestContext& test)
+    {
+        {
+            auto client = ClientWithStatus(VaultStatus::Locked);
+            client->windows_hello_unlock_result = {
+                ClientError::WindowsHelloUnavailable,
+                VaultStatus::Locked,
+            };
+            ShellViewModel model{ client };
+            InitializeModel(model);
+
+            test.Check(model.BeginWindowsHelloUnlock(), "unavailable Hello unlock begins");
+            model.CompleteWindowsHelloUnlock(
+                model.ExecuteWindowsHelloUnlockRequest(0x1234U));
+
+            test.Check(
+                model.State() == ShellState::Locked,
+                "unavailable Windows Hello remains locked");
+            test.Check(
+                model.Message().find(L"master password") != std::wstring::npos,
+                "unavailable Windows Hello explains the master-password fallback");
+        }
+
+        {
+            auto client = ClientWithStatus(VaultStatus::Locked);
+            client->windows_hello_unlock_result = {
+                ClientError::Cancelled,
+                VaultStatus::Locked,
+            };
+            ShellViewModel model{ client };
+            InitializeModel(model);
+
+            test.Check(model.BeginWindowsHelloUnlock(), "cancelled Hello unlock begins");
+            model.CompleteWindowsHelloUnlock(
+                model.ExecuteWindowsHelloUnlockRequest(0x1234U));
+
+            test.Check(
+                model.State() == ShellState::Locked,
+                "cancelled Windows Hello remains locked");
+            test.Check(
+                model.Message().find(L"master password") != std::wstring::npos,
+                "cancelled Windows Hello explains the master-password fallback");
+        }
+
+        {
+            auto client = ClientWithStatus(VaultStatus::Unlocked);
+            client->list_result.accounts.push_back(
+                { L"record", L"Example", L"https://example.com", L"person" });
+            client->windows_hello_enroll_result = {
+                ClientError::WindowsHelloUnavailable,
+                VaultStatus::Unlocked,
+            };
+            ShellViewModel model{ client };
+            InitializeModel(model);
+
+            test.Check(
+                model.BeginWindowsHelloEnrollment(),
+                "unavailable Hello enrollment begins while unlocked");
+            model.CompleteWindowsHelloEnrollment(
+                model.ExecuteWindowsHelloEnrollmentRequest(0x1234U));
+
+            test.Check(
+                model.State() == ShellState::Unlocked,
+                "failed Windows Hello enrollment preserves unlocked state");
+            test.Check(
+                model.Accounts().size() == 1,
+                "failed Windows Hello enrollment preserves account summaries");
         }
     }
 
@@ -326,7 +565,7 @@ namespace
         InitializeModel(model);
         test.Check(
             model.State() == ShellState::AgentUnavailable,
-            "production placeholder never simulates an unlocked vault");
+            "the unpackaged production client never simulates an unlocked vault");
     }
 
     void TestCancelledActionsResumeSafely(TestContext& test)
@@ -491,7 +730,17 @@ namespace
             "PasswordRevealMode=\"Hidden\"",
             "IsTabStop=\"True\"",
             "Click=\"OnUnlockClicked\"",
+            "x:Name=\"WindowsHelloUnlockButton\"",
+            "Click=\"OnWindowsHelloUnlockClicked\"",
+            "x:Name=\"WindowsHelloEnrollButton\"",
+            "Click=\"OnWindowsHelloEnrollClicked\"",
+            "x:Name=\"WindowsHelloRemoveButton\"",
+            "Click=\"OnWindowsHelloRemoveClicked\"",
+            "Or use your master password.",
             "Click=\"OnRetryClicked\"",
+            "x:Name=\"AccountPaginationPanel\"",
+            "Click=\"OnPreviousAccountPageClicked\"",
+            "Click=\"OnNextAccountPageClicked\"",
         };
 
         for (auto const fragment : required)
@@ -529,15 +778,26 @@ namespace
             "GetFocusedElement(lifetime->RootLayout().XamlRoot())",
             "dispatcher.TryEnqueue([lifetime, outcome]",
             "CompleteInitialize(std::move(*outcome))",
+            "CompleteRefresh(std::move(*outcome))",
             "CompleteCreate(std::move(*outcome))",
             "CompleteUnlock(std::move(*outcome))",
+            "CompleteWindowsHelloUnlock(std::move(*outcome))",
+            "CompleteWindowsHelloEnrollment(std::move(*outcome))",
+            "CompleteWindowsHelloRemoval(std::move(*outcome))",
             "CompleteLock(std::move(*outcome))",
             "CompleteRetry(std::move(*outcome))",
             "CompleteSaveAccount(std::move(*outcome))",
             "fire_and_forget MainWindow::OnLoaded",
+            "void MainWindow::OnSecurityTimerTick",
+            "GetLastInputInfo(&information)",
+            "ContentDialog()",
+            "Enable Windows Hello unlock?",
+            "Remove Windows Hello unlock?",
+            "try_as<::IWindowNative>()",
             "fire_and_forget MainWindow::OnLockClicked",
             "fire_and_forget MainWindow::OnRetryClicked",
             "fire_and_forget MainWindow::OnSaveAccountClicked",
+            "fire_and_forget MainWindow::NavigateAccountPage",
         };
 
         for (auto const fragment : required)
@@ -554,7 +814,11 @@ int main(int const argc, char const* const* const argv)
     TestContext test;
     TestInitialStates(test);
     TestUnlockLifecycle(test);
+    TestActivationRefreshFailsClosed(test);
+    TestAccountPagingIsBounded(test);
     TestUnlockFailuresAreSafe(test);
+    TestWindowsHelloLifecycle(test);
+    TestWindowsHelloFailuresPreserveFallback(test);
     TestCreateAndAccountEditor(test);
     TestProductionClientFailsClosed(test);
     TestCancelledActionsResumeSafely(test);
