@@ -13,6 +13,8 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 $env:PATHEXT = ".COM;.EXE;.BAT;.CMD;.VBS;.VBE;.JS;.JSE;.WSF;.WSH;.MSC"
 
+. (Join-Path $PSScriptRoot "native-process-arguments.ps1")
+
 function Invoke-CheckedProcess {
     param(
         [Parameter(Mandatory)]
@@ -31,13 +33,7 @@ function Invoke-CheckedProcess {
     Write-Host ""
     Write-Host "==> $Label"
 
-    $argumentText = ($Arguments | ForEach-Object {
-        if ($_ -match '^".*"$' -or $_ -notmatch '\s') {
-            $_
-        } else {
-            '"' + $_.Replace('"', '\"') + '"'
-        }
-    }) -join " "
+    $argumentText = Join-NativeProcessArguments -Arguments $Arguments
 
     $startInfo = New-Object Diagnostics.ProcessStartInfo
     $startInfo.WorkingDirectory = $WorkingDirectory
@@ -82,6 +78,21 @@ function Invoke-CheckedProcess {
     $process.Dispose()
 }
 
+function Test-SmartAppControlEnforced {
+    $policyPath = "HKLM:\SYSTEM\CurrentControlSet\Control\CI\Policy"
+    try {
+        $state = (
+            Get-ItemProperty `
+                -LiteralPath $policyPath `
+                -Name "VerifiedAndReputablePolicyState" `
+                -ErrorAction Stop
+        ).VerifiedAndReputablePolicyState
+        return $state -eq 1
+    } catch {
+        return $false
+    }
+}
+
 $toolchain = & (Join-Path $PSScriptRoot "bootstrap.ps1") -PassThru
 $repoRoot = $toolchain.RepoRoot
 $artifacts = Join-Path $repoRoot "artifacts"
@@ -97,6 +108,30 @@ $windowsSdkBin = Join-Path $toolchain.WindowsSdkRoot "bin\$($toolchain.Versions.
 if (Test-Path $windowsSdkBin) {
     $env:Path = "$windowsSdkBin;$env:Path"
 }
+
+Invoke-CheckedProcess `
+    -Label "Native process argument tests" `
+    -FilePath $powerShellHost `
+    -Arguments @(
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        "scripts\test-native-process-arguments.ps1"
+    ) `
+    -WorkingDirectory $repoRoot
+
+Invoke-CheckedProcess `
+    -Label "Certificate helper tests" `
+    -FilePath $powerShellHost `
+    -Arguments @(
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        "scripts\test-certificate-helpers.ps1"
+    ) `
+    -WorkingDirectory $repoRoot
 
 Invoke-CheckedProcess `
     -Label "Rust formatting" `
@@ -205,7 +240,7 @@ $solution = Join-Path $repoRoot "Librarian.sln"
 $msbuildRestoreLog = Join-Path $logs "msbuild-restore-$Configuration-$Platform.log"
 $msbuildLog = Join-Path $logs "msbuild-$Configuration-$Platform.log"
 $msbuildRestoreArguments = @(
-    ('"' + $solution + '"')
+    $solution
     "/t:Restore"
     "/m"
     "/nr:false"
@@ -214,7 +249,7 @@ $msbuildRestoreArguments = @(
     "/p:RestoreLockedMode=true"
     "/verbosity:minimal"
     "/fileLogger"
-    ('"/fileLoggerParameters:LogFile=' + $msbuildRestoreLog + ';Verbosity=diagnostic"')
+    ("/fileLoggerParameters:LogFile=" + $msbuildRestoreLog + ";Verbosity=diagnostic")
 )
 
 Invoke-CheckedProcess `
@@ -238,7 +273,7 @@ if (-not (Test-Path (Join-Path $nugetWindowsSdkBin "mdmerge.exe"))) {
 $env:Path = "$nugetWindowsSdkBin;$env:Path"
 
 $msbuildArguments = @(
-    ('"' + $solution + '"')
+    $solution
     "/t:Build"
     "/m"
     "/nr:false"
@@ -249,7 +284,7 @@ $msbuildArguments = @(
     "/p:RestoreLockedMode=true"
     "/verbosity:minimal"
     "/fileLogger"
-    ('"/fileLoggerParameters:LogFile=' + $msbuildLog + ';Verbosity=diagnostic"')
+    ("/fileLoggerParameters:LogFile=" + $msbuildLog + ";Verbosity=diagnostic")
 )
 
 Invoke-CheckedProcess `
@@ -270,7 +305,7 @@ if ($Configuration -eq "Release") {
             "-File"
             "scripts\test-embedded-identity.ps1"
             "-MtPath"
-            ('"' + $manifestTool + '"')
+            $manifestTool
             "-Configuration"
             $Configuration
             "-Platform"
@@ -294,7 +329,7 @@ Invoke-CheckedProcess `
         "-File"
         "scripts\build-identity-package.ps1"
         "-MakeAppxPath"
-        ('"' + $makeAppx + '"')
+        $makeAppx
     ) `
     -WorkingDirectory $repoRoot
 
@@ -341,6 +376,81 @@ Invoke-CheckedProcess `
         "apps\windows\Librarian.Windows\MainWindow.xaml.cpp"
     ) `
     -WorkingDirectory $repoRoot
+
+if ($Configuration -eq "Release") {
+    $installerBuildArguments = @(
+        "-NoProfile"
+        "-ExecutionPolicy"
+        "Bypass"
+        "-File"
+        "scripts\build-installer.ps1"
+        "-Configuration"
+        $Configuration
+        "-Platform"
+        $Platform
+    )
+    $installerTestArguments = @(
+        "-NoProfile"
+        "-ExecutionPolicy"
+        "Bypass"
+        "-File"
+        "scripts\test-installer.ps1"
+        "-ExpectedSigningMode"
+        "unsigned-fixture"
+    )
+
+    if (Test-SmartAppControlEnforced) {
+        Write-Host ""
+        Write-Host (
+            "Smart App Control is enforced. The local build will suppress WiX " +
+            "ICE execution because Windows blocks its temporary unsigned MSI; " +
+            "the structural suite still runs, and CI must run ICE validation."
+        )
+        $installerBuildArguments += "-SuppressMsiValidation"
+        $installerTestArguments += "-SkipIceValidation"
+    }
+
+    Invoke-CheckedProcess `
+        -Label "Unsigned single-installer fixture" `
+        -FilePath $powerShellHost `
+        -Arguments $installerBuildArguments `
+        -WorkingDirectory $repoRoot
+
+    Invoke-CheckedProcess `
+        -Label "Installer lifecycle structural and ICE validation" `
+        -FilePath $powerShellHost `
+        -Arguments $installerTestArguments `
+        -WorkingDirectory $repoRoot
+
+    Invoke-CheckedProcess `
+        -Label "Current-user development runner validation" `
+        -FilePath $powerShellHost `
+        -Arguments @(
+            "-NoProfile"
+            "-ExecutionPolicy"
+            "Bypass"
+            "-File"
+            "scripts\run-development.ps1"
+            "-Configuration"
+            $Configuration
+            "-Platform"
+            $Platform
+            "-ValidateOnly"
+        ) `
+        -WorkingDirectory $repoRoot
+
+    Invoke-CheckedProcess `
+        -Label "Installer runner guard tests" `
+        -FilePath $powerShellHost `
+        -Arguments @(
+            "-NoProfile"
+            "-ExecutionPolicy"
+            "Bypass"
+            "-File"
+            "scripts\test-installer-runner-guard.ps1"
+        ) `
+        -WorkingDirectory $repoRoot
+}
 
 $gitMetadata = Join-Path $repoRoot ".git"
 $usesWslWorktreeMetadata = (Test-Path $gitMetadata -PathType Leaf) -and

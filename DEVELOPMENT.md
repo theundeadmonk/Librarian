@@ -4,7 +4,7 @@ The active Librarian MVP builds only on x64 Windows 11. The repository does not 
 
 ## Supported toolchain
 
-The foundation is pinned to stable releases verified on 2026-07-22:
+The foundation is pinned to stable releases verified on 2026-07-28:
 
 | Area | Required version |
 |---|---|
@@ -15,6 +15,8 @@ The foundation is pinned to stable releases verified on 2026-07-22:
 | Windows App SDK | 2.3.1 |
 | C++/WinRT | 3.0.260715.1 |
 | Windows Implementation Library | 1.0.260126.7 |
+| .NET SDK | 10.0.302 |
+| WiX Toolset | 7.0.0 with accepted `wix7` OSMF EULA |
 | Rust | 1.97.1, x86_64-pc-windows-msvc |
 | Node.js | 24.18.0 LTS |
 | npm | 11.16.0 |
@@ -24,7 +26,8 @@ The manifests and lockfiles in source control are authoritative. Preview, releas
 
 ## First-time setup
 
-Install Git for Windows, the required Visual Studio workloads, Node.js 24.18.0, Rustup, and the Windows SDK:
+Install Git for Windows, the required Visual Studio workloads, .NET SDK
+10.0.302, Node.js 24.18.0, Rustup, and the Windows SDK:
 
 ```powershell
 winget install Microsoft.WindowsSDK.10.0.28000
@@ -42,15 +45,54 @@ The bootstrap command only validates the machine. It does not change system sett
 
 One command formats-checks, lints, tests, restores locked dependencies, builds
 the Rust workspace, Chromium extension, WinUI app, Windows passkey boundary,
-and Windows local-IPC security probe, then runs the probe's hostile-client
-checks:
+and Windows local-IPC security probe, then builds and inspects the unsigned
+single-installer fixture:
 
 ```powershell
 powershell.exe -NoProfile -File .\scripts\build.ps1 -Configuration Release -Platform x64
 ```
 
-Build outputs and diagnostic logs are written beneath `artifacts/` or the component-specific ignored output directories. Native artifacts are unsigned; production MSIX generation and signing are deferred to issue #19.
+Build outputs and diagnostic logs are written beneath `artifacts/` or the
+component-specific ignored output directories. The setup, MSI, identity MSIX,
+and native binaries produced by this command are unsigned test fixtures and
+must not be installed. See
+[`packaging/windows/README.md`](packaging/windows/README.md) for installer
+outputs, structural validation, development signing, and Smart App Control
+behavior. Production signing credentials are never part of the repository or
+local build command.
 On a normal Windows checkout, the build also checks whitespace in the committed branch diff, the index, and the working tree. GitHub Actions supplies the pull request or push base commit explicitly.
+
+Rust tests use optimized test code with debug assertions and overflow checks
+enabled. This keeps the vault-agent integration suite's production request
+deadlines representative without relaxing those deadlines.
+
+## Run the current Windows product
+
+After a successful Release build, start a development session without
+installing the unsigned MSI fixture:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\run-development.ps1
+```
+
+The command verifies the Release payload and its hashes, registers a loose
+development package only for the current Windows user, starts the vault-agent
+entry point and desktop under their package identity, and leaves the desktop
+open for manual testing. Close the Librarian window to stop the session. If the
+command created the package registration, it removes that registration before
+exiting.
+
+The generated Release manifest also binds the exact WinUI loose-layout desktop
+hash. Rebuilding or modifying only the app layout or only the installer fixture
+therefore fails validation instead of launching a mixed development set.
+
+This workflow does not install the MSI, write machine-wide browser integration,
+or exercise install, upgrade, repair, rollback, or uninstall transactions. It
+refuses to replace a development identity registered from another directory.
+Developer Mode is required. At the current foundation stage, the vault-agent
+executable exits after its bounded startup status and the desktop therefore
+shows its intentional fail-closed agent-unavailable state; later product issues
+will connect the already implemented agent protocol and UI surfaces.
 
 ## Interactive Windows shell smoke test
 
@@ -68,11 +110,21 @@ development package registered from another location. If it creates the loose
 registration, it removes that registration when the test finishes; an existing
 registration for the same build layout is preserved.
 
+This interactive test is the authoritative desktop-launch check. GitHub-hosted
+Windows jobs run on Windows Server 2025, so the production MSI's Windows 11
+workstation condition deliberately prevents them from executing the destructive
+installer lifecycle. Hosted CI remains blocking for the complete build, tests,
+installer structural validation, WiX ICE validation, and Rust parity. Issue
+[#40](https://github.com/theundeadmonk/Librarian/issues/40) owns automated
+install, upgrade, repair, rollback, and removal coverage on an actual disposable
+Windows 11 workstation and the required release gate.
+
 Developer Mode and the matching Windows App Runtime are required. The official
 runtime installer is available from the
 [Windows App SDK downloads](https://learn.microsoft.com/windows/apps/windows-app-sdk/downloads)
 page. Loose registration is for development testing only and does not replace
-the signed MSIX validation planned for issue #19.
+the production installer. The destructive lifecycle remains in the repository
+but is deferred to issue #40 rather than running on an unsupported Server host.
 
 Windows is the authoritative MVP build and remains responsible for the native
 application, passkey provider, packaging boundary, and Windows-specific

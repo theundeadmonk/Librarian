@@ -17,7 +17,7 @@ jobs:
   build_and_test:
     name: Build and test Windows foundation
     runs-on: windows-2025
-    timeout-minutes: 30
+    timeout-minutes: 45
     outputs:
       rust_test_inventory: ${{ steps.rust_test_inventory.outputs.inventory }}
 
@@ -32,6 +32,11 @@ jobs:
         with:
           node-version: 24.18.0
           cache: npm
+
+      - name: Install pinned .NET SDK
+        uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5.4.0
+        with:
+          dotnet-version: 10.0.302
 
       - name: Install pinned Rust toolchain
         shell: pwsh
@@ -55,6 +60,10 @@ jobs:
         env:
           LIBRARIAN_DIFF_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
         run: ./scripts/build.ps1 -Configuration Release -Platform x64
+
+      # GitHub's hosted image is Windows Server 2025. The production MSI
+      # correctly rejects Server, so issue #40 owns destructive lifecycle
+      # automation on an actual disposable Windows 11 workstation.
 
       - name: Inventory Windows Rust tests
         id: rust_test_inventory

@@ -1,7 +1,10 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)]
-    [string]$ManifestPath
+    [string]$ManifestPath,
+
+    [ValidatePattern("^\d+\.\d+\.\d+\.\d+$")]
+    [string]$ExpectedVersion
 )
 
 Set-StrictMode -Version Latest
@@ -17,7 +20,15 @@ $workspaceVersionMatch = [regex]::Match(
 if (-not $workspaceVersionMatch.Success) {
     throw "Could not read the workspace package version from '$cargoManifestPath'."
 }
-$expectedVersion = "$($workspaceVersionMatch.Groups["version"].Value).0"
+$workspaceVersion = "$($workspaceVersionMatch.Groups["version"].Value).0"
+if (-not $ExpectedVersion) {
+    $ExpectedVersion = $workspaceVersion
+}
+foreach ($part in $ExpectedVersion.Split(".")) {
+    if ([uint32]$part -gt 65535) {
+        throw "Identity package version part '$part' exceeds 65535."
+    }
+}
 
 $expectedPackageName = "TheUndeadMonk.Librarian.Development"
 $expectedPublisher = "CN=Librarian Development"
@@ -25,7 +36,6 @@ $expectedApplications = [ordered]@{
     VaultAgent = "Librarian.VaultAgent.exe"
     Desktop = "Librarian.Windows.exe"
     ChromiumNativeHost = "Librarian.ChromiumNativeHost.exe"
-    PasskeyProvider = "Librarian.PasskeyProvider.exe"
 }
 
 $resolvedManifest = (Resolve-Path -LiteralPath $ManifestPath).Path
@@ -98,10 +108,10 @@ if ($identity.Publisher -ne $expectedPublisher) {
 if ($identity.ProcessorArchitecture -ne "neutral") {
     throw "Identity package architecture must be neutral."
 }
-if ($identity.Version -ne $expectedVersion) {
+if ($identity.Version -ne $ExpectedVersion) {
     throw (
         "Identity package version '$($identity.Version)' does not match workspace " +
-        "version '$expectedVersion'."
+        "or requested fixture version '$ExpectedVersion'."
     )
 }
 
@@ -161,6 +171,20 @@ foreach ($applicationId in $expectedApplications.Keys) {
     }
 }
 
+$passkeyProvider = $manifest.SelectSingleNode(
+    (
+        "/foundation:Package/foundation:Applications/" +
+        "foundation:Application[@Id='PasskeyProvider']"
+    ),
+    $namespaceManager
+)
+if ($passkeyProvider) {
+    throw (
+        "The identity fixture must not register a passkey provider before issue #18 " +
+        "supplies the production executable."
+    )
+}
+
 $externalManifestPaths = [ordered]@{
     Desktop = "apps\windows\Librarian.Windows\app.manifest"
     VaultAgent = "crates\vault-agent\app.manifest"
@@ -183,11 +207,11 @@ foreach ($applicationId in $externalManifestPaths.Keys) {
     if (-not $assemblyIdentity) {
         throw "'$externalManifestPath' is missing its assembly identity."
     }
-    if ($assemblyIdentity.GetAttribute("version") -ne $expectedVersion) {
+    if ($assemblyIdentity.GetAttribute("version") -ne $workspaceVersion) {
         throw (
             "'$externalManifestPath' assembly version " +
             "'$($assemblyIdentity.GetAttribute("version"))' does not match workspace " +
-            "version '$expectedVersion'."
+            "version '$workspaceVersion'."
         )
     }
 
@@ -207,5 +231,5 @@ foreach ($applicationId in $externalManifestPaths.Keys) {
 
 Write-Host "Identity package manifest validation passed."
 Write-Host "Manifest: $resolvedManifest"
-Write-Host "Version: $expectedVersion"
+Write-Host "Version: $ExpectedVersion"
 Write-Host "Applications: $($expectedApplications.Count)"

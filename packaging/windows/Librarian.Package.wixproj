@@ -1,0 +1,26 @@
+<Project Sdk="WixToolset.Sdk/7.0.0">
+  <PropertyGroup>
+    <AcceptEula>wix7</AcceptEula>
+    <Cultures>en-US</Cultures>
+    <InstallerPlatform>x64</InstallerPlatform>
+    <EnableDefaultItems>false</EnableDefaultItems>
+    <OutputName>Librarian.Package</OutputName>
+    <OutputType>Package</OutputType>
+    <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
+    <NuGetLockFilePath>$(MSBuildProjectDirectory)\Librarian.Package.packages.lock.json</NuGetLockFilePath>
+    <DefineConstants>
+      $(DefineConstants);
+      ProductVersion=$(ProductVersion);
+      PayloadDir=$(PayloadDir);
+      BrowserManifestDir=$(BrowserManifestDir);
+      CustomActionPath=$(CustomActionPath);
+      PayloadHashManifestSha256=$(PayloadHashManifestSha256);
+      LicenseRtfPath=$(LicenseRtfPath)
+    </DefineConstants>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="Package.wxs" />
+    <PackageReference Include="WixToolset.UI.wixext" Version="7.0.0" />
+    <PackageReference Include="WixToolset.Util.wixext" Version="7.0.0" />
+  </ItemGroup>
+</Project>

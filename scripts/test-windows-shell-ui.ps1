@@ -287,6 +287,17 @@ public static class PackageActivator
         throw "Librarian did not expose a top-level accessibility window within 20 seconds."
     }
 
+    $nativeWindowTitle = ""
+    $deadline = [DateTime]::UtcNow.AddSeconds(5)
+    do {
+        $process.Refresh()
+        $nativeWindowTitle = $process.MainWindowTitle
+        if ($nativeWindowTitle -eq "Librarian") {
+            break
+        }
+        Start-Sleep -Milliseconds 100
+    } while ([DateTime]::UtcNow -lt $deadline)
+
     $accessibleNames = @()
     $deadline = [DateTime]::UtcNow.AddSeconds(10)
     do {
@@ -315,11 +326,23 @@ public static class PackageActivator
         }
     } while ([DateTime]::UtcNow -lt $deadline)
 
-    $focusedName = ""
+    $retryElement = $window.FindFirst(
+        [System.Windows.Automation.TreeScope]::Descendants,
+        [System.Windows.Automation.PropertyCondition]::new(
+            [System.Windows.Automation.AutomationElement]::NameProperty,
+            "Retry vault agent connection"
+        )
+    )
+    if ($null -eq $retryElement) {
+        throw "The retry action was named but could not be resolved as an automation element."
+    }
+
+    $retryHasKeyboardFocus = $false
     $focusedDetail = "No global focused automation element was reported."
     $deadline = [DateTime]::UtcNow.AddSeconds(5)
     do {
         Start-Sleep -Milliseconds 100
+        $retryHasKeyboardFocus = $retryElement.Current.HasKeyboardFocus
         $focusedElement = [System.Windows.Automation.AutomationElement]::FocusedElement
         if ($null -ne $focusedElement) {
             $focusedDetail = (
@@ -329,22 +352,16 @@ public static class PackageActivator
                 "control type: '$($focusedElement.Current.ControlType.ProgrammaticName)'."
             )
         }
-        if (
-            $null -ne $focusedElement -and
-            $focusedElement.Current.ProcessId -eq $process.Id
-        ) {
-            $focusedName = $focusedElement.Current.Name
-        }
     } while (
-        $focusedName -ne "Retry vault agent connection" -and
+        -not $retryHasKeyboardFocus -and
         [DateTime]::UtcNow -lt $deadline
     )
 
     $checks = [ordered]@{
-        "Window title" = $window.Current.Name -eq "Librarian"
+        "Window title" = $nativeWindowTitle -eq "Librarian"
         "Fail-closed state" = $accessibleNames -contains "Vault agent unavailable"
         "Retry action" = $accessibleNames -contains "Retry vault agent connection"
-        "Initial keyboard focus" = $focusedName -eq "Retry vault agent connection"
+        "Initial keyboard focus" = $retryHasKeyboardFocus
     }
 
     foreach ($check in $checks.GetEnumerator()) {

@@ -1,6 +1,9 @@
 [CmdletBinding()]
 param(
-    [string]$MakeAppxPath
+    [string]$MakeAppxPath,
+
+    [ValidatePattern("^\d+\.\d+\.\d+\.\d+$")]
+    [string]$ProductVersion
 )
 
 Set-StrictMode -Version Latest
@@ -22,12 +25,11 @@ $workspaceVersionMatch = [regex]::Match(
 if (-not $workspaceVersionMatch.Success) {
     throw "Could not read the workspace package version from '$cargoManifestPath'."
 }
-$Version = "$($workspaceVersionMatch.Groups["version"].Value).0"
-
-if ($Version -notmatch "^\d+\.\d+\.\d+\.\d+$") {
-    throw "Identity package version '$Version' must contain four numeric parts."
+if (-not $ProductVersion) {
+    $ProductVersion = "$($workspaceVersionMatch.Groups["version"].Value).0"
 }
-foreach ($part in $Version.Split(".")) {
+
+foreach ($part in $ProductVersion.Split(".")) {
     if ([uint32]$part -gt 65535) {
         throw "Identity package version part '$part' exceeds 65535."
     }
@@ -43,14 +45,16 @@ if (-not (Test-Path -LiteralPath $MakeAppxPath -PathType Leaf)) {
     throw "MakeAppx.exe was not found at '$MakeAppxPath'."
 }
 
-$packagePath = Join-Path $packageRoot "Librarian.Identity_${Version}_neutral.msix"
+$packagePath = Join-Path $packageRoot (
+    "Librarian.Identity_${ProductVersion}_neutral.msix"
+)
 try {
     New-Item -ItemType Directory -Path $layoutPath | Out-Null
     $template = [IO.File]::ReadAllText($templatePath)
     if (-not $template.Contains("@PACKAGE_VERSION@")) {
         throw "Identity manifest template does not contain its version placeholder."
     }
-    $rendered = $template.Replace("@PACKAGE_VERSION@", $Version)
+    $rendered = $template.Replace("@PACKAGE_VERSION@", $ProductVersion)
     [IO.File]::WriteAllText(
         $renderedManifestPath,
         $rendered,
@@ -58,7 +62,8 @@ try {
     )
 
     & (Join-Path $PSScriptRoot "test-identity-package.ps1") `
-        -ManifestPath $renderedManifestPath
+        -ManifestPath $renderedManifestPath `
+        -ExpectedVersion $ProductVersion
 
     & $MakeAppxPath pack /o /d $layoutPath /nv /p $packagePath
     if ($LASTEXITCODE -ne 0) {

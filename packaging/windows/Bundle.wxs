@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Wix
+  xmlns="http://wixtoolset.org/schemas/v4/wxs"
+  xmlns:bal="http://wixtoolset.org/schemas/v4/wxs/bal">
+  <Bundle
+    Name="Librarian"
+    Manufacturer="Librarian contributors"
+    Version="$(var.ProductVersion)"
+    UpgradeCode="{F2C20990-C7A5-4672-9046-E84427EFC9B6}"
+    AboutUrl="https://github.com/theundeadmonk/Librarian"
+    Compressed="yes"
+    DisableModify="no"
+    DisableRemove="no"
+    SplashScreenSourceFile="$(var.SplashScreenPath)">
+    <BootstrapperApplication>
+      <bal:WixInternalUIBootstrapperApplication
+        Theme="standard"
+        LogoFile="$(var.LogoPath)" />
+    </BootstrapperApplication>
+    <Chain>
+      <MsiPackage
+        Id="LibrarianPackage"
+        SourceFile="$(var.MsiPath)"
+        Compressed="yes"
+        Visible="no"
+        Vital="yes"
+        bal:PrimaryPackageType="default" />
+    </Chain>
+  </Bundle>
+</Wix>
