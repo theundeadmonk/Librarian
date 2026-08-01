@@ -145,16 +145,16 @@ therefore converge independently on first launch after install or upgrade;
 repair restores the machine payload without attempting to inspect or mutate
 another Windows user's package projection.
 
-The same disposable Windows runner then executes
-`scripts\test-installer-ci.ps1`. That entry point refuses to run anywhere
-except GitHub Actions, creates a short-lived non-exportable development
-certificate plus an independent wrong-signer certificate, and trusts only
+The complete destructive lifecycle remains available through
+`scripts\test-installer-ci.ps1`. That entry point creates a short-lived
+non-exportable development certificate plus an independent wrong-signer
+certificate, and trusts only
 their public certificates for the duration of the test. It builds two valid
 signed versions and two deliberately invalid bundles: one replaces the low
 launcher with a validly signed wrong-signer copy, while the other replaces it
 with the accepted-signer high-version copy after the low manifest hashes are
-bound. The invalid-payload build hook refuses to run outside the exact
-GitHub-hosted lifecycle guard. The entry point verifies removal of all six
+bound. The invalid-payload build hook refuses to run outside the exact lifecycle
+guard. The entry point verifies removal of all six
 `TrustedPeople`, `Root`, and personal certificate-store entries in a `finally`
 block. It does not export a PFX or private key.
 
@@ -169,20 +169,34 @@ rejects a downgrade, verifies invoking-user uninstall cleanup, reinstalls, and
 confirms that a disposable per-user data sentinel survives every repair,
 update, and removal. The suite also proves setup never provisions identity for
 all users. Signed-in multi-user activation and dormant-user retention are
-interactive-VM coverage owned by issue #39, not a credential-only hosted-runner
-simulation. The hosted runner deliberately delegates the interactive WinUI
-launch assertion to
+interactive-VM coverage owned by issue #39. The lifecycle delegates the
+interactive WinUI launch assertion to
 `scripts\test-windows-shell-ui.ps1`, which must run in an interactive Windows
 desktop after the Release build. The suite may mutate Program Files, HKLM, the
 invoking user's package registration, and disposable user data, so its CI guard
 must not be removed or bypassed for developer machines.
 
+GitHub's hosted Windows image is Windows Server 2025. Librarian supports Windows
+11 workstations and intentionally rejects Server through its MSI launch
+condition, so the destructive suite is not a blocking hosted pull-request step.
+Issue [#40](https://github.com/theundeadmonk/Librarian/issues/40) owns a
+disposable Windows 11 runner and makes this suite a required installer-release
+gate. Hosted pull-request CI continues to block on the full build and test
+pipeline, structural installer validation, WiX ICE, and Rust parity.
+
+For ordinary current-user development, run `scripts\run-development.ps1` after
+the Release build. It uses Microsoft's development-only loose-file registration
+model, validates the generated payload, starts the vault-agent entry point and
+desktop under package identity, and removes only the registration it created
+when the desktop closes. It does not run the MSI or create machine-wide browser,
+Programs and Features, repair, upgrade, or uninstall state.
+
 For bounded local lifecycle diagnosis, the lower-level suite additionally
 accepts `-ConfirmDisposableVm` only inside the dedicated VMware guest whose
 operating system is Windows 11 Enterprise Evaluation and whose user is
 `librarian-test`. This exception does not permit execution on the development
-host, a general-purpose VM, or a self-hosted CI runner. Certificate creation
-and trust remain owned by the GitHub-hosted entry point above.
+host or a general-purpose VM. Issue #40 must preserve disposable runner
+isolation and bounded certificate trust when it automates this path.
 
 Windows Installer Restart Manager remains enabled so repair and upgrade can
 coordinate processes that hold product files. The lifecycle suite requires a

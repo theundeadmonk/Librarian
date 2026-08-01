@@ -421,6 +421,23 @@ if ($Configuration -eq "Release") {
         -FilePath $powerShellHost `
         -Arguments $installerTestArguments `
         -WorkingDirectory $repoRoot
+
+    Invoke-CheckedProcess `
+        -Label "Current-user development runner validation" `
+        -FilePath $powerShellHost `
+        -Arguments @(
+            "-NoProfile"
+            "-ExecutionPolicy"
+            "Bypass"
+            "-File"
+            "scripts\run-development.ps1"
+            "-Configuration"
+            $Configuration
+            "-Platform"
+            $Platform
+            "-ValidateOnly"
+        ) `
+        -WorkingDirectory $repoRoot
 }
 
 $gitMetadata = Join-Path $repoRoot ".git"

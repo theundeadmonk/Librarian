@@ -66,6 +66,30 @@ Rust tests use optimized test code with debug assertions and overflow checks
 enabled. This keeps the vault-agent integration suite's production request
 deadlines representative without relaxing those deadlines.
 
+## Run the current Windows product
+
+After a successful Release build, start a development session without
+installing the unsigned MSI fixture:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\run-development.ps1
+```
+
+The command verifies the Release payload and its hashes, registers a loose
+development package only for the current Windows user, starts the vault-agent
+entry point and desktop under their package identity, and leaves the desktop
+open for manual testing. Close the Librarian window to stop the session. If the
+command created the package registration, it removes that registration before
+exiting.
+
+This workflow does not install the MSI, write machine-wide browser integration,
+or exercise install, upgrade, repair, rollback, or uninstall transactions. It
+refuses to replace a development identity registered from another directory.
+Developer Mode is required. At the current foundation stage, the vault-agent
+executable exits after its bounded startup status and the desktop therefore
+shows its intentional fail-closed agent-unavailable state; later product issues
+will connect the already implemented agent protocol and UI surfaces.
+
 ## Interactive Windows shell smoke test
 
 After a successful Release build, run the packaged WinUI shell smoke test from
@@ -83,17 +107,20 @@ registration, it removes that registration when the test finishes; an existing
 registration for the same build layout is preserved.
 
 This interactive test is the authoritative desktop-launch check. GitHub-hosted
-Windows jobs exercise the signed MSI lifecycle in a disposable machine but do
-not own an interactive desktop session suitable for WinUI automation. Together,
-the local smoke test and CI lifecycle cover package-identity activation plus
-clean install, upgrade, repair, rollback, and removal without treating a
-developer workstation as disposable.
+Windows jobs run on Windows Server 2025, so the production MSI's Windows 11
+workstation condition deliberately prevents them from executing the destructive
+installer lifecycle. Hosted CI remains blocking for the complete build, tests,
+installer structural validation, WiX ICE validation, and Rust parity. Issue
+[#40](https://github.com/theundeadmonk/Librarian/issues/40) owns automated
+install, upgrade, repair, rollback, and removal coverage on an actual disposable
+Windows 11 workstation and the required release gate.
 
 Developer Mode and the matching Windows App Runtime are required. The official
 runtime installer is available from the
 [Windows App SDK downloads](https://learn.microsoft.com/windows/apps/windows-app-sdk/downloads)
 page. Loose registration is for development testing only and does not replace
-the issue #19 installer lifecycle.
+the production installer. The destructive lifecycle remains in the repository
+but is deferred to issue #40 rather than running on an unsupported Server host.
 
 Windows is the authoritative MVP build and remains responsible for the native
 application, passkey provider, packaging boundary, and Windows-specific

@@ -55,6 +55,23 @@ convergence remain explicit VM coverage owned by
 does not weaken publisher, signature, path, ACL, payload-hash, version, or
 fail-closed validation.
 
+## 2026-07-31 amendment: Windows 11 lifecycle execution boundary
+
+GitHub-hosted Windows jobs run Windows Server 2025. Librarian supports Windows
+11 workstations, and its production MSI must reject Server by requiring
+`MsiNTProductType = 1` for a new installation. The destructive signed-fixture
+lifecycle therefore cannot execute on the hosted runner without weakening the
+same product boundary that the installer is required to enforce.
+
+Hosted pull-request CI remains blocking for bootstrap, builds, lint, unit and
+integration tests, installer structural validation, WiX ICE, and Rust parity.
+Current-user product development uses a loose development package rather than
+installing the unsigned MSI fixture. Issue
+[#40](https://github.com/theundeadmonk/Librarian/issues/40) owns automated
+destructive lifecycle execution on an actual disposable Windows 11 workstation
+and makes it a required installer-release gate. No public MSI property or
+runtime override may bypass the production workstation condition.
+
 ## Decision
 
 ### One user-facing setup
@@ -247,7 +264,7 @@ blocks the validator's temporary unsigned MSI even when WiX is elevated. That
 exception does not suppress the structural suite, does not weaken Smart App
 Control, and is not permitted on the clean Windows CI runner.
 
-The disposable GitHub-hosted Windows runner also creates a short-lived,
+The destructive Windows 11 lifecycle runner creates a short-lived,
 non-exportable development code-signing certificate, trusts only its public
 certificate in `TrustedPeople` and `Root` for that job, and removes both
 trust entries plus the personal certificate in a verified `finally` cleanup.
@@ -258,6 +275,6 @@ current-user registration, browser opt-in, repair, interrupted-upgrade
 rollback, browser-first current-user upgrade convergence, downgrade rejection,
 invoking-user uninstall cleanup, reinstall, and retained disposable user-data
 checks. The multi-user lifecycle remains a disposable interactive-VM boundary
-under issue #39 rather than a credential-only GitHub-hosted simulation.
-The harness refuses to run on a developer or self-hosted machine and never
-exports a PFX or private key.
+under issue #39. Issue #40 owns the isolated Windows 11 runner for this
+current-user lifecycle. The harness refuses to run on a developer machine and
+never exports a PFX or private key.

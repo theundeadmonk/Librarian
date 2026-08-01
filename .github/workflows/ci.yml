@@ -61,9 +61,9 @@ jobs:
           LIBRARIAN_DIFF_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
         run: ./scripts/build.ps1 -Configuration Release -Platform x64
 
-      - name: Exercise signed installer lifecycle
-        shell: pwsh
-        run: ./scripts/test-installer-ci.ps1
+      # GitHub's hosted image is Windows Server 2025. The production MSI
+      # correctly rejects Server, so issue #40 owns destructive lifecycle
+      # automation on an actual disposable Windows 11 workstation.
 
       - name: Inventory Windows Rust tests
         id: rust_test_inventory
