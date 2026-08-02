@@ -385,7 +385,7 @@ fn passkey_transaction_bodies_bind_a_nonzero_agent_challenge() {
         .expect("canonical assertion body");
     assert_eq!(decoded.passkey_credential_id(), Some([0x55; 32]));
 
-    let rollback = OperationRequest::RollbackPasskeyCreation {
+    let confirmation = OperationRequest::ConfirmPasskeyCreation {
         proof: PasskeyTransactionProof::new(
             [0x61; 16],
             1,
@@ -394,19 +394,36 @@ fn passkey_transaction_bodies_bind_a_nonzero_agent_challenge() {
             [0x64; 16],
             &[0x65; 64],
         )
-        .expect("bounded rollback proof"),
+        .expect("bounded confirmation proof"),
         credential_id: [0x66; 32],
+    };
+    let encoded = confirmation.encode().expect("confirmation body");
+    let decoded = OperationRequest::decode(OperationCode::ConfirmPasskeyCreation, &encoded)
+        .expect("canonical confirmation body");
+    assert_eq!(decoded.passkey_credential_id(), Some([0x66; 32]));
+
+    let rollback = OperationRequest::RollbackPasskeyCreation {
+        proof: PasskeyTransactionProof::new(
+            [0x71; 16],
+            1,
+            &[0x72; 64],
+            &[0x73; 128],
+            [0x74; 16],
+            &[0x75; 64],
+        )
+        .expect("bounded rollback proof"),
+        credential_id: [0x76; 32],
     };
     let encoded = rollback.encode().expect("rollback body");
     let decoded = OperationRequest::decode(OperationCode::RollbackPasskeyCreation, &encoded)
         .expect("canonical rollback body");
-    assert_eq!(decoded.passkey_credential_id(), Some([0x66; 32]));
+    assert_eq!(decoded.passkey_credential_id(), Some([0x76; 32]));
     assert_eq!(
         decoded
             .passkey_proof()
             .expect("rollback proof")
             .transaction_id(),
-        &[0x61; 16]
+        &[0x71; 16]
     );
     assert!(OperationCode::RollbackPasskeyCreation.is_authorized_for(ClientRole::PasskeyProvider));
     assert!(!OperationCode::RollbackPasskeyCreation.is_authorized_for(ClientRole::Desktop));

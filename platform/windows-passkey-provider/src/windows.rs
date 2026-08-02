@@ -180,6 +180,8 @@ type ListCallback = unsafe extern "C" fn(
 ) -> u32;
 type MakeCallback =
     unsafe extern "C" fn(*mut c_void, *const NativeRequest, *mut NativeCredential) -> u32;
+type ConfirmMakeCallback =
+    unsafe extern "C" fn(*mut c_void, *const NativeRequest, *const u8, u32) -> u32;
 type RollbackMakeCallback =
     unsafe extern "C" fn(*mut c_void, *const NativeRequest, *const u8, u32) -> u32;
 type AssertionCallback = unsafe extern "C" fn(
@@ -197,6 +199,7 @@ struct NativeCallbacks {
     discard: DiscardCallback,
     list: ListCallback,
     make: MakeCallback,
+    confirm_make: ConfirmMakeCallback,
     rollback_make: RollbackMakeCallback,
     get_assertion: AssertionCallback,
 }
@@ -247,6 +250,7 @@ pub(crate) fn run() -> Result<(), ProviderError> {
         discard: discard_callback,
         list: list_callback,
         make: make_callback,
+        confirm_make: confirm_make_callback,
         rollback_make: rollback_make_callback,
         get_assertion: assertion_callback,
     };
@@ -702,6 +706,37 @@ unsafe extern "C" fn make_callback(
             credential.write(decoded);
         }
         Ok(())
+    })
+}
+
+unsafe extern "C" fn confirm_make_callback(
+    context: *mut c_void,
+    request: *const NativeRequest,
+    credential_id: *const u8,
+    credential_id_bytes: u32,
+) -> u32 {
+    ffi_result(|| {
+        let context = unsafe { context_ref(context)? };
+        let request = unsafe { request_ref(request)? };
+        let proof = request.transaction_proof()?;
+        let transaction_id = *proof.transaction_id();
+        let credential_id = fixed_input::<CREDENTIAL_ID_BYTES>(credential_id, credential_id_bytes)?;
+        let mut session = context
+            .take_prepared(proof.transaction_id(), proof.agent_challenge())
+            .map_err(map_provider_error)?;
+        let response = session
+            .execute(
+                &OperationRequest::ConfirmPasskeyCreation {
+                    proof,
+                    credential_id,
+                },
+                None,
+            )
+            .map_err(map_provider_error)?;
+        context
+            .restore_prepared(transaction_id, session)
+            .map_err(map_provider_error)?;
+        response_success(&response)
     })
 }
 

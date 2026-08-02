@@ -75,6 +75,10 @@ get-passkey-assertion-body = [
 delete-passkey-body = [credential-id: bytes .size 32]
 list-passkeys-for-assertion-body = [passkey-request-proof]
 list-passkeys-body = []
+confirm-passkey-creation-body = [
+  passkey-transaction-proof,
+  credential-id: bytes .size 32
+]
 rollback-passkey-creation-body = [
   passkey-transaction-proof,
   credential-id: bytes .size 32

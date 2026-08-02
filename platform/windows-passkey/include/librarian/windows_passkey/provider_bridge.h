@@ -79,6 +79,11 @@ extern "C"
         void* context,
         librarian_passkey_request const* request,
         librarian_passkey_credential* credential) noexcept;
+    using librarian_provider_confirm_make_callback = std::uint32_t (*)(
+        void* context,
+        librarian_passkey_request const* request,
+        std::uint8_t const* credential_id,
+        std::uint32_t credential_id_bytes) noexcept;
     using librarian_provider_rollback_make_callback = std::uint32_t (*)(
         void* context,
         librarian_passkey_request const* request,
@@ -98,6 +103,7 @@ extern "C"
         librarian_provider_discard_callback discard;
         librarian_provider_list_callback list;
         librarian_provider_make_callback make;
+        librarian_provider_confirm_make_callback confirm_make;
         librarian_provider_rollback_make_callback rollback_make;
         librarian_provider_assert_callback get_assertion;
     };

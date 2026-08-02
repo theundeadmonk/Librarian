@@ -2010,7 +2010,7 @@ namespace librarian::windows
                 DWORD,
                 PCWEBAUTHN_PLUGIN_CREDENTIAL_DETAILS);
             HMODULE const module = LoadLibraryExW(
-                L"webauthnplugin.dll",
+                L"webauthn.dll",
                 nullptr,
                 LOAD_LIBRARY_SEARCH_SYSTEM32);
             if (module == nullptr)

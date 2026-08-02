@@ -98,11 +98,12 @@ pub enum OperationCode {
     ListPasskeysForAssertion = 33,
     ListPasskeys = 34,
     RollbackPasskeyCreation = 35,
+    ConfirmPasskeyCreation = 36,
 }
 
 impl OperationCode {
     /// Complete closed operation set for version 1.
-    pub const ALL: [Self; 22] = [
+    pub const ALL: [Self; 23] = [
         Self::Status,
         Self::CreateVault,
         Self::UnlockMasterPassword,
@@ -125,6 +126,7 @@ impl OperationCode {
         Self::ListPasskeysForAssertion,
         Self::ListPasskeys,
         Self::RollbackPasskeyCreation,
+        Self::ConfirmPasskeyCreation,
     ];
 
     #[must_use]
@@ -162,6 +164,7 @@ impl OperationCode {
                     | Self::GetPasskeyAssertion
                     | Self::ListPasskeysForAssertion
                     | Self::RollbackPasskeyCreation
+                    | Self::ConfirmPasskeyCreation
             ),
         }
     }
@@ -182,6 +185,7 @@ impl OperationCode {
                 | Self::GetPasskeyAssertion
                 | Self::DeletePasskey
                 | Self::RollbackPasskeyCreation
+                | Self::ConfirmPasskeyCreation
         )
     }
 
@@ -206,6 +210,7 @@ impl OperationCode {
                 | Self::ListPasskeysForAssertion
                 | Self::ListPasskeys
                 | Self::RollbackPasskeyCreation
+                | Self::ConfirmPasskeyCreation
         )
     }
 
@@ -220,7 +225,8 @@ impl OperationCode {
             | Self::DeletePasskey
             | Self::ListPasskeysForAssertion
             | Self::ListPasskeys
-            | Self::RollbackPasskeyCreation => Some(crate::FEATURE_PASSKEY_PROVIDER),
+            | Self::RollbackPasskeyCreation
+            | Self::ConfirmPasskeyCreation => Some(crate::FEATURE_PASSKEY_PROVIDER),
             _ => None,
         }
     }
@@ -249,6 +255,7 @@ impl OperationCode {
             33 => Some(Self::ListPasskeysForAssertion),
             34 => Some(Self::ListPasskeys),
             35 => Some(Self::RollbackPasskeyCreation),
+            36 => Some(Self::ConfirmPasskeyCreation),
             _ => None,
         }
     }

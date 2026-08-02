@@ -280,6 +280,10 @@ pub enum OperationRequest {
         proof: PasskeyRequestProof,
     },
     ListPasskeys,
+    ConfirmPasskeyCreation {
+        proof: PasskeyTransactionProof,
+        credential_id: [u8; PASSKEY_CREDENTIAL_ID_BYTES],
+    },
     RollbackPasskeyCreation {
         proof: PasskeyTransactionProof,
         credential_id: [u8; PASSKEY_CREDENTIAL_ID_BYTES],
@@ -307,6 +311,7 @@ impl OperationRequest {
             Self::DeletePasskey { .. } => OperationCode::DeletePasskey,
             Self::ListPasskeysForAssertion { .. } => OperationCode::ListPasskeysForAssertion,
             Self::ListPasskeys => OperationCode::ListPasskeys,
+            Self::ConfirmPasskeyCreation { .. } => OperationCode::ConfirmPasskeyCreation,
             Self::RollbackPasskeyCreation { .. } => OperationCode::RollbackPasskeyCreation,
         }
     }
@@ -360,6 +365,7 @@ impl OperationRequest {
         match self {
             Self::MakePasskey { proof }
             | Self::GetPasskeyAssertion { proof, .. }
+            | Self::ConfirmPasskeyCreation { proof, .. }
             | Self::RollbackPasskeyCreation { proof, .. } => Some(proof),
             _ => None,
         }
@@ -370,6 +376,7 @@ impl OperationRequest {
         match self {
             Self::MakePasskey { proof }
             | Self::GetPasskeyAssertion { proof, .. }
+            | Self::ConfirmPasskeyCreation { proof, .. }
             | Self::RollbackPasskeyCreation { proof, .. } => Some(proof.request()),
             Self::ListPasskeysForAssertion { proof } => Some(proof),
             _ => None,
@@ -381,6 +388,7 @@ impl OperationRequest {
         match self {
             Self::GetPasskeyAssertion { credential_id, .. }
             | Self::DeletePasskey { credential_id }
+            | Self::ConfirmPasskeyCreation { credential_id, .. }
             | Self::RollbackPasskeyCreation { credential_id, .. } => Some(*credential_id),
             _ => None,
         }
@@ -481,6 +489,7 @@ impl OperationRequest {
             | OperationCode::GetPasskeyAssertion
             | OperationCode::DeletePasskey
             | OperationCode::ListPasskeysForAssertion
+            | OperationCode::ConfirmPasskeyCreation
             | OperationCode::RollbackPasskeyCreation) => {
                 decode_passkey_request(&mut decoder, operation)?
             }
@@ -556,6 +565,10 @@ impl OperationRequest {
                 encode_passkey_proof(&mut encoder, proof);
             }
             Self::GetPasskeyAssertion {
+                proof,
+                credential_id,
+            }
+            | Self::ConfirmPasskeyCreation {
                 proof,
                 credential_id,
             }
@@ -644,6 +657,13 @@ fn decode_passkey_request(
         OperationCode::RollbackPasskeyCreation => {
             expect_array(decoder, 7)?;
             Ok(OperationRequest::RollbackPasskeyCreation {
+                proof: decode_passkey_proof(decoder)?,
+                credential_id: decode_fixed_bytes(decoder)?,
+            })
+        }
+        OperationCode::ConfirmPasskeyCreation => {
+            expect_array(decoder, 7)?;
+            Ok(OperationRequest::ConfirmPasskeyCreation {
                 proof: decode_passkey_proof(decoder)?,
                 credential_id: decode_fixed_bytes(decoder)?,
             })

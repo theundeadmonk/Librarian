@@ -1024,6 +1024,11 @@ impl UnlockedVault {
         let signature: Signature = signing_key.sign(&signed_bytes);
         let signature_der = Zeroizing::new(signature.to_der().as_bytes().to_vec());
         let user_handle = Zeroizing::new(passkey.user_handle.to_vec());
+        let committed_at_ms = passkey_update_time(
+            passkey.created_at_ms,
+            self.manifest.committed_at_ms(),
+            committed_at_ms,
+        );
         let plaintext = PasskeyPlaintext::new(
             next_revision,
             passkey.created_at_ms,
@@ -1519,6 +1524,16 @@ const fn has_passkey_capacity(existing: usize) -> bool {
     existing < MAX_PASSKEY_CREDENTIALS
 }
 
+fn passkey_update_time(
+    created_at_ms: u64,
+    manifest_committed_at_ms: u64,
+    wall_clock_ms: u64,
+) -> u64 {
+    wall_clock_ms
+        .max(created_at_ms)
+        .max(manifest_committed_at_ms)
+}
+
 fn generate_signing_key(
     entropy: &mut impl EntropySource,
 ) -> Result<Zeroizing<[u8; PASSKEY_PRIVATE_KEY_BYTES]>, RecordOperationError> {
@@ -1579,13 +1594,22 @@ impl From<CreateVaultError> for RecordOperationError {
 mod tests {
     use librarian_vault_format::MAX_SERVICE_NAME_BYTES;
 
-    use super::{WebsiteAccountInput, WebsiteAccountInputError, has_passkey_capacity};
+    use super::{
+        WebsiteAccountInput, WebsiteAccountInputError, has_passkey_capacity, passkey_update_time,
+    };
 
     #[test]
     fn passkey_capacity_stops_before_management_encoding_overflows() {
         assert!(has_passkey_capacity(63));
         assert!(!has_passkey_capacity(64));
         assert!(!has_passkey_capacity(65));
+    }
+
+    #[test]
+    fn passkey_update_time_never_precedes_the_record_or_manifest() {
+        assert_eq!(passkey_update_time(20, 30, 10), 30);
+        assert_eq!(passkey_update_time(30, 20, 10), 30);
+        assert_eq!(passkey_update_time(20, 30, 40), 40);
     }
 
     #[test]

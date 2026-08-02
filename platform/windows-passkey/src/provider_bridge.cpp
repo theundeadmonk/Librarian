@@ -886,6 +886,19 @@ namespace
                 auto const rollback_result = rollback_creation();
                 return FAILED(rollback_result) ? rollback_result : result;
             }
+            result = callback_hresult(callbacks.confirm_make(
+                callbacks.context,
+                &proof,
+                credential.credential_id,
+                librarian_passkey_credential_id_bytes));
+            if (FAILED(result))
+            {
+                CoTaskMemFree(response->pbEncodedResponse);
+                *response = {};
+                static_cast<void>(api.remove_credentials(provider_clsid, 1, &details));
+                auto const rollback_result = rollback_creation();
+                return FAILED(rollback_result) ? rollback_result : result;
+            }
             if (!transaction.complete())
             {
                 CoTaskMemFree(response->pbEncodedResponse);
@@ -1271,7 +1284,8 @@ extern "C" std::uint32_t librarian_windows_passkey_provider_run(
     if (supplied_callbacks == nullptr || supplied_callbacks->context == nullptr ||
         supplied_callbacks->status == nullptr || supplied_callbacks->prepare == nullptr ||
         supplied_callbacks->discard == nullptr || supplied_callbacks->list == nullptr ||
-        supplied_callbacks->make == nullptr || supplied_callbacks->rollback_make == nullptr ||
+        supplied_callbacks->make == nullptr || supplied_callbacks->confirm_make == nullptr ||
+        supplied_callbacks->rollback_make == nullptr ||
         supplied_callbacks->get_assertion == nullptr)
     {
         return static_cast<std::uint32_t>(E_INVALIDARG);
