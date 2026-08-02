@@ -707,7 +707,7 @@ impl AgentRuntime {
                         return Err(DispatchError::Internal);
                     }
                 }
-                Err(AccountError::Aborted) | Err(AccountError::Locked) => return Ok(false),
+                Err(AccountError::Aborted | AccountError::Locked) => return Ok(false),
                 Err(AccountError::Failed) => {
                     let _ = self.account_error_after_core(vault, AccountError::Failed)?;
                     return Err(DispatchError::Internal);
