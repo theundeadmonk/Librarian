@@ -75,7 +75,7 @@
     <Feature
       Id="Core"
       Title="Librarian"
-      Description="Desktop app, vault agent, native host, and package identity."
+      Description="Desktop app, vault agent, browser bridge, passkey provider, and package identity."
       AllowAbsent="no"
       AllowAdvertise="no"
       InstallDefault="local"
@@ -127,6 +127,12 @@
           Source="$(var.PayloadDir)\Librarian.ChromiumNativeHost.exe"
           KeyPath="yes" />
       </Component>
+      <Component Id="PasskeyProviderExecutableComponent" Directory="INSTALLFOLDER" Guid="*">
+        <File
+          Id="PasskeyProviderExecutable"
+          Source="$(var.PayloadDir)\Librarian.PasskeyProvider.exe"
+          KeyPath="yes" />
+      </Component>
       <Component Id="IdentityPackageComponent" Directory="INSTALLFOLDER" Guid="*">
         <File
           Id="IdentityMsix"
@@ -164,6 +170,7 @@
         <Exclude Files="$(var.PayloadDir)\Librarian.IdentityLauncher.exe" />
         <Exclude Files="$(var.PayloadDir)\Librarian.VaultAgent.exe" />
         <Exclude Files="$(var.PayloadDir)\Librarian.ChromiumNativeHost.exe" />
+        <Exclude Files="$(var.PayloadDir)\Librarian.PasskeyProvider.exe" />
         <Exclude Files="$(var.PayloadDir)\Librarian.Identity.msix" />
         <Exclude Files="$(var.PayloadDir)\Librarian.PayloadHashes" />
       </Files>

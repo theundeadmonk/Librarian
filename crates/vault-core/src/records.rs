@@ -1,10 +1,14 @@
 use std::fmt;
 
 use librarian_vault_format::{
-    MAX_ORIGIN_BYTES, MAX_PASSWORD_BYTES, MAX_RECORDS, MAX_SERVICE_NAME_BYTES, MAX_USERNAME_BYTES,
-    Manifest, ManifestEntry, ManifestEnvelope, RecordEnvelope, VaultHeader,
-    WebsiteAccountPlaintext, encode_manifest_aad, encode_record_aad,
+    MAX_ORIGIN_BYTES, MAX_PASSKEY_RP_ID_BYTES, MAX_PASSKEY_USER_DISPLAY_NAME_BYTES,
+    MAX_PASSKEY_USER_HANDLE_BYTES, MAX_PASSKEY_USER_NAME_BYTES, MAX_PASSWORD_BYTES, MAX_RECORDS,
+    MAX_SERVICE_NAME_BYTES, MAX_USERNAME_BYTES, Manifest, ManifestEntry, ManifestEnvelope,
+    PASSKEY_CREDENTIAL_ID_BYTES, PASSKEY_PRIVATE_KEY_BYTES, PasskeyPlaintext, RecordEnvelope,
+    RecordType, VaultHeader, WebsiteAccountPlaintext, encode_manifest_aad, encode_record_aad,
+    record_type,
 };
+use p256::ecdsa::{Signature, SigningKey, signature::Signer};
 use sha2::{Digest, Sha256};
 use url::Url;
 use zeroize::Zeroizing;
@@ -17,6 +21,13 @@ use super::{
 const RECORD_LABEL_PREFIX: &[u8] = b"librarian/vault/v1/record/";
 const MAX_RECORD_ID_ATTEMPTS: usize = 128;
 const MAX_WEBSITE_ACCOUNT_PAGE_SIZE: usize = 100;
+const MAX_PASSKEY_ASSERTION_CANDIDATES: usize = 64;
+const PASSKEY_PUBLIC_KEY_BYTES: usize = 65;
+const PASSKEY_AUTHENTICATOR_DATA_BYTES: usize = 37;
+const PASSKEY_USER_PRESENT: u8 = 0x01;
+const PASSKEY_USER_VERIFIED: u8 = 0x04;
+const PASSKEY_BACKUP_ELIGIBLE: u8 = 0x08;
+const PASSKEY_BACKED_UP: u8 = 0x10;
 
 /// A stable, random identifier with no embedded timestamp or semantic value.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -176,10 +187,193 @@ impl WebsiteAccount {
     }
 }
 
+/// Actionable passkey input failures before a vault operation starts.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PasskeyInputError {
+    InvalidRpId,
+    InvalidUser,
+    FieldTooLarge,
+}
+
+impl fmt::Display for PasskeyInputError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::InvalidRpId => "relying-party identifier is invalid",
+            Self::InvalidUser => "passkey user entity is invalid",
+            Self::FieldTooLarge => "passkey field exceeds its size limit",
+        })
+    }
+}
+
+impl std::error::Error for PasskeyInputError {}
+
+/// Validated passkey user and relying-party input.
+///
+/// User-authored allocations are zeroized and this value intentionally has no
+/// formatting or cloning implementation.
+pub struct PasskeyInput {
+    rp_id: Zeroizing<String>,
+    user_handle: Zeroizing<Vec<u8>>,
+    user_name: Zeroizing<String>,
+    user_display_name: Zeroizing<String>,
+}
+
+impl PasskeyInput {
+    /// Validates and canonicalizes an exact `WebAuthn` relying-party identifier.
+    ///
+    /// # Errors
+    ///
+    /// Rejects URLs, ports, paths, empty user fields, control characters, and
+    /// values outside the `WebAuthn` and Librarian bounds.
+    pub fn new(
+        rp_id: &str,
+        user_handle: &[u8],
+        user_name: &str,
+        user_display_name: &str,
+    ) -> Result<Self, PasskeyInputError> {
+        if rp_id.len() > MAX_PASSKEY_RP_ID_BYTES
+            || user_handle.len() > MAX_PASSKEY_USER_HANDLE_BYTES
+            || user_name.len() > MAX_PASSKEY_USER_NAME_BYTES
+            || user_display_name.len() > MAX_PASSKEY_USER_DISPLAY_NAME_BYTES
+        {
+            return Err(PasskeyInputError::FieldTooLarge);
+        }
+        if user_handle.is_empty()
+            || user_name.is_empty()
+            || user_display_name.is_empty()
+            || user_name.chars().any(char::is_control)
+            || user_display_name.chars().any(char::is_control)
+        {
+            return Err(PasskeyInputError::InvalidUser);
+        }
+        let normalized_rp_id = normalize_rp_id(rp_id)?;
+        if normalized_rp_id.as_str() != rp_id {
+            return Err(PasskeyInputError::InvalidRpId);
+        }
+        Ok(Self {
+            rp_id: normalized_rp_id,
+            user_handle: Zeroizing::new(user_handle.to_vec()),
+            user_name: Zeroizing::new(user_name.to_owned()),
+            user_display_name: Zeroizing::new(user_display_name.to_owned()),
+        })
+    }
+}
+
+/// Public material returned after a passkey is durably committed.
+pub struct PasskeyCredential {
+    credential_id: [u8; PASSKEY_CREDENTIAL_ID_BYTES],
+    user_handle: Zeroizing<Vec<u8>>,
+    public_key: [u8; PASSKEY_PUBLIC_KEY_BYTES],
+}
+
+/// Public metadata for one vault-backed passkey. Private key material and the
+/// signature counter are structurally absent.
+pub struct PasskeySummary {
+    credential_id: [u8; PASSKEY_CREDENTIAL_ID_BYTES],
+    rp_id: Zeroizing<String>,
+    user_handle: Zeroizing<Vec<u8>>,
+    user_name: Zeroizing<String>,
+    user_display_name: Zeroizing<String>,
+}
+
+impl PasskeySummary {
+    #[must_use]
+    pub const fn credential_id(&self) -> &[u8; PASSKEY_CREDENTIAL_ID_BYTES] {
+        &self.credential_id
+    }
+
+    #[must_use]
+    pub fn rp_id(&self) -> &str {
+        &self.rp_id
+    }
+
+    #[must_use]
+    pub fn user_handle(&self) -> &[u8] {
+        self.user_handle.as_slice()
+    }
+
+    #[must_use]
+    pub fn user_name(&self) -> &str {
+        &self.user_name
+    }
+
+    #[must_use]
+    pub fn user_display_name(&self) -> &str {
+        &self.user_display_name
+    }
+}
+
+impl PasskeyCredential {
+    #[must_use]
+    pub const fn credential_id(&self) -> &[u8; PASSKEY_CREDENTIAL_ID_BYTES] {
+        &self.credential_id
+    }
+
+    #[must_use]
+    pub fn user_handle(&self) -> &[u8] {
+        self.user_handle.as_slice()
+    }
+
+    /// Returns the uncompressed SEC1 P-256 public point: `0x04 || X || Y`.
+    #[must_use]
+    pub const fn public_key(&self) -> &[u8; PASSKEY_PUBLIC_KEY_BYTES] {
+        &self.public_key
+    }
+}
+
+/// Transaction-bound assertion produced without releasing private material.
+pub struct PasskeyAssertion {
+    credential_id: [u8; PASSKEY_CREDENTIAL_ID_BYTES],
+    user_handle: Zeroizing<Vec<u8>>,
+    authenticator_data: [u8; PASSKEY_AUTHENTICATOR_DATA_BYTES],
+    signature_der: Zeroizing<Vec<u8>>,
+}
+
+impl PasskeyAssertion {
+    #[must_use]
+    pub const fn credential_id(&self) -> &[u8; PASSKEY_CREDENTIAL_ID_BYTES] {
+        &self.credential_id
+    }
+
+    #[must_use]
+    pub fn user_handle(&self) -> &[u8] {
+        self.user_handle.as_slice()
+    }
+
+    #[must_use]
+    pub const fn authenticator_data(&self) -> &[u8; PASSKEY_AUTHENTICATOR_DATA_BYTES] {
+        &self.authenticator_data
+    }
+
+    #[must_use]
+    pub fn signature_der(&self) -> &[u8] {
+        self.signature_der.as_slice()
+    }
+}
+
+struct PasskeyRecord {
+    id: RecordId,
+    revision: u64,
+    created_at_ms: u64,
+    signature_counter: u32,
+    rp_id: Zeroizing<String>,
+    user_handle: Zeroizing<Vec<u8>>,
+    user_name: Zeroizing<String>,
+    user_display_name: Zeroizing<String>,
+    credential_id: [u8; PASSKEY_CREDENTIAL_ID_BYTES],
+    private_key: Zeroizing<[u8; PASSKEY_PRIVATE_KEY_BYTES]>,
+}
+
+enum DecryptedRecord {
+    WebsiteAccount(WebsiteAccount),
+    Passkey(PasskeyRecord),
+}
+
 /// Deliberately small public result classes for record operations.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RecordOperationError {
     NotFound,
+    Conflict,
     Cancelled,
     Failed,
 }
@@ -187,9 +381,10 @@ pub enum RecordOperationError {
 impl fmt::Display for RecordOperationError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
-            Self::NotFound => "website account was not found",
-            Self::Cancelled => "website account operation was cancelled",
-            Self::Failed => "website account operation failed",
+            Self::NotFound => "vault record was not found",
+            Self::Conflict => "vault record conflicts with the request",
+            Self::Cancelled => "vault record operation was cancelled",
+            Self::Failed => "vault record operation failed",
         })
     }
 }
@@ -250,8 +445,17 @@ impl UnlockedVault {
     ) -> Result<Vec<WebsiteAccount>, RecordOperationError> {
         self.authenticate_snapshot_metadata(header_bytes, manifest_envelope_bytes)?;
         let mut accounts = Vec::with_capacity(records.len());
-        visit_authenticated_records(self, records, || false, |account| accounts.push(account))
-            .map_err(map_snapshot_operation_error)?;
+        visit_authenticated_records(
+            self,
+            records,
+            || false,
+            |record| {
+                if let DecryptedRecord::WebsiteAccount(account) = record {
+                    accounts.push(account);
+                }
+            },
+        )
+        .map_err(map_snapshot_operation_error)?;
         Ok(accounts)
     }
 
@@ -306,13 +510,15 @@ impl UnlockedVault {
         let mut index = 0_usize;
         let mut accounts = Vec::with_capacity(limit);
         let mut has_more = false;
-        visit_authenticated_records(self, records, should_cancel, |account| {
-            if index >= offset && index < end {
-                accounts.push(account);
-            } else if index >= end {
-                has_more = true;
+        visit_authenticated_records(self, records, should_cancel, |record| {
+            if let DecryptedRecord::WebsiteAccount(account) = record {
+                if index >= offset && index < end {
+                    accounts.push(account);
+                } else if index >= end {
+                    has_more = true;
+                }
+                index = index.saturating_add(1);
             }
-            index = index.saturating_add(1);
         })
         .map_err(map_snapshot_operation_error)?;
         Ok((accounts, has_more))
@@ -356,8 +562,10 @@ impl UnlockedVault {
     ) -> Result<WebsiteAccount, RecordOperationError> {
         self.authenticate_snapshot_metadata(header_bytes, manifest_envelope_bytes)?;
         let mut found = None;
-        visit_authenticated_records(self, records, should_cancel, |account| {
-            if account.id == id {
+        visit_authenticated_records(self, records, should_cancel, |record| {
+            if let DecryptedRecord::WebsiteAccount(account) = record
+                && account.id == id
+            {
                 found = Some(account);
             }
         })
@@ -537,6 +745,360 @@ impl UnlockedVault {
         )
     }
 
+    /// Prepares a new vault-backed ES256 passkey.
+    ///
+    /// The private scalar is generated and encrypted inside the vault core.
+    /// Only the credential identifier, user handle, and public point are
+    /// returned to the caller.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Conflict` when an authenticated excluded credential already
+    /// exists, `Cancelled` when request authority is revoked, and `Failed` for
+    /// integrity, entropy, or cryptographic failures.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "snapshot authentication and cancellation inputs remain explicit at the crypto boundary"
+    )]
+    pub fn prepare_add_passkey_with_check(
+        &self,
+        header_bytes: &[u8],
+        manifest_envelope_bytes: &[u8],
+        records: &[EncryptedRecord],
+        input: PasskeyInput,
+        excluded_credential_ids: &[[u8; PASSKEY_CREDENTIAL_ID_BYTES]],
+        committed_at_ms: u64,
+        should_cancel: impl FnMut() -> bool,
+    ) -> Result<(PreparedRecordMutation, PasskeyCredential), RecordOperationError> {
+        self.authenticate_snapshot_metadata(header_bytes, manifest_envelope_bytes)?;
+        let mut conflict = false;
+        let mut existing_credential_ids = Vec::new();
+        visit_authenticated_records(self, records, should_cancel, |record| {
+            if let DecryptedRecord::Passkey(passkey) = record {
+                if passkey.rp_id.as_str() == input.rp_id.as_str()
+                    && excluded_credential_ids.contains(&passkey.credential_id)
+                {
+                    conflict = true;
+                }
+                existing_credential_ids.push(passkey.credential_id);
+            }
+        })
+        .map_err(map_snapshot_operation_error)?;
+        if conflict {
+            return Err(RecordOperationError::Conflict);
+        }
+        if self.manifest.entries().len() >= MAX_RECORDS {
+            return Err(RecordOperationError::Failed);
+        }
+        let mut entropy = SystemEntropy;
+        let id = self.allocate_record_id(&mut entropy)?;
+        let credential_id = allocate_credential_id(&existing_credential_ids, &mut entropy)?;
+        let private_key = generate_signing_key(&mut entropy)?;
+        let signing_key =
+            SigningKey::from_slice(&*private_key).map_err(|_| RecordOperationError::Failed)?;
+        let encoded_point = signing_key.verifying_key().to_sec1_point(false);
+        let public_key: [u8; PASSKEY_PUBLIC_KEY_BYTES] = encoded_point
+            .as_bytes()
+            .try_into()
+            .map_err(|_| RecordOperationError::Failed)?;
+        let user_handle = Zeroizing::new(input.user_handle.to_vec());
+        let plaintext = PasskeyPlaintext::new(
+            1,
+            committed_at_ms,
+            committed_at_ms,
+            0,
+            input.rp_id,
+            input.user_handle,
+            input.user_name,
+            input.user_display_name,
+            credential_id,
+            private_key,
+        )
+        .map_err(|_| RecordOperationError::Failed)?;
+        let plaintext_bytes = plaintext
+            .encode()
+            .map_err(|_| RecordOperationError::Failed)?;
+        let mutation = self.prepare_plaintext_upsert(
+            RecordMutationKind::Insert,
+            id,
+            &plaintext_bytes,
+            committed_at_ms,
+            &mut entropy,
+        )?;
+        Ok((
+            mutation,
+            PasskeyCredential {
+                credential_id,
+                user_handle,
+                public_key,
+            },
+        ))
+    }
+
+    /// Lists public passkey metadata matching one exact assertion request.
+    ///
+    /// A request without an allow-list selects every credential for the exact
+    /// RP ID. A present allow-list selects only supported exact 32-byte IDs;
+    /// when none are supported it selects no credential. The complete snapshot
+    /// is authenticated before any result is returned.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Conflict` for a noncanonical RP ID or oversized allow-list,
+    /// `Cancelled` when request authority is revoked, and `Failed` for an
+    /// integrity failure, duplicate credential ID, or oversized result.
+    pub fn list_passkeys_for_assertion_with_check(
+        &self,
+        header_bytes: &[u8],
+        manifest_envelope_bytes: &[u8],
+        records: &[EncryptedRecord],
+        rp_id: &str,
+        allowed_credential_ids: Option<&[[u8; PASSKEY_CREDENTIAL_ID_BYTES]]>,
+        should_cancel: impl FnMut() -> bool,
+    ) -> Result<Vec<PasskeySummary>, RecordOperationError> {
+        let allow_list_present = allowed_credential_ids.is_some();
+        let allowed_credential_ids = allowed_credential_ids.unwrap_or_default();
+        if allowed_credential_ids.len() > MAX_PASSKEY_ASSERTION_CANDIDATES {
+            return Err(RecordOperationError::Conflict);
+        }
+        let expected_rp_id = normalize_rp_id(rp_id).map_err(|_| RecordOperationError::Conflict)?;
+        if expected_rp_id.as_str() != rp_id {
+            return Err(RecordOperationError::Conflict);
+        }
+        self.authenticate_snapshot_metadata(header_bytes, manifest_envelope_bytes)?;
+        let mut credential_ids = Vec::new();
+        let mut passkeys = Vec::new();
+        let mut invalid = false;
+        visit_authenticated_records(self, records, should_cancel, |record| {
+            if let DecryptedRecord::Passkey(passkey) = record {
+                if credential_ids.contains(&passkey.credential_id) {
+                    invalid = true;
+                    return;
+                }
+                credential_ids.push(passkey.credential_id);
+                let is_allowed =
+                    !allow_list_present || allowed_credential_ids.contains(&passkey.credential_id);
+                if passkey.rp_id.as_str() == expected_rp_id.as_str() && is_allowed {
+                    if passkeys.len() >= MAX_PASSKEY_ASSERTION_CANDIDATES {
+                        invalid = true;
+                        return;
+                    }
+                    passkeys.push(PasskeySummary {
+                        credential_id: passkey.credential_id,
+                        rp_id: passkey.rp_id,
+                        user_handle: passkey.user_handle,
+                        user_name: passkey.user_name,
+                        user_display_name: passkey.user_display_name,
+                    });
+                }
+            }
+        })
+        .map_err(map_snapshot_operation_error)?;
+        if invalid {
+            return Err(RecordOperationError::Failed);
+        }
+        Ok(passkeys)
+    }
+
+    /// Lists public metadata for every vault-backed passkey after authenticating
+    /// the complete snapshot. Private keys and signature counters are absent.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Cancelled` when request authority is revoked and `Failed` for
+    /// an integrity failure, duplicate credential ID, or oversized result.
+    pub fn list_passkeys_with_check(
+        &self,
+        header_bytes: &[u8],
+        manifest_envelope_bytes: &[u8],
+        records: &[EncryptedRecord],
+        should_cancel: impl FnMut() -> bool,
+    ) -> Result<Vec<PasskeySummary>, RecordOperationError> {
+        self.authenticate_snapshot_metadata(header_bytes, manifest_envelope_bytes)?;
+        let mut credential_ids = Vec::new();
+        let mut passkeys = Vec::new();
+        let mut invalid = false;
+        visit_authenticated_records(self, records, should_cancel, |record| {
+            if let DecryptedRecord::Passkey(passkey) = record {
+                if credential_ids.contains(&passkey.credential_id)
+                    || passkeys.len() >= MAX_PASSKEY_ASSERTION_CANDIDATES
+                {
+                    invalid = true;
+                    return;
+                }
+                credential_ids.push(passkey.credential_id);
+                passkeys.push(PasskeySummary {
+                    credential_id: passkey.credential_id,
+                    rp_id: passkey.rp_id,
+                    user_handle: passkey.user_handle,
+                    user_name: passkey.user_name,
+                    user_display_name: passkey.user_display_name,
+                });
+            }
+        })
+        .map_err(map_snapshot_operation_error)?;
+        if invalid {
+            return Err(RecordOperationError::Failed);
+        }
+        passkeys.sort_by(|left, right| {
+            left.rp_id
+                .as_str()
+                .cmp(right.rp_id.as_str())
+                .then_with(|| left.user_name.as_str().cmp(right.user_name.as_str()))
+                .then_with(|| left.credential_id.cmp(&right.credential_id))
+        });
+        Ok(passkeys)
+    }
+
+    /// Signs one exact `WebAuthn` assertion and prepares the counter update.
+    ///
+    /// `client_data_hash` must be the 32-byte hash decoded from the
+    /// Windows-signed CTAP request. The core creates the authenticator data so
+    /// a client cannot substitute a different RP hash, UV flag, or counter.
+    ///
+    /// # Errors
+    ///
+    /// Returns `NotFound` only after the full snapshot authenticates,
+    /// `Conflict` for an RP mismatch or exhausted counter, and `Cancelled` when
+    /// request authority is revoked.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "snapshot authentication and transaction-bound signing inputs remain explicit"
+    )]
+    pub fn prepare_passkey_assertion_with_check(
+        &self,
+        header_bytes: &[u8],
+        manifest_envelope_bytes: &[u8],
+        records: &[EncryptedRecord],
+        rp_id: &str,
+        credential_id: &[u8; PASSKEY_CREDENTIAL_ID_BYTES],
+        client_data_hash: &[u8; 32],
+        committed_at_ms: u64,
+        should_cancel: impl FnMut() -> bool,
+    ) -> Result<(PreparedRecordMutation, PasskeyAssertion), RecordOperationError> {
+        self.authenticate_snapshot_metadata(header_bytes, manifest_envelope_bytes)?;
+        let expected_rp_id = normalize_rp_id(rp_id).map_err(|_| RecordOperationError::Conflict)?;
+        let mut found = None;
+        let mut duplicate = false;
+        visit_authenticated_records(self, records, should_cancel, |record| {
+            if let DecryptedRecord::Passkey(passkey) = record
+                && &passkey.credential_id == credential_id
+                && found.replace(passkey).is_some()
+            {
+                duplicate = true;
+            }
+        })
+        .map_err(map_snapshot_operation_error)?;
+        if duplicate {
+            return Err(RecordOperationError::Failed);
+        }
+        let passkey = found.ok_or(RecordOperationError::NotFound)?;
+        if passkey.rp_id.as_str() != expected_rp_id.as_str() {
+            return Err(RecordOperationError::Conflict);
+        }
+        let next_revision = passkey
+            .revision
+            .checked_add(1)
+            .ok_or(RecordOperationError::Conflict)?;
+        let next_counter = passkey
+            .signature_counter
+            .checked_add(1)
+            .ok_or(RecordOperationError::Conflict)?;
+        let mut authenticator_data = [0_u8; PASSKEY_AUTHENTICATOR_DATA_BYTES];
+        authenticator_data[..32].copy_from_slice(&Sha256::digest(expected_rp_id.as_bytes()));
+        authenticator_data[32] = PASSKEY_USER_PRESENT
+            | PASSKEY_USER_VERIFIED
+            | PASSKEY_BACKUP_ELIGIBLE
+            | PASSKEY_BACKED_UP;
+        authenticator_data[33..].copy_from_slice(&next_counter.to_be_bytes());
+        let mut signed_bytes = Zeroizing::new(Vec::with_capacity(
+            PASSKEY_AUTHENTICATOR_DATA_BYTES + client_data_hash.len(),
+        ));
+        signed_bytes.extend_from_slice(&authenticator_data);
+        signed_bytes.extend_from_slice(client_data_hash);
+        let signing_key = SigningKey::from_slice(&*passkey.private_key)
+            .map_err(|_| RecordOperationError::Failed)?;
+        let signature: Signature = signing_key.sign(&signed_bytes);
+        let signature_der = Zeroizing::new(signature.to_der().as_bytes().to_vec());
+        let user_handle = Zeroizing::new(passkey.user_handle.to_vec());
+        let plaintext = PasskeyPlaintext::new(
+            next_revision,
+            passkey.created_at_ms,
+            committed_at_ms,
+            next_counter,
+            passkey.rp_id,
+            passkey.user_handle,
+            passkey.user_name,
+            passkey.user_display_name,
+            passkey.credential_id,
+            passkey.private_key,
+        )
+        .map_err(|_| RecordOperationError::Failed)?;
+        let mut entropy = SystemEntropy;
+        let plaintext_bytes = plaintext
+            .encode()
+            .map_err(|_| RecordOperationError::Failed)?;
+        let mutation = self.prepare_plaintext_upsert(
+            RecordMutationKind::Update,
+            passkey.id,
+            &plaintext_bytes,
+            committed_at_ms,
+            &mut entropy,
+        )?;
+        Ok((
+            mutation,
+            PasskeyAssertion {
+                credential_id: *credential_id,
+                user_handle,
+                authenticator_data,
+                signature_der,
+            },
+        ))
+    }
+
+    /// Prepares deletion of one passkey selected by its public credential ID.
+    ///
+    /// # Errors
+    ///
+    /// Returns `NotFound` only after complete snapshot authentication and
+    /// `Cancelled` when request authority is revoked.
+    pub fn prepare_delete_passkey_with_check(
+        &self,
+        header_bytes: &[u8],
+        manifest_envelope_bytes: &[u8],
+        records: &[EncryptedRecord],
+        credential_id: &[u8; PASSKEY_CREDENTIAL_ID_BYTES],
+        committed_at_ms: u64,
+        should_cancel: impl FnMut() -> bool,
+    ) -> Result<PreparedRecordMutation, RecordOperationError> {
+        self.authenticate_snapshot_metadata(header_bytes, manifest_envelope_bytes)?;
+        let mut found = None;
+        let mut duplicate = false;
+        visit_authenticated_records(self, records, should_cancel, |record| {
+            if let DecryptedRecord::Passkey(passkey) = record
+                && &passkey.credential_id == credential_id
+                && found.replace(passkey.id).is_some()
+            {
+                duplicate = true;
+            }
+        })
+        .map_err(map_snapshot_operation_error)?;
+        if duplicate {
+            return Err(RecordOperationError::Failed);
+        }
+        let id = found.ok_or(RecordOperationError::NotFound)?;
+        let mut entries = self.manifest.entries().to_vec();
+        entries.retain(|entry| entry.record_id() != id.as_bytes());
+        self.prepare_manifest_mutation(
+            RecordMutationKind::Delete,
+            id,
+            None,
+            entries,
+            committed_at_ms,
+            &mut SystemEntropy,
+        )
+    }
+
     /// Advances in-memory authenticated state only after `SQLite` commit.
     ///
     /// # Errors
@@ -584,20 +1146,7 @@ impl UnlockedVault {
         if self.manifest.entries().len() >= MAX_RECORDS {
             return Err(RecordOperationError::Failed);
         }
-        let id = (0..MAX_RECORD_ID_ATTEMPTS)
-            .find_map(|_| {
-                random_array(entropy)
-                    .ok()
-                    .map(RecordId::from_bytes)
-                    .filter(|candidate| {
-                        !self
-                            .manifest
-                            .entries()
-                            .iter()
-                            .any(|entry| entry.record_id() == candidate.as_bytes())
-                    })
-            })
-            .ok_or(RecordOperationError::Failed)?;
+        let id = self.allocate_record_id(entropy)?;
         self.prepare_upsert(
             RecordMutationKind::Insert,
             id,
@@ -633,10 +1182,41 @@ impl UnlockedVault {
         let plaintext_bytes = plaintext
             .encode()
             .map_err(|_| RecordOperationError::Failed)?;
+        self.prepare_plaintext_upsert(kind, id, &plaintext_bytes, committed_at_ms, entropy)
+    }
+
+    fn allocate_record_id(
+        &self,
+        entropy: &mut impl EntropySource,
+    ) -> Result<RecordId, RecordOperationError> {
+        (0..MAX_RECORD_ID_ATTEMPTS)
+            .find_map(|_| {
+                random_array(entropy)
+                    .ok()
+                    .map(RecordId::from_bytes)
+                    .filter(|candidate| {
+                        !self
+                            .manifest
+                            .entries()
+                            .iter()
+                            .any(|entry| entry.record_id() == candidate.as_bytes())
+                    })
+            })
+            .ok_or(RecordOperationError::Failed)
+    }
+
+    fn prepare_plaintext_upsert(
+        &self,
+        kind: RecordMutationKind,
+        id: RecordId,
+        plaintext_bytes: &Zeroizing<Vec<u8>>,
+        committed_at_ms: u64,
+        entropy: &mut impl EntropySource,
+    ) -> Result<PreparedRecordMutation, RecordOperationError> {
         let nonce = random_array(entropy).map_err(|_| RecordOperationError::Failed)?;
         let record_key = derive_record_key(self, id)?;
         let aad = encode_record_aad(self.vault_id(), id.as_bytes(), self.key_epoch());
-        let ciphertext = encrypt_bytes(&record_key, &nonce, &plaintext_bytes, &aad)
+        let ciphertext = encrypt_bytes(&record_key, &nonce, plaintext_bytes.as_slice(), &aad)
             .map_err(|_| RecordOperationError::Failed)?;
         let envelope = RecordEnvelope::new(self.key_epoch(), nonce, ciphertext)
             .and_then(|value| value.encode())
@@ -729,7 +1309,7 @@ fn visit_authenticated_records(
     vault: &UnlockedVault,
     records: &[EncryptedRecord],
     mut should_cancel: impl FnMut() -> bool,
-    mut visit: impl FnMut(WebsiteAccount),
+    mut visit: impl FnMut(DecryptedRecord),
 ) -> Result<(), SnapshotAuthenticationError> {
     if records.len() != vault.manifest.entries().len() || records.len() > MAX_RECORDS {
         return Err(SnapshotAuthenticationError::Failed);
@@ -749,7 +1329,7 @@ fn visit_authenticated_records(
         {
             return Err(SnapshotAuthenticationError::Failed);
         }
-        visit(decrypt_website_account(vault, record)?);
+        visit(decrypt_record(vault, record)?);
     }
     Ok(())
 }
@@ -772,10 +1352,10 @@ fn decrypt_manifest(
     Manifest::decode(&plaintext).map_err(|_| RecordOperationError::Failed)
 }
 
-fn decrypt_website_account(
+fn decrypt_record(
     vault: &UnlockedVault,
     record: &EncryptedRecord,
-) -> Result<WebsiteAccount, SnapshotAuthenticationError> {
+) -> Result<DecryptedRecord, SnapshotAuthenticationError> {
     let envelope = RecordEnvelope::decode(&record.envelope)
         .map_err(|_| SnapshotAuthenticationError::Failed)?;
     if envelope.key_epoch() != vault.key_epoch() {
@@ -786,7 +1366,17 @@ fn decrypt_website_account(
     let aad = encode_record_aad(vault.vault_id(), record.id.as_bytes(), vault.key_epoch());
     let plaintext = decrypt_bytes(&record_key, envelope.nonce(), envelope.ciphertext(), &aad)
         .map_err(|()| SnapshotAuthenticationError::Failed)?;
-    let decoded = WebsiteAccountPlaintext::decode(&plaintext)
+    match record_type(&plaintext).map_err(|_| SnapshotAuthenticationError::Failed)? {
+        RecordType::WebsiteAccount => decrypt_website_account_plaintext(record.id, &plaintext),
+        RecordType::Passkey => decrypt_passkey_plaintext(record.id, &plaintext),
+    }
+}
+
+fn decrypt_website_account_plaintext(
+    id: RecordId,
+    plaintext: &[u8],
+) -> Result<DecryptedRecord, SnapshotAuthenticationError> {
+    let decoded = WebsiteAccountPlaintext::decode(plaintext)
         .map_err(|_| SnapshotAuthenticationError::Failed)?;
     let normalized = normalize_origin(decoded.permitted_origin())
         .map_err(|_| SnapshotAuthenticationError::Failed)?;
@@ -797,8 +1387,8 @@ fn decrypt_website_account(
     let created_at_ms = decoded.created_at_ms();
     let modified_at_ms = decoded.modified_at_ms();
     let (service_name, permitted_origin, username, password) = decoded.into_fields();
-    Ok(WebsiteAccount {
-        id: record.id,
+    Ok(DecryptedRecord::WebsiteAccount(WebsiteAccount {
+        id,
         revision,
         created_at_ms,
         modified_at_ms,
@@ -806,7 +1396,39 @@ fn decrypt_website_account(
         permitted_origin,
         username,
         password,
-    })
+    }))
+}
+
+fn decrypt_passkey_plaintext(
+    id: RecordId,
+    plaintext: &[u8],
+) -> Result<DecryptedRecord, SnapshotAuthenticationError> {
+    let decoded =
+        PasskeyPlaintext::decode(plaintext).map_err(|_| SnapshotAuthenticationError::Failed)?;
+    let normalized =
+        normalize_rp_id(decoded.rp_id()).map_err(|_| SnapshotAuthenticationError::Failed)?;
+    if normalized.as_str() != decoded.rp_id() {
+        return Err(SnapshotAuthenticationError::Failed);
+    }
+    SigningKey::from_slice(decoded.private_key())
+        .map_err(|_| SnapshotAuthenticationError::Failed)?;
+    let revision = decoded.revision();
+    let created_at_ms = decoded.created_at_ms();
+    let signature_counter = decoded.signature_counter();
+    let (rp_id, user_handle, user_name, user_display_name, credential_id, private_key) =
+        decoded.into_fields();
+    Ok(DecryptedRecord::Passkey(PasskeyRecord {
+        id,
+        revision,
+        created_at_ms,
+        signature_counter,
+        rp_id,
+        user_handle,
+        user_name,
+        user_display_name,
+        credential_id,
+        private_key,
+    }))
 }
 
 fn derive_record_key(
@@ -841,6 +1463,68 @@ fn normalize_origin(value: &str) -> Result<Zeroizing<String>, WebsiteAccountInpu
         return Err(WebsiteAccountInputError::InvalidOrigin);
     }
     Ok(Zeroizing::new(normalized))
+}
+
+fn normalize_rp_id(value: &str) -> Result<Zeroizing<String>, PasskeyInputError> {
+    if value.is_empty()
+        || value.len() > MAX_PASSKEY_RP_ID_BYTES
+        || value.chars().any(char::is_control)
+    {
+        return Err(if value.len() > MAX_PASSKEY_RP_ID_BYTES {
+            PasskeyInputError::FieldTooLarge
+        } else {
+            PasskeyInputError::InvalidRpId
+        });
+    }
+    let parsed =
+        Url::parse(&format!("https://{value}")).map_err(|_| PasskeyInputError::InvalidRpId)?;
+    if parsed.host().is_none()
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.port().is_some()
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+        || parsed.path() != "/"
+    {
+        return Err(PasskeyInputError::InvalidRpId);
+    }
+    let host = parsed
+        .host_str()
+        .ok_or(PasskeyInputError::InvalidRpId)?
+        .trim_end_matches('.')
+        .to_ascii_lowercase();
+    if host.is_empty() || host.len() > MAX_PASSKEY_RP_ID_BYTES || value.ends_with('.') {
+        return Err(PasskeyInputError::InvalidRpId);
+    }
+    Ok(Zeroizing::new(host))
+}
+
+fn allocate_credential_id(
+    existing: &[[u8; PASSKEY_CREDENTIAL_ID_BYTES]],
+    entropy: &mut impl EntropySource,
+) -> Result<[u8; PASSKEY_CREDENTIAL_ID_BYTES], RecordOperationError> {
+    (0..MAX_RECORD_ID_ATTEMPTS)
+        .find_map(|_| {
+            let candidate: [u8; PASSKEY_CREDENTIAL_ID_BYTES] = random_array(entropy).ok()?;
+            (candidate != [0; PASSKEY_CREDENTIAL_ID_BYTES] && !existing.contains(&candidate))
+                .then_some(candidate)
+        })
+        .ok_or(RecordOperationError::Failed)
+}
+
+fn generate_signing_key(
+    entropy: &mut impl EntropySource,
+) -> Result<Zeroizing<[u8; PASSKEY_PRIVATE_KEY_BYTES]>, RecordOperationError> {
+    for _ in 0..MAX_RECORD_ID_ATTEMPTS {
+        let mut candidate = Zeroizing::new([0_u8; PASSKEY_PRIVATE_KEY_BYTES]);
+        entropy
+            .fill(candidate.as_mut())
+            .map_err(|_| RecordOperationError::Failed)?;
+        if SigningKey::from_slice(candidate.as_ref()).is_ok() {
+            return Ok(candidate);
+        }
+    }
+    Err(RecordOperationError::Failed)
 }
 
 fn validate_input_lengths(

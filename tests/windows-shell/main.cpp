@@ -18,6 +18,8 @@ namespace
     using librarian::windows::ClientError;
     using librarian::windows::ClientResult;
     using librarian::windows::IDesktopClient;
+    using librarian::windows::PasskeyListResult;
+    using librarian::windows::PasskeySummary;
     using librarian::windows::SecretText;
     using librarian::windows::ShellState;
     using librarian::windows::ShellViewModel;
@@ -59,6 +61,8 @@ namespace
         ClientResult lock_result{ ClientError::None, VaultStatus::Locked };
         ClientResult save_result{ ClientError::None, VaultStatus::Unlocked };
         AccountListResult list_result{};
+        PasskeyListResult passkey_list_result{};
+        ClientResult delete_passkey_result{ ClientError::None, VaultStatus::Unlocked };
         std::wstring expected_password;
         bool password_matched{ false };
         int status_calls{ 0 };
@@ -70,6 +74,9 @@ namespace
         int lock_calls{ 0 };
         std::vector<std::uint32_t> list_offsets;
         int save_calls{ 0 };
+        int list_passkey_calls{ 0 };
+        int delete_passkey_calls{ 0 };
+        std::wstring deleted_passkey_id;
         int close_calls{ 0 };
         std::atomic_bool closed{ false };
 
@@ -168,6 +175,32 @@ namespace
                 });
             }
             return save_result;
+        }
+
+        [[nodiscard]] PasskeyListResult ListPasskeys() override
+        {
+            ++list_passkey_calls;
+            if (closed.load(std::memory_order_acquire))
+            {
+                return { ClientError::Cancelled, {} };
+            }
+            return passkey_list_result;
+        }
+
+        [[nodiscard]] ClientResult DeletePasskey(
+            std::wstring_view const credential_id) override
+        {
+            ++delete_passkey_calls;
+            deleted_passkey_id = credential_id;
+            if (closed.load(std::memory_order_acquire))
+            {
+                return Closed();
+            }
+            if (delete_passkey_result.error == ClientError::None)
+            {
+                passkey_list_result.passkeys.clear();
+            }
+            return delete_passkey_result;
         }
 
         void Close() noexcept override
@@ -280,6 +313,30 @@ namespace
             "completed lock no longer reports an in-flight request");
         test.Check(model.State() == ShellState::Locked, "lock returns to the native unlock surface");
         test.Check(model.Accounts().empty(), "lock clears account summaries from the view model");
+    }
+
+    void TestPasskeyDeletionLifecycle(TestContext& test)
+    {
+        auto client = ClientWithStatus(VaultStatus::Unlocked);
+        std::wstring const credential_id(64U, L'a');
+        client->passkey_list_result.passkeys.push_back({
+            credential_id,
+            L"example.com",
+            L"person@example.com",
+            L"Disposable Person",
+        });
+        ShellViewModel model{ client };
+        InitializeModel(model);
+        test.Check(model.Passkeys().size() == 1U, "unlocked status loads passkey summaries");
+        test.Check(model.BeginDeletePasskey(), "unlocked vault begins passkey deletion");
+        auto outcome = model.ExecuteDeletePasskeyRequest(credential_id);
+        model.CompleteDeletePasskey(std::move(outcome));
+        test.Check(client->delete_passkey_calls == 1, "passkey deletion is submitted once");
+        test.Check(
+            client->deleted_passkey_id == credential_id,
+            "passkey deletion uses the selected public credential ID");
+        test.Check(model.State() == ShellState::Unlocked, "passkey deletion keeps vault unlocked");
+        test.Check(model.Passkeys().empty(), "passkey deletion refreshes the management list");
     }
 
     void TestActivationRefreshFailsClosed(TestContext& test)
@@ -741,6 +798,8 @@ namespace
             "x:Name=\"AccountPaginationPanel\"",
             "Click=\"OnPreviousAccountPageClicked\"",
             "Click=\"OnNextAccountPageClicked\"",
+            "x:Name=\"PasskeysListView\"",
+            "Click=\"OnDeletePasskeyClicked\"",
         };
 
         for (auto const fragment : required)
@@ -787,6 +846,7 @@ namespace
             "CompleteLock(std::move(*outcome))",
             "CompleteRetry(std::move(*outcome))",
             "CompleteSaveAccount(std::move(*outcome))",
+            "CompleteDeletePasskey(std::move(*outcome))",
             "fire_and_forget MainWindow::OnLoaded",
             "void MainWindow::OnSecurityTimerTick",
             "GetLastInputInfo(&information)",
@@ -814,6 +874,7 @@ int main(int const argc, char const* const* const argv)
     TestContext test;
     TestInitialStates(test);
     TestUnlockLifecycle(test);
+    TestPasskeyDeletionLifecycle(test);
     TestActivationRefreshFailsClosed(test);
     TestAccountPagingIsBounded(test);
     TestUnlockFailuresAreSafe(test);

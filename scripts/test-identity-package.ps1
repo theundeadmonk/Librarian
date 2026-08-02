@@ -36,6 +36,7 @@ $expectedApplications = [ordered]@{
     VaultAgent = "Librarian.VaultAgent.exe"
     Desktop = "Librarian.Windows.exe"
     ChromiumNativeHost = "Librarian.ChromiumNativeHost.exe"
+    PasskeyProvider = "Librarian.PasskeyProvider.exe"
 }
 
 $resolvedManifest = (Resolve-Path -LiteralPath $ManifestPath).Path
@@ -54,9 +55,99 @@ $namespaceManager.AddNamespace(
     "http://schemas.microsoft.com/appx/manifest/uap/windows10/10"
 )
 $namespaceManager.AddNamespace(
+    "com",
+    "http://schemas.microsoft.com/appx/manifest/com/windows10"
+)
+$namespaceManager.AddNamespace(
     "rescap",
     "http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
 )
+
+function Assert-ExactProviderComInventory {
+    param(
+        [Parameter(Mandatory)][xml]$Document,
+        [Parameter(Mandatory)][Xml.XmlNamespaceManager]$Namespaces
+    )
+
+    $provider = $Document.SelectSingleNode(
+        (
+            "/foundation:Package/foundation:Applications/" +
+            "foundation:Application[@Id='PasskeyProvider']"
+        ),
+        $Namespaces
+    )
+    if (-not $provider) {
+        throw "The identity fixture is missing the passkey-provider application."
+    }
+
+    $extensionContainers = @($provider.SelectNodes("foundation:Extensions", $Namespaces))
+    $extensions = @(
+        if ($extensionContainers.Count -eq 1) {
+            $extensionContainers[0].ChildNodes |
+                Where-Object { $_.NodeType -eq [Xml.XmlNodeType]::Element }
+        }
+    )
+    if ($extensionContainers.Count -ne 1 -or $extensions.Count -ne 1) {
+        throw "The passkey provider must contain exactly one extension."
+    }
+
+    $comNamespace = $Namespaces.LookupNamespace("com")
+    $extension = $extensions[0]
+    if ($extension.NamespaceURI -ne $comNamespace -or
+        $extension.LocalName -ne "Extension" -or
+        $extension.GetAttribute("Category") -ne "windows.comServer") {
+        throw "The passkey provider contains an unexpected extension."
+    }
+
+    $comNodes = @($Document.SelectNodes("//*[namespace-uri()='$comNamespace']"))
+    $expectedComNodes = @("Extension", "ComServer", "ExeServer", "Class")
+    $actualComNodes = @($comNodes | ForEach-Object { $_.LocalName })
+    if (($actualComNodes -join ",") -ne ($expectedComNodes -join ",")) {
+        throw (
+            "The identity fixture contains an unexpected packaged COM inventory. " +
+            "Expected '$($expectedComNodes -join ", ")'; found " +
+            "'$($actualComNodes -join ", ")'."
+        )
+    }
+
+    $comServer = $extension.SelectSingleNode("com:ComServer", $Namespaces)
+    $exeServer = if ($comServer) {
+        $comServer.SelectSingleNode("com:ExeServer", $Namespaces)
+    }
+    $providerClass = if ($exeServer) {
+        $exeServer.SelectSingleNode("com:Class", $Namespaces)
+    }
+    if (-not $comServer -or -not $exeServer -or -not $providerClass -or
+        $exeServer.GetAttribute("Executable") -ne "Librarian.PasskeyProvider.exe" -or
+        $exeServer.GetAttribute("Arguments") -ne "-PluginActivated" -or
+        $exeServer.GetAttribute("DisplayName") -ne "Librarian passkey provider" -or
+        $providerClass.GetAttribute("Id") -ne
+            "68FE5DF7-9FE6-4145-BBA0-95010F43BFBE" -or
+        $providerClass.GetAttribute("DisplayName") -ne "Librarian passkey provider") {
+        throw "The identity fixture is missing the exact passkey-provider COM server."
+    }
+}
+
+function Assert-RejectsProviderComMutation {
+    param(
+        [Parameter(Mandatory)][xml]$Source,
+        [Parameter(Mandatory)][scriptblock]$Mutate,
+        [Parameter(Mandatory)][string]$Label
+    )
+
+    [xml]$copy = $Source.OuterXml
+    $copyNamespaces = New-Object Xml.XmlNamespaceManager($copy.NameTable)
+    foreach ($prefix in @("foundation", "com")) {
+        $copyNamespaces.AddNamespace($prefix, $namespaceManager.LookupNamespace($prefix))
+    }
+    & $Mutate $copy $copyNamespaces
+    try {
+        Assert-ExactProviderComInventory -Document $copy -Namespaces $copyNamespaces
+    } catch {
+        return
+    }
+    throw "The identity policy accepted the negative '$Label' COM fixture."
+}
 
 $package = $manifest.SelectSingleNode("/foundation:Package", $namespaceManager)
 $ignorableNamespaces = @(
@@ -65,7 +156,7 @@ $ignorableNamespaces = @(
         [StringSplitOptions]::RemoveEmptyEntries
     )
 )
-foreach ($namespace in @("uap", "uap10", "rescap")) {
+foreach ($namespace in @("uap", "uap10", "com", "rescap")) {
     if ($namespace -notin $ignorableNamespaces) {
         throw "Identity package must mark '$namespace' as an ignorable namespace."
     }
@@ -171,24 +262,54 @@ foreach ($applicationId in $expectedApplications.Keys) {
     }
 }
 
-$passkeyProvider = $manifest.SelectSingleNode(
-    (
-        "/foundation:Package/foundation:Applications/" +
-        "foundation:Application[@Id='PasskeyProvider']"
-    ),
-    $namespaceManager
+Assert-ExactProviderComInventory -Document $manifest -Namespaces $namespaceManager
+
+$providerClassXPath = (
+    "/foundation:Package/foundation:Applications/" +
+    "foundation:Application[@Id='PasskeyProvider']/" +
+    "foundation:Extensions/com:Extension/com:ComServer/com:ExeServer/com:Class"
 )
-if ($passkeyProvider) {
-    throw (
-        "The identity fixture must not register a passkey provider before issue #18 " +
-        "supplies the production executable."
-    )
+$providerExeServerXPath = (
+    "/foundation:Package/foundation:Applications/" +
+    "foundation:Application[@Id='PasskeyProvider']/" +
+    "foundation:Extensions/com:Extension/com:ComServer/com:ExeServer"
+)
+$providerComServerXPath = (
+    "/foundation:Package/foundation:Applications/" +
+    "foundation:Application[@Id='PasskeyProvider']/" +
+    "foundation:Extensions/com:Extension/com:ComServer"
+)
+$providerExtensionXPath = (
+    "/foundation:Package/foundation:Applications/" +
+    "foundation:Application[@Id='PasskeyProvider']/" +
+    "foundation:Extensions/com:Extension"
+)
+Assert-RejectsProviderComMutation -Source $manifest -Label "extra Class" -Mutate {
+    param($copy, $namespaces)
+    $node = $copy.SelectSingleNode($providerClassXPath, $namespaces)
+    [void]$node.ParentNode.AppendChild($node.CloneNode($true))
+}
+Assert-RejectsProviderComMutation -Source $manifest -Label "extra ExeServer" -Mutate {
+    param($copy, $namespaces)
+    $node = $copy.SelectSingleNode($providerExeServerXPath, $namespaces)
+    [void]$node.ParentNode.AppendChild($node.CloneNode($true))
+}
+Assert-RejectsProviderComMutation -Source $manifest -Label "extra ComServer" -Mutate {
+    param($copy, $namespaces)
+    $node = $copy.SelectSingleNode($providerComServerXPath, $namespaces)
+    [void]$node.ParentNode.AppendChild($node.CloneNode($true))
+}
+Assert-RejectsProviderComMutation -Source $manifest -Label "extra Extension" -Mutate {
+    param($copy, $namespaces)
+    $node = $copy.SelectSingleNode($providerExtensionXPath, $namespaces)
+    [void]$node.ParentNode.AppendChild($node.CloneNode($true))
 }
 
 $externalManifestPaths = [ordered]@{
     Desktop = "apps\windows\Librarian.Windows\app.manifest"
     VaultAgent = "crates\vault-agent\app.manifest"
     ChromiumNativeHost = "platform\chromium-native-host\app.manifest"
+    PasskeyProvider = "platform\windows-passkey-provider\app.manifest"
 }
 
 foreach ($applicationId in $externalManifestPaths.Keys) {

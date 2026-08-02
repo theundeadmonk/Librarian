@@ -8,15 +8,16 @@ Librarian's single Windows setup lifecycle. The implementation follows
 
 `LibrarianSetup.exe` is the only user-facing installer. Its compressed WiX Burn
 bundle owns one per-machine MSI and one Programs and Features entry. The MSI
-installs the three product-role executables that currently exist:
+installs the four product-role executables that currently exist:
 
 - `Librarian.Windows.exe`
 - `Librarian.VaultAgent.exe`
 - `Librarian.ChromiumNativeHost.exe`
+- `Librarian.PasskeyProvider.exe`
 
 It also installs the narrow support executable
 `Librarian.IdentityLauncher.exe`. The one Start-menu shortcut and setup's
-optional post-install launch target this executable. It is not a fourth product
+optional post-install launch target this executable. It is not a fifth product
 role or separate user-facing application: it validates the installed payload,
 reconciles external-location package identity for the current user, and then
 opens `Librarian.Windows.exe`. Chrome and Edge also start this launcher through
@@ -25,9 +26,9 @@ identity convergence, preserves the browser's standard-input/output channel
 and documented origin/parent-window arguments, and waits for
 `Librarian.ChromiumNativeHost.exe`.
 
-The passkey-provider role is reserved for issue
-[#18](https://github.com/theundeadmonk/Librarian/issues/18). This installer
-does not add a placeholder executable, application identity, or registration.
+The real passkey-provider role is package-identified in the same external
+location. The launcher registers it with Windows only after package identity
+converges, and unregisters it before removing a temporary development identity.
 
 The WinUI app is built with the Windows App SDK self-contained deployment mode
 and Microsoft's hybrid CRT configuration. Its required Windows App SDK runtime
@@ -93,7 +94,7 @@ values. They are not published extension identities. An unsigned fixture must
 never be installed.
 
 The structural suite decompiles the MSI, extracts the Burn bundle, checks the
-three product roles and launcher boundary, feature conditions, registry
+four product roles and launcher boundary, feature conditions, registry
 ownership, custom-action modes and exports, package identity, hashes,
 native-messaging origins, signing mode, the x64 Windows 11 workstation build
 26100 launch condition, the protected SYSTEM-owned Program Files ACL,
@@ -121,8 +122,8 @@ files, metadata, and executable dependencies, is named by a canonical relative
 path and hashed in a bounded fixed-format manifest installed beside the
 binaries. Only that manifest's SHA-256 is passed through deferred custom-action
 data. The System-context custom action first uses Windows `WinVerifyTrust` to
-require its own module and Librarian's five identity-bearing payloads (launcher,
-desktop, vault agent, native host, and identity package) to have a valid chain,
+require its own module and Librarian's six identity-bearing payloads (launcher,
+desktop, vault agent, native host, passkey provider, and identity package) to have a valid chain,
 the expected code-signing publisher, and one matching signer certificate. It
 then validates the protected manifest path, rejects reparse points, verifies
 the manifest hash, and verifies every named payload file before setup can
@@ -176,8 +177,8 @@ self-hosted runners fail before certificate creation or installer execution.
 The entry point passes a bounded runner-mode marker only to its nested fixture
 builds and lifecycle process.
 
-The lifecycle suite rejects unsigned, validly signed wrong-signer,
-accepted-signer mixed-release, and unexpected-provider installs without
+The lifecycle suite rejects unsigned, validly signed wrong-signer, and
+accepted-signer mixed-release installs without
 leaving product state. It then validates a clean installation, registers the
 invoking user through the launcher, opts into and repairs both browser
 registrations, and rolls back injected repair and upgrade failures. It proves

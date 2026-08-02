@@ -4,9 +4,9 @@ use zeroize::Zeroizing;
 use crate::{
     AgentState, MAX_PAYLOAD_BYTES, OperationCode, ProtocolError,
     cbor::{
-        SecretWriter, decode_bounded_text, decode_fixed_bytes, decode_u16, decode_u32, decode_u64,
-        encode_array, encode_bytes, encode_null, encode_text, encode_u8, encode_u16, encode_u32,
-        encode_u64, expect_array, require_end,
+        SecretWriter, decode_bounded_bytes, decode_bounded_text, decode_fixed_bytes, decode_u8,
+        decode_u16, decode_u32, decode_u64, encode_array, encode_bytes, encode_null, encode_text,
+        encode_u8, encode_u16, encode_u32, encode_u64, expect_array, require_end,
     },
 };
 
@@ -15,6 +15,17 @@ const MAX_SERVICE_NAME_BYTES: usize = 256;
 const MAX_ORIGIN_BYTES: usize = 2_048;
 const MAX_USERNAME_BYTES: usize = 1_024;
 const MAX_PASSWORD_BYTES: usize = 16 * 1_024;
+const MAX_PASSKEY_ENCODED_REQUEST_BYTES: usize = 48 * 1_024;
+const MAX_PASSKEY_SIGNATURE_BYTES: usize = 2 * 1_024;
+const MAX_PASSKEY_USER_HANDLE_BYTES: usize = 64;
+const MAX_PASSKEY_RP_ID_BYTES: usize = 253;
+const MAX_PASSKEY_USER_NAME_BYTES: usize = 256;
+const MAX_PASSKEY_CREDENTIALS: usize = 64;
+const PASSKEY_CREDENTIAL_ID_BYTES: usize = 32;
+const PASSKEY_PUBLIC_KEY_BYTES: usize = 65;
+const PASSKEY_AUTHENTICATOR_DATA_BYTES: usize = 37;
+const MAX_PASSKEY_ASSERTION_SIGNATURE_BYTES: usize = 80;
+const CTAP2_CBOR_REQUEST_TYPE: u8 = 1;
 const MAX_LIST_PAGE_SIZE: u16 = 100;
 const MAX_REQUEST_BODY_BYTES: usize = MAX_PAYLOAD_BYTES - 128;
 const MAX_RESPONSE_BODY_BYTES: usize = MAX_PAYLOAD_BYTES - 96;
@@ -26,6 +37,148 @@ pub struct AccountFields {
     permitted_origin: Zeroizing<String>,
     username: Zeroizing<String>,
     password: Zeroizing<String>,
+}
+
+/// One bounded Windows-signed `WebAuthn` plugin request.
+///
+/// The agent verifies this proof before returning public credential metadata.
+/// It is intentionally insufficient to authorize private-key use.
+pub struct PasskeyRequestProof {
+    transaction_id: [u8; 16],
+    request_type: u8,
+    request_signature: Zeroizing<Vec<u8>>,
+    encoded_request: Zeroizing<Vec<u8>>,
+}
+
+impl PasskeyRequestProof {
+    /// Constructs one bounded Windows request proof.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a zero transaction, unsupported request type, empty proof, or
+    /// values outside the protocol bounds.
+    pub fn new(
+        transaction_id: [u8; 16],
+        request_type: u8,
+        request_signature: &[u8],
+        encoded_request: &[u8],
+    ) -> Result<Self, ProtocolError> {
+        if transaction_id == [0; 16]
+            || request_type != CTAP2_CBOR_REQUEST_TYPE
+            || request_signature.is_empty()
+            || encoded_request.is_empty()
+        {
+            return Err(ProtocolError::InvariantViolation);
+        }
+        if request_signature.len() > MAX_PASSKEY_SIGNATURE_BYTES
+            || encoded_request.len() > MAX_PASSKEY_ENCODED_REQUEST_BYTES
+        {
+            return Err(ProtocolError::TooLarge);
+        }
+        Ok(Self {
+            transaction_id,
+            request_type,
+            request_signature: Zeroizing::new(request_signature.to_vec()),
+            encoded_request: Zeroizing::new(encoded_request.to_vec()),
+        })
+    }
+
+    #[must_use]
+    pub const fn transaction_id(&self) -> &[u8; 16] {
+        &self.transaction_id
+    }
+
+    #[must_use]
+    pub const fn request_type(&self) -> u8 {
+        self.request_type
+    }
+
+    #[must_use]
+    pub fn request_signature(&self) -> &[u8] {
+        self.request_signature.as_slice()
+    }
+
+    #[must_use]
+    pub fn encoded_request(&self) -> &[u8] {
+        self.encoded_request.as_slice()
+    }
+}
+
+/// Windows-signed request plus the matching Windows Hello UV proof. The agent
+/// validates both proofs independently before permitting private-key use.
+pub struct PasskeyTransactionProof {
+    request: PasskeyRequestProof,
+    agent_challenge: [u8; 16],
+    user_verification_signature: Zeroizing<Vec<u8>>,
+}
+
+impl PasskeyTransactionProof {
+    /// Constructs one bounded proof envelope.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a zero transaction, unsupported request type, empty proof, or
+    /// values outside the protocol bounds.
+    pub fn new(
+        transaction_id: [u8; 16],
+        request_type: u8,
+        request_signature: &[u8],
+        encoded_request: &[u8],
+        agent_challenge: [u8; 16],
+        user_verification_signature: &[u8],
+    ) -> Result<Self, ProtocolError> {
+        if agent_challenge == [0; 16] || user_verification_signature.is_empty() {
+            return Err(ProtocolError::InvariantViolation);
+        }
+        if user_verification_signature.len() > MAX_PASSKEY_SIGNATURE_BYTES {
+            return Err(ProtocolError::TooLarge);
+        }
+        Ok(Self {
+            request: PasskeyRequestProof::new(
+                transaction_id,
+                request_type,
+                request_signature,
+                encoded_request,
+            )?,
+            agent_challenge,
+            user_verification_signature: Zeroizing::new(user_verification_signature.to_vec()),
+        })
+    }
+
+    #[must_use]
+    pub const fn request(&self) -> &PasskeyRequestProof {
+        &self.request
+    }
+
+    #[must_use]
+    pub const fn transaction_id(&self) -> &[u8; 16] {
+        self.request.transaction_id()
+    }
+
+    #[must_use]
+    pub const fn request_type(&self) -> u8 {
+        self.request.request_type()
+    }
+
+    #[must_use]
+    pub fn request_signature(&self) -> &[u8] {
+        self.request.request_signature()
+    }
+
+    #[must_use]
+    pub fn encoded_request(&self) -> &[u8] {
+        self.request.encoded_request()
+    }
+
+    #[must_use]
+    pub fn user_verification_signature(&self) -> &[u8] {
+        self.user_verification_signature.as_slice()
+    }
+
+    #[must_use]
+    pub const fn agent_challenge(&self) -> &[u8; 16] {
+        &self.agent_challenge
+    }
 }
 
 impl AccountFields {
@@ -82,17 +235,51 @@ impl AccountFields {
 /// adds a complete schema.
 pub enum OperationRequest {
     Status,
-    CreateVault { master_password: Zeroizing<String> },
-    UnlockMasterPassword { master_password: Zeroizing<String> },
+    CreateVault {
+        master_password: Zeroizing<String>,
+    },
+    UnlockMasterPassword {
+        master_password: Zeroizing<String>,
+    },
     Lock,
-    ListAccountSummaries { offset: u32, limit: u16 },
-    GetAccount { id: [u8; 16] },
-    AddAccount { fields: AccountFields },
-    UpdateAccount { id: [u8; 16], fields: AccountFields },
-    DeleteAccount { id: [u8; 16] },
-    EnrollWindowsHello { parent_window: u64 },
-    UnlockWindowsHello { parent_window: u64 },
+    ListAccountSummaries {
+        offset: u32,
+        limit: u16,
+    },
+    GetAccount {
+        id: [u8; 16],
+    },
+    AddAccount {
+        fields: AccountFields,
+    },
+    UpdateAccount {
+        id: [u8; 16],
+        fields: AccountFields,
+    },
+    DeleteAccount {
+        id: [u8; 16],
+    },
+    EnrollWindowsHello {
+        parent_window: u64,
+    },
+    UnlockWindowsHello {
+        parent_window: u64,
+    },
     RemoveWindowsHello,
+    MakePasskey {
+        proof: PasskeyTransactionProof,
+    },
+    GetPasskeyAssertion {
+        proof: PasskeyTransactionProof,
+        credential_id: [u8; PASSKEY_CREDENTIAL_ID_BYTES],
+    },
+    DeletePasskey {
+        credential_id: [u8; PASSKEY_CREDENTIAL_ID_BYTES],
+    },
+    ListPasskeysForAssertion {
+        proof: PasskeyRequestProof,
+    },
+    ListPasskeys,
 }
 
 impl OperationRequest {
@@ -111,6 +298,11 @@ impl OperationRequest {
             Self::EnrollWindowsHello { .. } => OperationCode::EnrollWindowsHello,
             Self::UnlockWindowsHello { .. } => OperationCode::UnlockWindowsHello,
             Self::RemoveWindowsHello => OperationCode::RemoveWindowsHello,
+            Self::MakePasskey { .. } => OperationCode::MakePasskey,
+            Self::GetPasskeyAssertion { .. } => OperationCode::GetPasskeyAssertion,
+            Self::DeletePasskey { .. } => OperationCode::DeletePasskey,
+            Self::ListPasskeysForAssertion { .. } => OperationCode::ListPasskeysForAssertion,
+            Self::ListPasskeys => OperationCode::ListPasskeys,
         }
     }
 
@@ -154,6 +346,34 @@ impl OperationRequest {
         match self {
             Self::EnrollWindowsHello { parent_window }
             | Self::UnlockWindowsHello { parent_window } => Some(*parent_window),
+            _ => None,
+        }
+    }
+
+    #[must_use]
+    pub const fn passkey_proof(&self) -> Option<&PasskeyTransactionProof> {
+        match self {
+            Self::MakePasskey { proof } | Self::GetPasskeyAssertion { proof, .. } => Some(proof),
+            _ => None,
+        }
+    }
+
+    #[must_use]
+    pub const fn passkey_request_proof(&self) -> Option<&PasskeyRequestProof> {
+        match self {
+            Self::MakePasskey { proof } | Self::GetPasskeyAssertion { proof, .. } => {
+                Some(proof.request())
+            }
+            Self::ListPasskeysForAssertion { proof } => Some(proof),
+            _ => None,
+        }
+    }
+
+    #[must_use]
+    pub const fn passkey_credential_id(&self) -> Option<[u8; PASSKEY_CREDENTIAL_ID_BYTES]> {
+        match self {
+            Self::GetPasskeyAssertion { credential_id, .. }
+            | Self::DeletePasskey { credential_id } => Some(*credential_id),
             _ => None,
         }
     }
@@ -245,13 +465,20 @@ impl OperationRequest {
                 expect_array(&mut decoder, 0)?;
                 Self::RemoveWindowsHello
             }
+            OperationCode::ListPasskeys => {
+                expect_array(&mut decoder, 0)?;
+                Self::ListPasskeys
+            }
+            operation @ (OperationCode::MakePasskey
+            | OperationCode::GetPasskeyAssertion
+            | OperationCode::DeletePasskey
+            | OperationCode::ListPasskeysForAssertion) => {
+                decode_passkey_request(&mut decoder, operation)?
+            }
             OperationCode::ExactOriginMatches
             | OperationCode::GetSelectedCredential
             | OperationCode::CaptureCredential
-            | OperationCode::UpdateCredential
-            | OperationCode::MakePasskey
-            | OperationCode::GetPasskeyAssertion
-            | OperationCode::DeletePasskey => return Err(ProtocolError::Unsupported),
+            | OperationCode::UpdateCredential => return Err(ProtocolError::Unsupported),
         };
         require_end(&decoder, bytes)?;
         if request.encode()?.as_slice() != bytes {
@@ -281,7 +508,7 @@ impl OperationRequest {
         }
         let mut encoder = Encoder::new(SecretWriter::with_capacity(MAX_PAYLOAD_BYTES));
         match self {
-            Self::Status | Self::Lock | Self::RemoveWindowsHello => {
+            Self::Status | Self::Lock | Self::RemoveWindowsHello | Self::ListPasskeys => {
                 encode_array(&mut encoder, 0);
             }
             Self::CreateVault { master_password }
@@ -315,9 +542,115 @@ impl OperationRequest {
                 encode_array(&mut encoder, 1);
                 encode_u64(&mut encoder, *parent_window);
             }
+            Self::MakePasskey { proof } => {
+                encode_array(&mut encoder, 6);
+                encode_passkey_proof(&mut encoder, proof);
+            }
+            Self::GetPasskeyAssertion {
+                proof,
+                credential_id,
+            } => {
+                encode_array(&mut encoder, 7);
+                encode_passkey_proof(&mut encoder, proof);
+                encode_bytes(&mut encoder, credential_id);
+            }
+            Self::DeletePasskey { credential_id } => {
+                encode_array(&mut encoder, 1);
+                encode_bytes(&mut encoder, credential_id);
+            }
+            Self::ListPasskeysForAssertion { proof } => {
+                encode_array(&mut encoder, 4);
+                encode_passkey_request_proof(&mut encoder, proof);
+            }
         }
         checked_request_body(encoder.into_writer().into_bytes())
     }
+}
+
+fn decode_passkey_request_proof(
+    decoder: &mut Decoder<'_>,
+) -> Result<PasskeyRequestProof, ProtocolError> {
+    let transaction_id = decode_fixed_bytes(decoder)?;
+    let request_type = decode_u8(decoder)?;
+    let request_signature = decode_bounded_bytes(decoder, MAX_PASSKEY_SIGNATURE_BYTES)?;
+    let encoded_request = decode_bounded_bytes(decoder, MAX_PASSKEY_ENCODED_REQUEST_BYTES)?;
+    PasskeyRequestProof::new(
+        transaction_id,
+        request_type,
+        &request_signature,
+        &encoded_request,
+    )
+}
+
+fn decode_passkey_proof(
+    decoder: &mut Decoder<'_>,
+) -> Result<PasskeyTransactionProof, ProtocolError> {
+    let request = decode_passkey_request_proof(decoder)?;
+    let agent_challenge = decode_fixed_bytes(decoder)?;
+    let user_verification_signature = decode_bounded_bytes(decoder, MAX_PASSKEY_SIGNATURE_BYTES)?;
+    PasskeyTransactionProof::new(
+        *request.transaction_id(),
+        request.request_type(),
+        request.request_signature(),
+        request.encoded_request(),
+        agent_challenge,
+        &user_verification_signature,
+    )
+}
+
+fn decode_passkey_request(
+    decoder: &mut Decoder<'_>,
+    operation: OperationCode,
+) -> Result<OperationRequest, ProtocolError> {
+    match operation {
+        OperationCode::MakePasskey => {
+            expect_array(decoder, 6)?;
+            Ok(OperationRequest::MakePasskey {
+                proof: decode_passkey_proof(decoder)?,
+            })
+        }
+        OperationCode::GetPasskeyAssertion => {
+            expect_array(decoder, 7)?;
+            Ok(OperationRequest::GetPasskeyAssertion {
+                proof: decode_passkey_proof(decoder)?,
+                credential_id: decode_fixed_bytes(decoder)?,
+            })
+        }
+        OperationCode::DeletePasskey => {
+            expect_array(decoder, 1)?;
+            Ok(OperationRequest::DeletePasskey {
+                credential_id: decode_fixed_bytes(decoder)?,
+            })
+        }
+        OperationCode::ListPasskeysForAssertion => {
+            expect_array(decoder, 4)?;
+            Ok(OperationRequest::ListPasskeysForAssertion {
+                proof: decode_passkey_request_proof(decoder)?,
+            })
+        }
+        _ => Err(ProtocolError::Unsupported),
+    }
+}
+
+fn encode_passkey_request_proof<W>(encoder: &mut Encoder<W>, proof: &PasskeyRequestProof)
+where
+    W: minicbor::encode::Write,
+    W::Error: core::fmt::Debug,
+{
+    encode_bytes(encoder, proof.transaction_id());
+    encode_u8(encoder, proof.request_type());
+    encode_bytes(encoder, proof.request_signature());
+    encode_bytes(encoder, proof.encoded_request());
+}
+
+fn encode_passkey_proof<W>(encoder: &mut Encoder<W>, proof: &PasskeyTransactionProof)
+where
+    W: minicbor::encode::Write,
+    W::Error: core::fmt::Debug,
+{
+    encode_passkey_request_proof(encoder, proof.request());
+    encode_bytes(encoder, proof.agent_challenge());
+    encode_bytes(encoder, proof.user_verification_signature());
 }
 
 fn decode_secret_text(
@@ -363,6 +696,38 @@ pub struct AccountView<'a> {
     pub password: &'a str,
 }
 
+/// Borrowed public passkey material returned after durable creation.
+pub struct PasskeyCredentialView<'a> {
+    pub credential_id: [u8; PASSKEY_CREDENTIAL_ID_BYTES],
+    pub user_handle: &'a [u8],
+    pub public_key: [u8; PASSKEY_PUBLIC_KEY_BYTES],
+}
+
+/// Borrowed assertion result. Private key material is structurally absent.
+pub struct PasskeyAssertionView<'a> {
+    pub credential_id: [u8; PASSKEY_CREDENTIAL_ID_BYTES],
+    pub user_handle: &'a [u8],
+    pub authenticator_data: [u8; PASSKEY_AUTHENTICATOR_DATA_BYTES],
+    pub signature_der: &'a [u8],
+}
+
+/// Public metadata for one credential eligible for an assertion request.
+pub struct PasskeySummaryView<'a> {
+    pub credential_id: [u8; PASSKEY_CREDENTIAL_ID_BYTES],
+    pub user_handle: &'a [u8],
+    pub user_name: &'a str,
+    pub user_display_name: &'a str,
+}
+
+/// Public passkey metadata exposed only to the authorized desktop management
+/// surface. User handles, private keys, and signature counters are absent.
+pub struct PasskeyManagementSummaryView<'a> {
+    pub credential_id: [u8; PASSKEY_CREDENTIAL_ID_BYTES],
+    pub rp_id: &'a str,
+    pub user_name: &'a str,
+    pub user_display_name: &'a str,
+}
+
 /// Encodes an empty successful operation result.
 ///
 /// # Errors
@@ -399,6 +764,130 @@ pub fn encode_account_id(id: [u8; 16]) -> Result<Zeroizing<Vec<u8>>, ProtocolErr
     let mut encoder = Encoder::new(SecretWriter::with_capacity(MAX_PAYLOAD_BYTES));
     encode_array(&mut encoder, 1);
     encode_bytes(&mut encoder, &id);
+    checked_response_body(encoder.into_writer().into_bytes())
+}
+
+/// Encodes public material for one newly created passkey.
+///
+/// # Errors
+///
+/// Rejects an empty or oversized user handle and malformed public material.
+pub fn encode_passkey_credential(
+    credential: &PasskeyCredentialView<'_>,
+) -> Result<Zeroizing<Vec<u8>>, ProtocolError> {
+    if credential.credential_id == [0; PASSKEY_CREDENTIAL_ID_BYTES]
+        || credential.user_handle.is_empty()
+        || credential.user_handle.len() > MAX_PASSKEY_USER_HANDLE_BYTES
+        || credential.public_key[0] != 0x04
+    {
+        return Err(ProtocolError::InvariantViolation);
+    }
+    let mut encoder = Encoder::new(SecretWriter::with_capacity(MAX_PAYLOAD_BYTES));
+    encode_array(&mut encoder, 3);
+    encode_bytes(&mut encoder, &credential.credential_id);
+    encode_bytes(&mut encoder, credential.user_handle);
+    encode_bytes(&mut encoder, &credential.public_key);
+    checked_response_body(encoder.into_writer().into_bytes())
+}
+
+/// Encodes one transaction-bound passkey assertion.
+///
+/// # Errors
+///
+/// Rejects malformed identifiers, user handles, authenticator data, or DER
+/// signatures outside the bounded ES256 response size.
+pub fn encode_passkey_assertion(
+    assertion: &PasskeyAssertionView<'_>,
+) -> Result<Zeroizing<Vec<u8>>, ProtocolError> {
+    if assertion.credential_id == [0; PASSKEY_CREDENTIAL_ID_BYTES]
+        || assertion.user_handle.is_empty()
+        || assertion.user_handle.len() > MAX_PASSKEY_USER_HANDLE_BYTES
+        || assertion.signature_der.is_empty()
+        || assertion.signature_der.len() > MAX_PASSKEY_ASSERTION_SIGNATURE_BYTES
+    {
+        return Err(ProtocolError::InvariantViolation);
+    }
+    let mut encoder = Encoder::new(SecretWriter::with_capacity(MAX_PAYLOAD_BYTES));
+    encode_array(&mut encoder, 4);
+    encode_bytes(&mut encoder, &assertion.credential_id);
+    encode_bytes(&mut encoder, assertion.user_handle);
+    encode_bytes(&mut encoder, &assertion.authenticator_data);
+    encode_bytes(&mut encoder, assertion.signature_der);
+    checked_response_body(encoder.into_writer().into_bytes())
+}
+
+/// Encodes the bounded public credential set matching one Windows-signed
+/// assertion request.
+///
+/// # Errors
+///
+/// Rejects malformed metadata, more than 64 credentials, or an oversized
+/// response body.
+pub fn encode_passkey_summaries(
+    passkeys: &[PasskeySummaryView<'_>],
+) -> Result<Zeroizing<Vec<u8>>, ProtocolError> {
+    if passkeys.len() > MAX_PASSKEY_CREDENTIALS {
+        return Err(ProtocolError::TooLarge);
+    }
+    let mut encoder = Encoder::new(SecretWriter::with_capacity(MAX_PAYLOAD_BYTES));
+    encode_array(
+        &mut encoder,
+        u64::try_from(passkeys.len()).map_err(|_| ProtocolError::TooLarge)?,
+    );
+    for passkey in passkeys {
+        if passkey.credential_id == [0; PASSKEY_CREDENTIAL_ID_BYTES]
+            || passkey.user_handle.is_empty()
+            || passkey.user_handle.len() > MAX_PASSKEY_USER_HANDLE_BYTES
+            || passkey.user_name.is_empty()
+            || passkey.user_name.len() > MAX_PASSKEY_USER_NAME_BYTES
+            || passkey.user_display_name.is_empty()
+            || passkey.user_display_name.len() > MAX_PASSKEY_USER_NAME_BYTES
+        {
+            return Err(ProtocolError::InvariantViolation);
+        }
+        encode_array(&mut encoder, 4);
+        encode_bytes(&mut encoder, &passkey.credential_id);
+        encode_bytes(&mut encoder, passkey.user_handle);
+        encode_text(&mut encoder, passkey.user_name);
+        encode_text(&mut encoder, passkey.user_display_name);
+    }
+    checked_response_body(encoder.into_writer().into_bytes())
+}
+
+/// Encodes the bounded public passkey set for the desktop management surface.
+///
+/// # Errors
+///
+/// Rejects malformed metadata, more than 64 credentials, or an oversized
+/// response body.
+pub fn encode_passkey_management_summaries(
+    passkeys: &[PasskeyManagementSummaryView<'_>],
+) -> Result<Zeroizing<Vec<u8>>, ProtocolError> {
+    if passkeys.len() > MAX_PASSKEY_CREDENTIALS {
+        return Err(ProtocolError::TooLarge);
+    }
+    let mut encoder = Encoder::new(SecretWriter::with_capacity(MAX_PAYLOAD_BYTES));
+    encode_array(
+        &mut encoder,
+        u64::try_from(passkeys.len()).map_err(|_| ProtocolError::TooLarge)?,
+    );
+    for passkey in passkeys {
+        if passkey.credential_id == [0; PASSKEY_CREDENTIAL_ID_BYTES]
+            || passkey.rp_id.is_empty()
+            || passkey.rp_id.len() > MAX_PASSKEY_RP_ID_BYTES
+            || passkey.user_name.is_empty()
+            || passkey.user_name.len() > MAX_PASSKEY_USER_NAME_BYTES
+            || passkey.user_display_name.is_empty()
+            || passkey.user_display_name.len() > MAX_PASSKEY_USER_NAME_BYTES
+        {
+            return Err(ProtocolError::InvariantViolation);
+        }
+        encode_array(&mut encoder, 4);
+        encode_bytes(&mut encoder, &passkey.credential_id);
+        encode_text(&mut encoder, passkey.rp_id);
+        encode_text(&mut encoder, passkey.user_name);
+        encode_text(&mut encoder, passkey.user_display_name);
+    }
     checked_response_body(encoder.into_writer().into_bytes())
 }
 

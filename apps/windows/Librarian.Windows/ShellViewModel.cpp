@@ -27,6 +27,8 @@ namespace librarian::windows
             L"Librarian is locking the vault through the local vault agent.";
         constexpr wchar_t SavingMessage[] =
             L"Librarian is saving the account through the local vault agent.";
+        constexpr wchar_t DeletingPasskeyMessage[] =
+            L"Librarian is removing the passkey from Windows and the local vault.";
         constexpr wchar_t LoadingAccountsMessage[] =
             L"Librarian is loading the requested account page.";
         constexpr wchar_t EmptyAccountsMessage[] =
@@ -299,6 +301,30 @@ namespace librarian::windows
         Apply(std::move(outcome));
     }
 
+    bool ShellViewModel::BeginDeletePasskey()
+    {
+        if (state_ != ShellState::Unlocked || pending_action_ != PendingAction::None)
+        {
+            return false;
+        }
+        resume_state_ = state_;
+        pending_action_ = PendingAction::DeletePasskey;
+        account_editor_visible_ = false;
+        state_ = ShellState::Saving;
+        message_ = DeletingPasskeyMessage;
+        return true;
+    }
+
+    void ShellViewModel::CompleteDeletePasskey(ShellRequestOutcome outcome)
+    {
+        if (pending_action_ != PendingAction::DeletePasskey)
+        {
+            return;
+        }
+        pending_action_ = PendingAction::None;
+        Apply(std::move(outcome));
+    }
+
     std::optional<std::uint32_t> ShellViewModel::BeginNextAccountPage()
     {
         if (!next_account_offset_.has_value())
@@ -460,6 +486,19 @@ namespace librarian::windows
         }
     }
 
+    ShellRequestOutcome ShellViewModel::ExecuteDeletePasskeyRequest(
+        std::wstring_view const credential_id) const
+    {
+        try
+        {
+            return AddAccountRefresh(client_->DeletePasskey(credential_id));
+        }
+        catch (...)
+        {
+            return { { ClientError::Unexpected, VaultStatus::Locked }, std::nullopt, std::nullopt };
+        }
+    }
+
     void ShellViewModel::Close() noexcept
     {
         client_->Close();
@@ -478,6 +517,11 @@ namespace librarian::windows
     std::vector<AccountSummary> const& ShellViewModel::Accounts() const noexcept
     {
         return accounts_;
+    }
+
+    std::vector<PasskeySummary> const& ShellViewModel::Passkeys() const noexcept
+    {
+        return passkeys_;
     }
 
     bool ShellViewModel::IsAccountEditorVisible() const noexcept
@@ -511,6 +555,7 @@ namespace librarian::windows
         pending_action_ = action;
         account_editor_visible_ = false;
         accounts_.clear();
+        passkeys_.clear();
         state_ = ShellState::Unlocking;
         message_ = UnlockingMessage;
         return true;
@@ -636,7 +681,7 @@ namespace librarian::windows
 
     ShellRequestOutcome ShellViewModel::AddAccountRefresh(ClientResult result) const
     {
-        ShellRequestOutcome outcome{ result, std::nullopt };
+        ShellRequestOutcome outcome{ result, std::nullopt, std::nullopt };
         if (
             result.error != ClientError::None ||
             result.status != VaultStatus::Unlocked)
@@ -652,6 +697,14 @@ namespace librarian::windows
         {
             outcome.accounts = AccountListResult{ ClientError::Unexpected, {} };
         }
+        try
+        {
+            outcome.passkeys = client_->ListPasskeys();
+        }
+        catch (...)
+        {
+            outcome.passkeys = PasskeyListResult{ ClientError::Unexpected, {} };
+        }
         return outcome;
     }
 
@@ -659,6 +712,7 @@ namespace librarian::windows
     {
         account_editor_visible_ = false;
         accounts_.clear();
+        passkeys_.clear();
 
         if (error == ClientError::AgentUnavailable)
         {
@@ -685,13 +739,17 @@ namespace librarian::windows
             return;
         }
 
-        if (!outcome.accounts.has_value())
+        if (!outcome.accounts.has_value() || !outcome.passkeys.has_value())
         {
             ApplyError(ClientError::Unexpected);
             return;
         }
 
         ApplyAccounts(std::move(*outcome.accounts));
+        if (state_ == ShellState::Unlocked)
+        {
+            ApplyPasskeys(std::move(*outcome.passkeys));
+        }
     }
 
     void ShellViewModel::ApplyAccounts(AccountListResult result)
@@ -721,6 +779,16 @@ namespace librarian::windows
         }
     }
 
+    void ShellViewModel::ApplyPasskeys(PasskeyListResult result)
+    {
+        if (result.error != ClientError::None)
+        {
+            ApplyError(result.error);
+            return;
+        }
+        passkeys_ = std::move(result.passkeys);
+    }
+
     void ShellViewModel::ApplyError(ClientError const error)
     {
         if (error == ClientError::Cancelled)
@@ -731,6 +799,7 @@ namespace librarian::windows
             {
                 account_editor_visible_ = false;
                 accounts_.clear();
+                passkeys_.clear();
             }
             return;
         }
@@ -743,12 +812,14 @@ namespace librarian::windows
             {
                 account_editor_visible_ = false;
                 accounts_.clear();
+                passkeys_.clear();
             }
             return;
         }
 
         account_editor_visible_ = false;
         accounts_.clear();
+        passkeys_.clear();
 
         switch (error)
         {
@@ -786,6 +857,7 @@ namespace librarian::windows
     {
         account_editor_visible_ = false;
         accounts_.clear();
+        passkeys_.clear();
         pending_account_offset_.reset();
         current_account_offset_ = 0U;
         previous_account_offsets_.clear();

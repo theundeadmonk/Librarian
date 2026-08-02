@@ -17,8 +17,8 @@ use std::{
 #[cfg(windows)]
 use librarian_agent_protocol::{
     AgentState, CURRENT_VERSION, ClientHello, Connection, ConnectionLimits, EndpointDescriptor,
-    FEATURE_WINDOWS_HELLO, Frame, FrameHeader, HANDSHAKE_TIMEOUT_MS, MessageKind,
-    PASSKEY_TIMEOUT_MS, RequestEnvelope, ResponseEnvelope,
+    FEATURE_PASSKEY_PROVIDER, FEATURE_WINDOWS_HELLO, Frame, FrameHeader, HANDSHAKE_TIMEOUT_MS,
+    MessageKind, PASSKEY_TIMEOUT_MS, RequestEnvelope, ResponseEnvelope,
 };
 #[cfg(windows)]
 use librarian_vault_agent::{AgentRuntime, DispatchError};
@@ -37,6 +37,8 @@ use zeroize::Zeroizing;
 const AGENT_EXECUTABLE: &str = "Librarian.VaultAgent.exe";
 #[cfg(windows)]
 const DESKTOP_EXECUTABLE: &str = "Librarian.Windows.exe";
+#[cfg(windows)]
+const PASSKEY_PROVIDER_EXECUTABLE: &str = "Librarian.PasskeyProvider.exe";
 #[cfg(windows)]
 const LOCAL_STATE_DIRECTORY: &str = "Librarian";
 #[cfg(windows)]
@@ -108,12 +110,20 @@ fn run() -> Result<(), HostError> {
         AgentRuntime::start_with_windows_hello(&paths.vault, &paths.windows_hello_state)
             .map_err(|_| HostError::Runtime)?,
     );
-    let policies = vec![desktop_policy(
-        observation,
-        package_full_name,
-        package_family_name,
-        &install_root,
-    )];
+    let policies = vec![
+        desktop_policy(
+            observation,
+            package_full_name,
+            package_family_name,
+            &install_root,
+        ),
+        passkey_provider_policy(
+            observation,
+            package_full_name,
+            package_family_name,
+            &install_root,
+        ),
+    ];
     let store = EndpointDescriptorStore::new(&paths.endpoint).map_err(|_| HostError::Discovery)?;
     let (recycle_tx, recycle_rx) = mpsc::channel();
     let mut workers = Vec::new();
@@ -255,6 +265,26 @@ fn desktop_policy(
 }
 
 #[cfg(windows)]
+fn passkey_provider_policy(
+    current: &PeerObservation,
+    package_full_name: &str,
+    package_family_name: &str,
+    install_root: &Path,
+) -> PeerPolicy {
+    PeerPolicy {
+        role: ComponentRole::PasskeyProvider,
+        session_id: current.session_id,
+        user_sid: current.user_sid.clone(),
+        logon_sid: current.logon_sid.clone(),
+        maximum_integrity_rid: MEDIUM_INTEGRITY_RID,
+        image_path: install_root.join(PASSKEY_PROVIDER_EXECUTABLE),
+        package_full_name: package_full_name.to_owned(),
+        package_family_name: package_family_name.to_owned(),
+        application_user_model_id: Some(format!("{package_family_name}!PasskeyProvider")),
+    }
+}
+
+#[cfg(windows)]
 fn publish_listener_pool(
     store: &EndpointDescriptorStore,
     observation: &PeerObservation,
@@ -332,10 +362,12 @@ fn negotiate_connection(runtime: &AgentRuntime, pipe: &PipeConnection) -> Option
     getrandom::fill(&mut server_nonce).ok()?;
     getrandom::fill(&mut connection_id).ok()?;
     let (state, unlock_epoch) = runtime.status_snapshot().ok()?;
-    let supported_features = if role == librarian_agent_protocol::ClientRole::Desktop {
-        &[FEATURE_WINDOWS_HELLO][..]
-    } else {
-        &[]
+    let supported_features = match role {
+        librarian_agent_protocol::ClientRole::Desktop => {
+            &[FEATURE_WINDOWS_HELLO, FEATURE_PASSKEY_PROVIDER][..]
+        }
+        librarian_agent_protocol::ClientRole::PasskeyProvider => &[FEATURE_PASSKEY_PROVIDER][..],
+        librarian_agent_protocol::ClientRole::NativeHost => &[],
     };
     let (connection, server_hello) = Connection::negotiate(
         role,

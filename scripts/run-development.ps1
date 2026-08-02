@@ -30,7 +30,9 @@ $packageName = "TheUndeadMonk.Librarian.Development"
 $desktopPath = Join-Path $layoutDirectory "Librarian.Windows.exe"
 $agentPath = Join-Path $layoutDirectory "Librarian.VaultAgent.exe"
 $hostPath = Join-Path $layoutDirectory "Librarian.ChromiumNativeHost.exe"
+$providerPath = Join-Path $layoutDirectory "Librarian.PasskeyProvider.exe"
 $registeredByScript = $false
+$providerRegisteredByScript = $false
 $layoutCreatedByScript = $false
 $package = $null
 $desktopProcess = $null
@@ -84,6 +86,10 @@ function Get-ManifestContext {
         "http://schemas.microsoft.com/appx/manifest/uap/windows10"
     )
     $namespaceManager.AddNamespace(
+        "com",
+        "http://schemas.microsoft.com/appx/manifest/com/windows10"
+    )
+    $namespaceManager.AddNamespace(
         "rescap",
         "http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
     )
@@ -95,6 +101,22 @@ function Add-DevelopmentApplications {
         [Parameter(Mandatory)]
         [xml]$Manifest
     )
+
+    $package = $Manifest.DocumentElement
+    $comNamespace = "http://schemas.microsoft.com/appx/manifest/com/windows10"
+    $package.SetAttribute("xmlns:com", $comNamespace)
+    $ignorableNamespaces = @(
+        $package.IgnorableNamespaces.Split(
+            [char[]]@(" ", "`t", "`r", "`n"),
+            [StringSplitOptions]::RemoveEmptyEntries
+        )
+    )
+    if ("com" -notin $ignorableNamespaces) {
+        $package.SetAttribute(
+            "IgnorableNamespaces",
+            (($ignorableNamespaces + "com") -join " ")
+        )
+    }
 
     $namespaceManager = Get-ManifestContext -Manifest $Manifest
     $applications = $Manifest.SelectSingleNode(
@@ -134,6 +156,11 @@ function Add-DevelopmentApplications {
             Id = "ChromiumNativeHost"
             Executable = "Librarian.ChromiumNativeHost.exe"
             DisplayName = "Librarian browser bridge"
+        },
+        @{
+            Id = "PasskeyProvider"
+            Executable = "Librarian.PasskeyProvider.exe"
+            DisplayName = "Librarian passkey provider"
         }
     )) {
         if ($Manifest.SelectSingleNode(
@@ -166,6 +193,30 @@ function Add-DevelopmentApplications {
         $visualElements.SetAttribute("Square150x150Logo", "Assets\Square150x150Logo.png")
         $visualElements.SetAttribute("Square44x44Logo", "Assets\Square44x44Logo.png")
         [void]$application.AppendChild($visualElements)
+        if ($applicationSpec.Id -eq "PasskeyProvider") {
+            $extensions = $Manifest.CreateElement(
+                "Extensions",
+                $namespaceManager.LookupNamespace("foundation")
+            )
+            $extension = $Manifest.CreateElement("com", "Extension", $comNamespace)
+            $extension.SetAttribute("Category", "windows.comServer")
+            $comServer = $Manifest.CreateElement("com", "ComServer", $comNamespace)
+            $exeServer = $Manifest.CreateElement("com", "ExeServer", $comNamespace)
+            $exeServer.SetAttribute("Executable", "Librarian.PasskeyProvider.exe")
+            $exeServer.SetAttribute("Arguments", "-PluginActivated")
+            $exeServer.SetAttribute("DisplayName", "Librarian passkey provider")
+            $class = $Manifest.CreateElement("com", "Class", $comNamespace)
+            $class.SetAttribute(
+                "Id",
+                "68FE5DF7-9FE6-4145-BBA0-95010F43BFBE"
+            )
+            $class.SetAttribute("DisplayName", "Librarian passkey provider")
+            [void]$exeServer.AppendChild($class)
+            [void]$comServer.AppendChild($exeServer)
+            [void]$extension.AppendChild($comServer)
+            [void]$extensions.AppendChild($extension)
+            [void]$application.AppendChild($extensions)
+        }
         [void]$applications.AppendChild($application)
     }
 
@@ -251,7 +302,8 @@ try {
         $sourceManifestPath,
         (Join-Path $sourceLayout "Librarian.Windows.exe"),
         (Join-Path $payloadDirectory "Librarian.VaultAgent.exe"),
-        (Join-Path $payloadDirectory "Librarian.ChromiumNativeHost.exe")
+        (Join-Path $payloadDirectory "Librarian.ChromiumNativeHost.exe"),
+        (Join-Path $payloadDirectory "Librarian.PasskeyProvider.exe")
     )) {
         if (-not (Test-Path -LiteralPath $requiredPath -PathType Leaf)) {
             throw "Required development output is missing: $requiredPath. Run the Release|x64 build first."
@@ -273,6 +325,7 @@ try {
         Desktop = "Librarian.Windows.exe"
         VaultAgent = "Librarian.VaultAgent.exe"
         ChromiumNativeHost = "Librarian.ChromiumNativeHost.exe"
+        PasskeyProvider = "Librarian.PasskeyProvider.exe"
         IdentityPackage = "Librarian.Identity.msix"
     }
     if (@($release.components).Count -ne $requiredPayloadRoles.Count) {
@@ -296,12 +349,6 @@ try {
         ) {
             throw "The development payload hash does not match for '$($expected.Value)'."
         }
-    }
-
-    if (Test-Path -LiteralPath (
-        Join-Path $payloadDirectory "Librarian.PasskeyProvider.exe"
-    )) {
-        throw "The development payload contains a passkey provider before issue #18."
     }
 
     $sourceDesktopPath = Join-Path $sourceLayout "Librarian.Windows.exe"
@@ -333,7 +380,7 @@ try {
     if ($ValidateOnly) {
         Write-Host "Development package runner validation passed."
         Write-Host "Version: $($release.productVersion)"
-        Write-Host "Applications: Desktop, VaultAgent, ChromiumNativeHost"
+        Write-Host "Applications: Desktop, VaultAgent, ChromiumNativeHost, PasskeyProvider"
         return
     }
 
@@ -371,7 +418,8 @@ try {
         foreach ($processSpec in @(
             @{ Name = "Librarian.Windows.exe"; Path = $desktopPath },
             @{ Name = "Librarian.VaultAgent.exe"; Path = $agentPath },
-            @{ Name = "Librarian.ChromiumNativeHost.exe"; Path = $hostPath }
+            @{ Name = "Librarian.ChromiumNativeHost.exe"; Path = $hostPath },
+            @{ Name = "Librarian.PasskeyProvider.exe"; Path = $providerPath }
         )) {
             $matchingProcesses = @(
                 Get-CimInstance Win32_Process -Filter "Name='$($processSpec.Name)'" |
@@ -418,6 +466,10 @@ try {
         Copy-Item `
             -LiteralPath (Join-Path $payloadDirectory "Librarian.ChromiumNativeHost.exe") `
             -Destination $hostPath `
+            -Force
+        Copy-Item `
+            -LiteralPath (Join-Path $payloadDirectory "Librarian.PasskeyProvider.exe") `
+            -Destination $providerPath `
             -Force
 
         [xml]$developmentManifest = Get-Content -LiteralPath $manifestPath -Raw
@@ -476,6 +528,12 @@ try {
             Sha256 = [string](@($release.components | Where-Object {
                 $_.role -eq "ChromiumNativeHost"
             })[0].sha256)
+        },
+        @{
+            Path = $providerPath
+            Sha256 = [string](@($release.components | Where-Object {
+                $_.role -eq "PasskeyProvider"
+            })[0].sha256)
         }
     )
     foreach ($registeredLayoutFile in $registeredLayoutFiles) {
@@ -497,7 +555,8 @@ try {
     foreach ($expectedApplication in @(
         @{ Id = "Desktop"; Executable = "Librarian.Windows.exe" },
         @{ Id = "VaultAgent"; Executable = "Librarian.VaultAgent.exe" },
-        @{ Id = "ChromiumNativeHost"; Executable = "Librarian.ChromiumNativeHost.exe" }
+        @{ Id = "ChromiumNativeHost"; Executable = "Librarian.ChromiumNativeHost.exe" },
+        @{ Id = "PasskeyProvider"; Executable = "Librarian.PasskeyProvider.exe" }
     )) {
         $applicationMatches = @($registeredApplications | Where-Object {
             $_.Id -eq $expectedApplication.Id -and
@@ -507,8 +566,24 @@ try {
             throw "The loose package does not expose '$($expectedApplication.Id)' correctly."
         }
     }
-    if ($registeredApplications.Count -ne 3) {
+    if ($registeredApplications.Count -ne 4) {
         throw "The loose package exposes an unexpected application entry."
+    }
+
+    & $providerPath --registration-state
+    $providerRegistrationState = $LASTEXITCODE
+    if ($providerRegistrationState -eq 4) {
+        & $providerPath --register
+        if ($LASTEXITCODE -ne 0) {
+            throw "The passkey provider registration failed with exit code $LASTEXITCODE."
+        }
+        $providerRegisteredByScript = $true
+    }
+    elseif ($providerRegistrationState -ne 0) {
+        throw (
+            "The passkey provider registration state could not be read " +
+            "(exit code $providerRegistrationState)."
+        )
     }
 
     if (-not ("LibrarianDevelopmentPackageActivator" -as [type])) {
@@ -611,8 +686,17 @@ finally {
             Stop-ExpectedProcess -Process $agentProcess -ExpectedPath $agentPath
         }
         finally {
-            if ($registeredByScript) {
-                try {
+            try {
+                if ($providerRegisteredByScript) {
+                    & $providerPath --unregister
+                    if ($LASTEXITCODE -ne 0) {
+                        throw (
+                            "The temporary passkey provider registration could not be removed " +
+                            "(exit code $LASTEXITCODE)."
+                        )
+                    }
+                }
+                if ($registeredByScript) {
                     $packageToRemove = Get-AppxPackage -Name $packageName |
                         Where-Object {
                             $_.IsDevelopmentMode -and
@@ -632,10 +716,10 @@ finally {
                         throw "The temporary development package remains registered."
                     }
                 }
-                catch {
-                    $preserveLayoutForRecovery = $true
-                    throw
-                }
+            }
+            catch {
+                $preserveLayoutForRecovery = $true
+                throw
             }
         }
     }

@@ -24,7 +24,11 @@ rustix = { version = "=1.1.4", features = ["fs"] }
 [target.'cfg(windows)'.dependencies]
 librarian-windows-hello-agent = { path = "../../platform/windows-hello-agent" }
 librarian-windows-ipc = { path = "../../platform/windows-ipc" }
+librarian-windows-passkey-agent = { path = "../../platform/windows-passkey-agent" }
 same-file = "=1.0.6"
+
+[dev-dependencies]
+p256 = { version = "=0.14.0", features = ["ecdsa"] }
 
 [lints]
 workspace = true

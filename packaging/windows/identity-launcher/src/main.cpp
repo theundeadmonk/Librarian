@@ -33,18 +33,20 @@ namespace
         L"TheUndeadMonk.Librarian.Development"};
     constexpr std::wstring_view package_publisher{
         L"CN=Librarian Development"};
-    constexpr std::array<std::wstring_view, 5> signed_payload_files{
+    constexpr std::array<std::wstring_view, 6> signed_payload_files{
         L"Librarian.IdentityLauncher.exe",
         L"Librarian.Windows.exe",
         L"Librarian.VaultAgent.exe",
         L"Librarian.ChromiumNativeHost.exe",
+        L"Librarian.PasskeyProvider.exe",
         L"Librarian.Identity.msix",
     };
-    constexpr std::array<std::wstring_view, 8> required_payload_files{
+    constexpr std::array<std::wstring_view, 9> required_payload_files{
         L"Librarian.IdentityLauncher.exe",
         L"Librarian.Windows.exe",
         L"Librarian.VaultAgent.exe",
         L"Librarian.ChromiumNativeHost.exe",
+        L"Librarian.PasskeyProvider.exe",
         L"Librarian.Identity.msix",
         L"Librarian.Release.json",
         L"com.theundeadmonk.librarian.chrome.json",
@@ -52,8 +54,6 @@ namespace
     };
     constexpr std::wstring_view payload_manifest_name{
         L"Librarian.PayloadHashes"};
-    constexpr std::wstring_view forbidden_provider{
-        L"Librarian.PasskeyProvider.exe"};
     using sha256_digest = std::array<std::uint8_t, 32>;
 
     struct validation_error
@@ -254,13 +254,6 @@ namespace
                 fail(L"Librarian found an incomplete installed payload.");
             }
             reject_reparse_chain(path);
-        }
-        if (std::filesystem::exists(
-                install_folder / forbidden_provider))
-        {
-            fail(
-                L"Librarian refused an unexpected passkey provider before "
-                L"issue #18.");
         }
         return install_folder;
     }
@@ -783,8 +776,13 @@ namespace
         validate_external_location(*exact, install_folder);
     }
 
+    void run_provider_registration(
+        std::filesystem::path const& install_folder,
+        bool register_provider);
+
     void remove_current_user_identity()
     {
+        run_provider_registration(module_path().parent_path(), false);
         PackageManager const manager;
         for (Package const& package : current_user_packages(manager))
         {
@@ -851,12 +849,59 @@ namespace
     {
         if (value.empty() || value.find(L'"') != std::wstring_view::npos)
         {
-            fail(L"Librarian refused an unsafe native-host argument.");
+            fail(L"Librarian refused an unsafe child-process argument.");
         }
         std::wstring quoted{L"\""};
         quoted.append(value);
         quoted.push_back(L'"');
         return quoted;
+    }
+
+    void run_provider_registration(
+        std::filesystem::path const& install_folder,
+        bool register_provider)
+    {
+        std::filesystem::path const provider =
+            install_folder / L"Librarian.PasskeyProvider.exe";
+        std::wstring command_line = quote_argument(provider.native());
+        command_line.append(
+            register_provider ? L" --register" : L" --unregister");
+
+        STARTUPINFOW startup{};
+        startup.cb = sizeof(startup);
+        PROCESS_INFORMATION information{};
+        if (!CreateProcessW(
+                provider.c_str(),
+                command_line.data(),
+                nullptr,
+                nullptr,
+                FALSE,
+                CREATE_NO_WINDOW,
+                nullptr,
+                install_folder.c_str(),
+                &startup,
+                &information))
+        {
+            fail(L"Librarian could not start passkey provider registration.");
+        }
+        file_handle const process{information.hProcess};
+        file_handle const thread{information.hThread};
+        DWORD const wait_result = WaitForSingleObject(process.value, 30'000U);
+        if (wait_result == WAIT_TIMEOUT)
+        {
+            static_cast<void>(TerminateProcess(process.value, 1U));
+            static_cast<void>(WaitForSingleObject(process.value, 5'000U));
+            fail(L"Librarian passkey provider registration timed out.");
+        }
+        if (wait_result != WAIT_OBJECT_0)
+        {
+            fail(L"Librarian could not wait for passkey provider registration.");
+        }
+        DWORD exit_code{};
+        if (!GetExitCodeProcess(process.value, &exit_code) || exit_code != 0U)
+        {
+            fail(L"Librarian could not update passkey provider registration.");
+        }
     }
 
     int launch_native_host(
@@ -1077,19 +1122,20 @@ int WINAPI wWinMain(
         winrt::init_apartment(winrt::apartment_type::multi_threaded);
         launch_request const request = parse_request();
         requested = request.requested;
+        std::filesystem::path const install_folder =
+            validate_installation();
+        payload_manifest const manifest =
+            validate_payload(install_folder);
         if (requested == operation::unregister)
         {
             remove_current_user_identity();
             return 0;
         }
 
-        std::filesystem::path const install_folder =
-            validate_installation();
-        payload_manifest const manifest =
-            validate_payload(install_folder);
         ensure_current_user_identity(
             install_folder,
             manifest.version);
+        run_provider_registration(install_folder, true);
         if (requested == operation::launch)
         {
             launch_desktop(install_folder);

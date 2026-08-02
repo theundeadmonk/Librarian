@@ -258,6 +258,21 @@ impl ServerHello {
     }
 
     #[must_use]
+    pub fn granted_features(&self) -> &[u16] {
+        &self.granted_features
+    }
+
+    #[must_use]
+    pub const fn maximum_payload_bytes(&self) -> u32 {
+        self.maximum_payload_bytes
+    }
+
+    #[must_use]
+    pub const fn maximum_in_flight(&self) -> u8 {
+        self.maximum_in_flight
+    }
+
+    #[must_use]
     pub fn encode(&self) -> Vec<u8> {
         let mut encoder = Encoder::new(Vec::new());
         encode_array(&mut encoder, 9);

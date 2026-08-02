@@ -39,18 +39,20 @@ namespace
         L"TheUndeadMonk.Librarian.Development"};
     constexpr std::wstring_view package_publisher{
         L"CN=Librarian Development"};
-    constexpr std::array<std::wstring_view, 5> signed_payload_files{
+    constexpr std::array<std::wstring_view, 6> signed_payload_files{
         L"Librarian.IdentityLauncher.exe",
         L"Librarian.Windows.exe",
         L"Librarian.VaultAgent.exe",
         L"Librarian.ChromiumNativeHost.exe",
+        L"Librarian.PasskeyProvider.exe",
         L"Librarian.Identity.msix",
     };
-    constexpr std::array<std::wstring_view, 8> required_payload_files{
+    constexpr std::array<std::wstring_view, 9> required_payload_files{
         L"Librarian.IdentityLauncher.exe",
         L"Librarian.Windows.exe",
         L"Librarian.VaultAgent.exe",
         L"Librarian.ChromiumNativeHost.exe",
+        L"Librarian.PasskeyProvider.exe",
         L"Librarian.Identity.msix",
         L"Librarian.Release.json",
         L"com.theundeadmonk.librarian.chrome.json",
@@ -58,8 +60,6 @@ namespace
     };
     constexpr std::wstring_view payload_hash_manifest_name{
         L"Librarian.PayloadHashes"};
-    constexpr std::wstring_view forbidden_provider{
-        L"Librarian.PasskeyProvider.exe"};
     using sha256_digest = std::array<std::uint8_t, 32>;
 
     struct validation_error
@@ -1295,14 +1295,6 @@ namespace
                 fail(L"Setup refused a payload signed by another publisher.");
             }
         }
-        if (std::filesystem::exists(
-                data.install_folder / forbidden_provider))
-        {
-            fail(
-                L"Setup refused an unexpected passkey provider before "
-                L"issue #18.");
-        }
-
         payload_manifest const manifest = read_payload_manifest(
             data.install_folder,
             data.manifest_hash);

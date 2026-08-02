@@ -8,15 +8,30 @@ use crate::{CONTAINER_VERSION, FormatError, MAX_RECORD_ENVELOPE_BYTES};
 pub const RECORD_ENVELOPE_VERSION: u32 = 1;
 pub const RECORD_SCHEMA: u32 = 1;
 pub const WEBSITE_ACCOUNT_RECORD_TYPE: u32 = 1;
+pub const PASSKEY_RECORD_TYPE: u32 = 2;
 
 pub const MAX_SERVICE_NAME_BYTES: usize = 256;
 pub const MAX_ORIGIN_BYTES: usize = 2_048;
 pub const MAX_USERNAME_BYTES: usize = 1_024;
 pub const MAX_PASSWORD_BYTES: usize = 16 * 1_024;
+pub const MAX_PASSKEY_RP_ID_BYTES: usize = 253;
+pub const MAX_PASSKEY_USER_HANDLE_BYTES: usize = 64;
+pub const MAX_PASSKEY_USER_NAME_BYTES: usize = 256;
+pub const MAX_PASSKEY_USER_DISPLAY_NAME_BYTES: usize = 256;
+pub const PASSKEY_CREDENTIAL_ID_BYTES: usize = 32;
+pub const PASSKEY_PRIVATE_KEY_BYTES: usize = 32;
 
 const RECORD_MAGIC: &str = "LBR-REC";
 const TAG_BYTES: usize = 16;
 const WEBSITE_ACCOUNT_ENCODING_OVERHEAD_BYTES: usize = 128;
+const PASSKEY_ENCODING_OVERHEAD_BYTES: usize = 192;
+
+/// Supported encrypted-record plaintext families.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RecordType {
+    WebsiteAccount,
+    Passkey,
+}
 
 struct SecretWriter {
     bytes: Zeroizing<Vec<u8>>,
@@ -327,6 +342,259 @@ impl WebsiteAccountPlaintext {
     }
 }
 
+/// Canonical plaintext for one discoverable ES256 passkey.
+///
+/// The credential private scalar and user metadata are zeroized on drop. The
+/// private scalar is deliberately stored only inside the encrypted record and
+/// this type intentionally provides no formatting, cloning, or serialization
+/// traits beyond its bounded canonical encoder.
+pub struct PasskeyPlaintext {
+    revision: u64,
+    created_at_ms: u64,
+    modified_at_ms: u64,
+    signature_counter: u32,
+    rp_id: Zeroizing<String>,
+    user_handle: Zeroizing<Vec<u8>>,
+    user_name: Zeroizing<String>,
+    user_display_name: Zeroizing<String>,
+    credential_id: [u8; PASSKEY_CREDENTIAL_ID_BYTES],
+    private_key: Zeroizing<[u8; PASSKEY_PRIVATE_KEY_BYTES]>,
+}
+
+/// Secret-bearing fields moved out of one decoded passkey record.
+pub type PasskeyPlaintextFields = (
+    Zeroizing<String>,
+    Zeroizing<Vec<u8>>,
+    Zeroizing<String>,
+    Zeroizing<String>,
+    [u8; PASSKEY_CREDENTIAL_ID_BYTES],
+    Zeroizing<[u8; PASSKEY_PRIVATE_KEY_BYTES]>,
+);
+
+impl PasskeyPlaintext {
+    /// Constructs one bounded passkey plaintext.
+    ///
+    /// # Errors
+    ///
+    /// Rejects invalid version metadata, empty required fields, zero
+    /// identifiers or private material, and fields outside the `WebAuthn` bounds.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        revision: u64,
+        created_at_ms: u64,
+        modified_at_ms: u64,
+        signature_counter: u32,
+        rp_id: Zeroizing<String>,
+        user_handle: Zeroizing<Vec<u8>>,
+        user_name: Zeroizing<String>,
+        user_display_name: Zeroizing<String>,
+        credential_id: [u8; PASSKEY_CREDENTIAL_ID_BYTES],
+        private_key: Zeroizing<[u8; PASSKEY_PRIVATE_KEY_BYTES]>,
+    ) -> Result<Self, FormatError> {
+        let value = Self {
+            revision,
+            created_at_ms,
+            modified_at_ms,
+            signature_counter,
+            rp_id,
+            user_handle,
+            user_name,
+            user_display_name,
+            credential_id,
+            private_key,
+        };
+        validate_passkey_plaintext(&value)?;
+        Ok(value)
+    }
+
+    #[must_use]
+    pub const fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    #[must_use]
+    pub const fn created_at_ms(&self) -> u64 {
+        self.created_at_ms
+    }
+
+    #[must_use]
+    pub const fn modified_at_ms(&self) -> u64 {
+        self.modified_at_ms
+    }
+
+    #[must_use]
+    pub const fn signature_counter(&self) -> u32 {
+        self.signature_counter
+    }
+
+    #[must_use]
+    pub fn rp_id(&self) -> &str {
+        self.rp_id.as_str()
+    }
+
+    #[must_use]
+    pub fn user_handle(&self) -> &[u8] {
+        self.user_handle.as_slice()
+    }
+
+    #[must_use]
+    pub fn user_name(&self) -> &str {
+        self.user_name.as_str()
+    }
+
+    #[must_use]
+    pub fn user_display_name(&self) -> &str {
+        self.user_display_name.as_str()
+    }
+
+    #[must_use]
+    pub const fn credential_id(&self) -> &[u8; PASSKEY_CREDENTIAL_ID_BYTES] {
+        &self.credential_id
+    }
+
+    #[must_use]
+    pub fn private_key(&self) -> &[u8; PASSKEY_PRIVATE_KEY_BYTES] {
+        &self.private_key
+    }
+
+    /// Moves secret-bearing fields out of this format value.
+    #[must_use]
+    pub fn into_fields(self) -> PasskeyPlaintextFields {
+        (
+            self.rp_id,
+            self.user_handle,
+            self.user_name,
+            self.user_display_name,
+            self.credential_id,
+            self.private_key,
+        )
+    }
+
+    /// Encodes the plaintext using the fixed version-1 passkey schema.
+    ///
+    /// # Errors
+    ///
+    /// Returns an invariant or size error when the value is not representable.
+    pub fn encode(&self) -> Result<Zeroizing<Vec<u8>>, FormatError> {
+        validate_passkey_plaintext(self)?;
+        let capacity = self
+            .rp_id
+            .len()
+            .checked_add(self.user_handle.len())
+            .and_then(|value| value.checked_add(self.user_name.len()))
+            .and_then(|value| value.checked_add(self.user_display_name.len()))
+            .and_then(|value| value.checked_add(PASSKEY_ENCODING_OVERHEAD_BYTES))
+            .ok_or(FormatError::TooLarge)?;
+        let mut encoder = Encoder::new(SecretWriter::with_capacity(capacity));
+        encode_array(&mut encoder, 6);
+        encode_u32(&mut encoder, RECORD_SCHEMA);
+        encode_u32(&mut encoder, PASSKEY_RECORD_TYPE);
+        encode_u64(&mut encoder, self.revision);
+        encode_u64(&mut encoder, self.created_at_ms);
+        encode_u64(&mut encoder, self.modified_at_ms);
+        encode_array(&mut encoder, 7);
+        encode_u32(&mut encoder, self.signature_counter);
+        encode_str(&mut encoder, &self.rp_id);
+        encode_bytes(&mut encoder, &self.user_handle);
+        encode_str(&mut encoder, &self.user_name);
+        encode_str(&mut encoder, &self.user_display_name);
+        encode_bytes(&mut encoder, &self.credential_id);
+        encode_bytes(&mut encoder, &*self.private_key);
+        let bytes = encoder.into_writer().into_bytes();
+        if bytes
+            .len()
+            .checked_add(TAG_BYTES)
+            .ok_or(FormatError::TooLarge)?
+            > MAX_RECORD_ENVELOPE_BYTES
+        {
+            return Err(FormatError::TooLarge);
+        }
+        Ok(bytes)
+    }
+
+    /// Parses and canonicalizes a passkey plaintext.
+    ///
+    /// # Errors
+    ///
+    /// Returns a bounded format error for malformed, unsupported, invalid, or
+    /// noncanonical input.
+    pub fn decode(bytes: &[u8]) -> Result<Self, FormatError> {
+        if bytes
+            .len()
+            .checked_add(TAG_BYTES)
+            .ok_or(FormatError::TooLarge)?
+            > MAX_RECORD_ENVELOPE_BYTES
+        {
+            return Err(FormatError::TooLarge);
+        }
+        let mut decoder = Decoder::new(bytes);
+        expect_array(&mut decoder, 6)?;
+        expect_u32(&mut decoder, RECORD_SCHEMA)?;
+        expect_u32(&mut decoder, PASSKEY_RECORD_TYPE)?;
+        let revision = decode_u64(&mut decoder)?;
+        let created_at_ms = decode_u64(&mut decoder)?;
+        let modified_at_ms = decode_u64(&mut decoder)?;
+        expect_array(&mut decoder, 7)?;
+        let signature_counter = decode_u32(&mut decoder)?;
+        let rp_id = Zeroizing::new(decode_bounded_text(&mut decoder, MAX_PASSKEY_RP_ID_BYTES)?);
+        let user_handle = Zeroizing::new(decode_bounded_bytes(
+            &mut decoder,
+            MAX_PASSKEY_USER_HANDLE_BYTES,
+        )?);
+        let user_name = Zeroizing::new(decode_bounded_text(
+            &mut decoder,
+            MAX_PASSKEY_USER_NAME_BYTES,
+        )?);
+        let user_display_name = Zeroizing::new(decode_bounded_text(
+            &mut decoder,
+            MAX_PASSKEY_USER_DISPLAY_NAME_BYTES,
+        )?);
+        let credential_id = decode_fixed_bytes(&mut decoder)?;
+        let private_key = decode_zeroizing_fixed_bytes(&mut decoder)?;
+        require_end(&decoder, bytes)?;
+        let value = Self::new(
+            revision,
+            created_at_ms,
+            modified_at_ms,
+            signature_counter,
+            rp_id,
+            user_handle,
+            user_name,
+            user_display_name,
+            credential_id,
+            private_key,
+        )?;
+        if value.encode()?.as_slice() != bytes {
+            return Err(FormatError::NonCanonical);
+        }
+        Ok(value)
+    }
+}
+
+/// Reads the authenticated plaintext discriminator before type-specific decode.
+///
+/// # Errors
+///
+/// Rejects malformed, unsupported, or oversized plaintext prefixes.
+pub fn record_type(bytes: &[u8]) -> Result<RecordType, FormatError> {
+    if bytes
+        .len()
+        .checked_add(TAG_BYTES)
+        .ok_or(FormatError::TooLarge)?
+        > MAX_RECORD_ENVELOPE_BYTES
+    {
+        return Err(FormatError::TooLarge);
+    }
+    let mut decoder = Decoder::new(bytes);
+    expect_array(&mut decoder, 6)?;
+    expect_u32(&mut decoder, RECORD_SCHEMA)?;
+    match decode_u32(&mut decoder)? {
+        WEBSITE_ACCOUNT_RECORD_TYPE => Ok(RecordType::WebsiteAccount),
+        PASSKEY_RECORD_TYPE => Ok(RecordType::Passkey),
+        _ => Err(FormatError::Unsupported),
+    }
+}
+
 /// Canonical AEAD associated data for one encrypted record.
 #[must_use]
 pub fn encode_record_aad(vault_id: &[u8; 16], record_id: &[u8; 16], key_epoch: u32) -> Vec<u8> {
@@ -358,6 +626,34 @@ fn validate_plaintext(value: &WebsiteAccountPlaintext) -> Result<(), FormatError
     }
     if value.service_name.chars().any(char::is_control)
         || value.permitted_origin.chars().any(char::is_control)
+    {
+        return Err(FormatError::InvariantViolation);
+    }
+    Ok(())
+}
+
+fn validate_passkey_plaintext(value: &PasskeyPlaintext) -> Result<(), FormatError> {
+    if value.revision == 0
+        || value.modified_at_ms < value.created_at_ms
+        || value.rp_id.is_empty()
+        || value.user_handle.is_empty()
+        || value.user_name.is_empty()
+        || value.user_display_name.is_empty()
+        || value.credential_id.iter().all(|byte| *byte == 0)
+        || value.private_key.iter().all(|byte| *byte == 0)
+    {
+        return Err(FormatError::InvariantViolation);
+    }
+    if value.rp_id.len() > MAX_PASSKEY_RP_ID_BYTES
+        || value.user_handle.len() > MAX_PASSKEY_USER_HANDLE_BYTES
+        || value.user_name.len() > MAX_PASSKEY_USER_NAME_BYTES
+        || value.user_display_name.len() > MAX_PASSKEY_USER_DISPLAY_NAME_BYTES
+    {
+        return Err(FormatError::TooLarge);
+    }
+    if value.rp_id.chars().any(char::is_control)
+        || value.user_name.chars().any(char::is_control)
+        || value.user_display_name.chars().any(char::is_control)
     {
         return Err(FormatError::InvariantViolation);
     }
@@ -451,6 +747,18 @@ fn decode_fixed_bytes<const LENGTH: usize>(
         .map_err(|_| FormatError::Malformed)
 }
 
+fn decode_zeroizing_fixed_bytes<const LENGTH: usize>(
+    decoder: &mut Decoder<'_>,
+) -> Result<Zeroizing<[u8; LENGTH]>, FormatError> {
+    let value = decoder.bytes().map_err(|_| FormatError::Malformed)?;
+    if value.len() != LENGTH {
+        return Err(FormatError::Malformed);
+    }
+    let mut output = Zeroizing::new([0_u8; LENGTH]);
+    output.copy_from_slice(value);
+    Ok(output)
+}
+
 fn decode_bounded_bytes(decoder: &mut Decoder<'_>, maximum: usize) -> Result<Vec<u8>, FormatError> {
     let value = decoder.bytes().map_err(|_| FormatError::Malformed)?;
     if value.len() > maximum {
@@ -478,7 +786,9 @@ fn require_end(decoder: &Decoder<'_>, original: &[u8]) -> Result<(), FormatError
 mod tests {
     use zeroize::Zeroizing;
 
-    use super::{RecordEnvelope, WebsiteAccountPlaintext};
+    use super::{
+        PasskeyPlaintext, RecordEnvelope, RecordType, WebsiteAccountPlaintext, record_type,
+    };
     use crate::FormatError;
 
     fn account() -> WebsiteAccountPlaintext {
@@ -490,6 +800,22 @@ mod tests {
             Zeroizing::new("https://example.com".to_owned()),
             Zeroizing::new("person@example.com".to_owned()),
             Zeroizing::new("disposable-password".to_owned()),
+        )
+        .expect("fixture must be valid")
+    }
+
+    fn passkey() -> PasskeyPlaintext {
+        PasskeyPlaintext::new(
+            1,
+            1_700_000_000_000,
+            1_700_000_000_000,
+            0,
+            Zeroizing::new("example.com".to_owned()),
+            Zeroizing::new(vec![0x21; 32]),
+            Zeroizing::new("person@example.com".to_owned()),
+            Zeroizing::new("Disposable Person".to_owned()),
+            [0x31; 32],
+            Zeroizing::new([0x41; 32]),
         )
         .expect("fixture must be valid")
     }
@@ -517,6 +843,43 @@ mod tests {
         assert_eq!(decoded.revision(), 1);
         assert_eq!(decoded.permitted_origin(), "https://example.com");
         assert_eq!(decoded.username(), "person@example.com");
+    }
+
+    #[test]
+    fn passkey_round_trips_without_exposing_private_material() {
+        let plaintext = passkey().encode().expect("fixture must encode");
+        assert_eq!(record_type(&plaintext), Ok(RecordType::Passkey));
+        let decoded = PasskeyPlaintext::decode(&plaintext).expect("canonical passkey");
+        assert_eq!(decoded.rp_id(), "example.com");
+        assert_eq!(decoded.user_handle(), &[0x21; 32]);
+        assert_eq!(decoded.credential_id(), &[0x31; 32]);
+        assert_eq!(decoded.signature_counter(), 0);
+    }
+
+    #[test]
+    fn passkey_rejects_zero_private_material_and_trailing_bytes() {
+        assert!(matches!(
+            PasskeyPlaintext::new(
+                1,
+                1,
+                1,
+                0,
+                Zeroizing::new("example.com".to_owned()),
+                Zeroizing::new(vec![1]),
+                Zeroizing::new("user".to_owned()),
+                Zeroizing::new("User".to_owned()),
+                [2; 32],
+                Zeroizing::new([0; 32]),
+            ),
+            Err(FormatError::InvariantViolation)
+        ));
+
+        let mut trailing = passkey().encode().expect("fixture must encode").to_vec();
+        trailing.push(0);
+        assert!(matches!(
+            PasskeyPlaintext::decode(&trailing),
+            Err(FormatError::Malformed)
+        ));
     }
 
     #[test]

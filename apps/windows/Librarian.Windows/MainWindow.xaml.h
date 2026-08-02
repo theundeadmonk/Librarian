@@ -56,10 +56,14 @@ namespace winrt::Librarian::Windows::implementation
         winrt::fire_and_forget OnNextAccountPageClicked(
             winrt::Windows::Foundation::IInspectable const&,
             Microsoft::UI::Xaml::RoutedEventArgs const&);
+        winrt::fire_and_forget OnDeletePasskeyClicked(
+            winrt::Windows::Foundation::IInspectable const&,
+            Microsoft::UI::Xaml::RoutedEventArgs const&);
 
     private:
         void Render();
         void RenderAccounts();
+        void RenderPasskeys();
         void OnSecurityTimerTick();
         winrt::fire_and_forget RefreshAfterActivation();
         winrt::fire_and_forget LockVault();

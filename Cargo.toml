@@ -7,6 +7,8 @@ members = [
     "platform/chromium-native-host",
     "platform/windows-hello-agent",
     "platform/windows-ipc",
+    "platform/windows-passkey-agent",
+    "platform/windows-passkey-provider",
 ]
 resolver = "3"
 
