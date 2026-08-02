@@ -474,6 +474,7 @@ fn effective_timeout(operation: OperationCode, requested: u32) -> u32 {
         OperationCode::MakePasskey
         | OperationCode::GetPasskeyAssertion
         | OperationCode::DeletePasskey
+        | OperationCode::RollbackPasskeyCreation
         | OperationCode::ListPasskeysForAssertion
         | OperationCode::EnrollWindowsHello
         | OperationCode::UnlockWindowsHello

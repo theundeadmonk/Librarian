@@ -135,7 +135,7 @@ fn vault_backed_passkey_survives_restart_signs_and_deletes() {
     assert_eq!(first.user_handle(), &[0x21; 32]);
     let expected_rp_hash: [u8; 32] = Sha256::digest(b"example.com").into();
     assert_eq!(&first.authenticator_data()[..32], &expected_rp_hash);
-    assert_eq!(first.authenticator_data()[32], 0x1D);
+    assert_eq!(first.authenticator_data()[32], 0x0D);
     assert_eq!(&first.authenticator_data()[33..], &1_u32.to_be_bytes());
     verify_assertion(
         &public_key,

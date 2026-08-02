@@ -2273,6 +2273,7 @@ namespace librarian::windows
                 try
                 {
                     auto const identifier = credential_identifier_bytes(credential_id);
+                    remove_cached_passkey(identifier);
                     auto body = delete_passkey_body(identifier);
                     auto response = send_locked(
                         operation::delete_passkey,
@@ -2289,7 +2290,6 @@ namespace librarian::windows
                                 VaultStatus::Locked : VaultStatus::Unlocked,
                         };
                     }
-                    remove_cached_passkey(identifier);
                     return {
                         ClientError::None,
                         VaultStatus::Unlocked,

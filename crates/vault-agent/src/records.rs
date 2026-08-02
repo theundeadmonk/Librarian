@@ -154,9 +154,9 @@ impl VaultAgent {
     /// # Errors
     ///
     /// Returns `Locked` without touching storage, `Conflict` when an excluded
-    /// credential exists, and a uniform failure for integrity or storage
-    /// errors. Cancellation is checked throughout authentication and before
-    /// the atomic commit.
+    /// credential exists, and a uniform failure for capacity, integrity, or
+    /// storage errors. Cancellation is checked throughout authentication and
+    /// before the atomic commit.
     pub(crate) fn add_passkey_with_before_commit_and_check(
         &mut self,
         input: PasskeyInput,

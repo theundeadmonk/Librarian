@@ -69,6 +69,19 @@ struct RequestKey {
     request_id: u64,
 }
 
+#[derive(Clone, Copy, Eq, Ord, PartialEq, PartialOrd)]
+struct PendingPasskeyCreationKey {
+    connection_id: [u8; 16],
+    transaction_id: [u8; 16],
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+struct PendingPasskeyCreation {
+    credential_id: [u8; 32],
+    authenticated_process_id: u32,
+    unlock_epoch: u64,
+}
+
 struct CachedOutcome {
     request_fingerprint: [u8; 32],
     error: Option<PublicErrorCode>,
@@ -408,6 +421,7 @@ pub struct AgentRuntime {
     state: AtomicU8,
     coordinator: Arc<Coordinator>,
     idempotency: Mutex<IdempotencyState>,
+    pending_passkey_creations: Mutex<BTreeMap<PendingPasskeyCreationKey, PendingPasskeyCreation>>,
     idempotency_fingerprint_key: Zeroizing<[u8; 32]>,
     windows_hello_provider: Option<Arc<dyn WindowsHelloProvider>>,
     windows_hello_state: Option<Arc<dyn WindowsHelloStateRepository>>,
@@ -529,6 +543,7 @@ impl AgentRuntime {
             state: AtomicU8::new(state as u8),
             coordinator: Arc::new(Coordinator::new()),
             idempotency: Mutex::new(IdempotencyState::new()),
+            pending_passkey_creations: Mutex::new(BTreeMap::new()),
             idempotency_fingerprint_key,
             windows_hello_provider,
             windows_hello_state,
@@ -607,9 +622,10 @@ impl AgentRuntime {
     /// Returns `Internal` only if cancellation state is poisoned.
     pub fn disconnect(&self, connection: &Connection) -> Result<(), DispatchError> {
         let _commit = lock(&self.coordinator.commit_gate)?;
+        let connection_id = *connection.connection_id();
         connection.close();
-        self.coordinator
-            .cancel_connection(*connection.connection_id())
+        lock(&self.pending_passkey_creations)?.retain(|key, _| key.connection_id != connection_id);
+        self.coordinator.cancel_connection(connection_id)
     }
 
     /// Locks and cancels all work before Windows sign-out or agent shutdown.
@@ -1001,6 +1017,7 @@ impl AgentRuntime {
         &self,
         operation: OperationRequest,
         request_epoch: u64,
+        connection_id: [u8; 16],
         authenticated_process_id: u32,
         registration: &RequestRegistration,
         deadline: Instant,
@@ -1052,9 +1069,14 @@ impl AgentRuntime {
             OperationRequest::RemoveWindowsHello => {
                 self.remove_windows_hello(request_epoch, registration, deadline)
             }
-            OperationRequest::MakePasskey { proof } => {
-                self.make_passkey(&proof, request_epoch, registration, deadline)
-            }
+            OperationRequest::MakePasskey { proof } => self.make_passkey(
+                &proof,
+                connection_id,
+                authenticated_process_id,
+                request_epoch,
+                registration,
+                deadline,
+            ),
             OperationRequest::GetPasskeyAssertion {
                 proof,
                 credential_id,
@@ -1074,6 +1096,18 @@ impl AgentRuntime {
             OperationRequest::ListPasskeys => {
                 self.list_passkeys(request_epoch, registration, deadline)
             }
+            OperationRequest::RollbackPasskeyCreation {
+                proof,
+                credential_id,
+            } => self.rollback_passkey_creation(
+                &proof,
+                &credential_id,
+                connection_id,
+                authenticated_process_id,
+                request_epoch,
+                registration,
+                deadline,
+            ),
         }
     }
 
@@ -1088,6 +1122,7 @@ impl AgentRuntime {
         self.execute(
             operation,
             context.permit.unlock_epoch(),
+            *context.connection.connection_id(),
             context.connection.authenticated_process_id(),
             &context.registration,
             context.deadline,
@@ -1098,10 +1133,14 @@ impl AgentRuntime {
         operation: &OperationRequest,
         context: &DispatchContext<'_>,
     ) -> Option<ExecutionOutcome> {
+        let expected_request_id = match operation {
+            OperationRequest::RollbackPasskeyCreation { .. } => 2,
+            _ => 1,
+        };
         operation
             .passkey_proof()
             .is_some_and(|proof| {
-                context.permit.request_id() != 1
+                context.permit.request_id() != expected_request_id
                     || proof.agent_challenge() != context.connection.connection_id()
             })
             .then(|| {
@@ -2485,6 +2524,8 @@ impl AgentRuntime {
     fn make_passkey(
         &self,
         proof: &PasskeyTransactionProof,
+        connection_id: [u8; 16],
+        authenticated_process_id: u32,
         request_epoch: u64,
         registration: &RequestRegistration,
         deadline: Instant,
@@ -2496,6 +2537,13 @@ impl AgentRuntime {
             Ok(verified) => verified,
             Err(error) => return Ok(map_passkey_verification_error(error)),
         };
+        let pending_key = PendingPasskeyCreationKey {
+            connection_id,
+            transaction_id: *proof.transaction_id(),
+        };
+        if lock(&self.pending_passkey_creations)?.contains_key(&pending_key) {
+            return Ok(ExecutionOutcome::invalid());
+        }
         let Some(_mutation) = FlagPermit::acquire(&self.coordinator.mutation_active) else {
             return Ok(ExecutionOutcome::busy());
         };
@@ -2539,14 +2587,27 @@ impl AgentRuntime {
         );
         release_failed_commit_guard(&result, &mut commit_guard);
         match result {
-            Ok(credential) => Ok(ExecutionOutcome::success(encode_passkey_credential(
-                &PasskeyCredentialView {
+            Ok(credential) => {
+                let pending = PendingPasskeyCreation {
                     credential_id: *credential.credential_id(),
-                    user_handle: credential.user_handle(),
-                    public_key: *credential.public_key(),
-                },
-            )?)
-            .commit_point()),
+                    authenticated_process_id,
+                    unlock_epoch: request_epoch,
+                };
+                if lock(&self.pending_passkey_creations)?
+                    .insert(pending_key, pending)
+                    .is_some()
+                {
+                    return Err(DispatchError::Internal);
+                }
+                Ok(
+                    ExecutionOutcome::success(encode_passkey_credential(&PasskeyCredentialView {
+                        credential_id: *credential.credential_id(),
+                        user_handle: credential.user_handle(),
+                        public_key: *credential.public_key(),
+                    })?)
+                    .commit_point(),
+                )
+            }
             Err(AccountError::Aborted) => {
                 self.abort_after_core(&mut vault, request_epoch, registration, deadline)
             }
@@ -2785,6 +2846,94 @@ impl AgentRuntime {
         release_failed_commit_guard(&result, &mut commit_guard);
         match result {
             Ok(()) => Ok(ExecutionOutcome::success(encode_empty_result()?).commit_point()),
+            Err(AccountError::Aborted) => {
+                self.abort_after_core(&mut vault, request_epoch, registration, deadline)
+            }
+            Err(AccountError::Failed) => self.account_error_after_core(vault, AccountError::Failed),
+            Err(error) => {
+                if let Some(outcome) =
+                    self.post_secret_operation(&mut vault, request_epoch, registration, deadline)
+                {
+                    return Ok(outcome);
+                }
+                Ok(map_account_error(error))
+            }
+        }
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "transaction, peer, epoch, cancellation, and deadline bindings remain explicit"
+    )]
+    fn rollback_passkey_creation(
+        &self,
+        proof: &PasskeyTransactionProof,
+        credential_id: &[u8; 32],
+        connection_id: [u8; 16],
+        authenticated_process_id: u32,
+        request_epoch: u64,
+        registration: &RequestRegistration,
+        deadline: Instant,
+    ) -> Result<ExecutionOutcome, DispatchError> {
+        if let Some(outcome) = self.pre_secret_operation(request_epoch, registration, deadline) {
+            return Ok(outcome);
+        }
+        if let Err(error) = self.passkey_verifier.verify_make(proof) {
+            return Ok(map_passkey_verification_error(error));
+        }
+        let pending_key = PendingPasskeyCreationKey {
+            connection_id,
+            transaction_id: *proof.transaction_id(),
+        };
+        let expected = PendingPasskeyCreation {
+            credential_id: *credential_id,
+            authenticated_process_id,
+            unlock_epoch: request_epoch,
+        };
+        if lock(&self.pending_passkey_creations)?.get(&pending_key) != Some(&expected) {
+            return Ok(ExecutionOutcome::invalid());
+        }
+        let Some(_mutation) = FlagPermit::acquire(&self.coordinator.mutation_active) else {
+            return Ok(ExecutionOutcome::busy());
+        };
+        if let Some(outcome) = self.pre_secret_operation(request_epoch, registration, deadline) {
+            return Ok(outcome);
+        }
+        let coordinator = Arc::clone(&self.coordinator);
+        let cancellation = Arc::clone(&registration.cancellation);
+        let mut commit_guard = None;
+        let mut vault = lock(&self.vault)?;
+        if let Some(outcome) = self.pre_secret_operation(request_epoch, registration, deadline) {
+            return Ok(outcome);
+        }
+        let result = vault.delete_passkey_with_before_commit_and_check(
+            credential_id,
+            || self.secret_operation_should_abort(request_epoch, registration, deadline),
+            || {
+                let guard = coordinator
+                    .commit_gate
+                    .lock()
+                    .map_err(|_| crate::errors::StorageError::Conflict)?;
+                if coordinator.epoch() != request_epoch
+                    || coordinator.lock_active.load(Ordering::Acquire)
+                    || cancellation.is_cancelled()
+                    || Instant::now() >= deadline
+                {
+                    return Err(crate::errors::StorageError::Aborted);
+                }
+                commit_guard = Some(guard);
+                Ok(())
+            },
+        );
+        release_failed_commit_guard(&result, &mut commit_guard);
+        match result {
+            Ok(()) | Err(AccountError::NotFound) => {
+                let removed = lock(&self.pending_passkey_creations)?.remove(&pending_key);
+                if removed.is_some_and(|pending| pending != expected) {
+                    return Err(DispatchError::Internal);
+                }
+                Ok(ExecutionOutcome::success(encode_empty_result()?).commit_point())
+            }
             Err(AccountError::Aborted) => {
                 self.abort_after_core(&mut vault, request_epoch, registration, deadline)
             }
@@ -4077,7 +4226,7 @@ mod tests {
         );
         let authenticator_data = decoder.bytes().expect("authenticator data");
         assert_eq!(authenticator_data.len(), 37);
-        assert_eq!(authenticator_data[32], 0x1D);
+        assert_eq!(authenticator_data[32], 0x0D);
         assert_eq!(&authenticator_data[33..], &1_u32.to_be_bytes());
         assert!(!decoder.bytes().expect("DER signature").is_empty());
         assert_eq!(decoder.position(), response.body().len());
@@ -4220,6 +4369,55 @@ mod tests {
             },
         );
         assert_eq!(missing.error(), Some(PublicErrorCode::NotFound));
+        assert_eq!(verifier.calls(), 2);
+    }
+
+    #[test]
+    fn passkey_creation_rollback_is_exact_and_connection_bound() {
+        let directory = TestDirectory::new();
+        let path = directory.vault_path();
+        let verifier = Arc::new(TestPasskeyRequestVerifier::default());
+        let mut runtime = AgentRuntime::start(&path).expect("runtime");
+        runtime.passkey_verifier = verifier.clone();
+        create_test_vault(&runtime, "disposable rollback test password");
+        let client = passkey_connection(&runtime, 0x61);
+        let proof = test_passkey_proof(0x21, *client.connection_id());
+
+        let created = dispatch_passkey_request(
+            &runtime,
+            &client,
+            1,
+            0x71,
+            &OperationRequest::MakePasskey {
+                proof: test_passkey_proof(0x21, *client.connection_id()),
+            },
+        );
+        assert_eq!(created.error(), None);
+        let credential_id = decode_created_passkey(&created);
+
+        let rolled_back = dispatch_passkey_request(
+            &runtime,
+            &client,
+            2,
+            0x72,
+            &OperationRequest::RollbackPasskeyCreation {
+                proof,
+                credential_id,
+            },
+        );
+        assert_eq!(rolled_back.error(), None);
+        assert_eq!(rolled_back.body(), &[0x80]);
+        assert!(
+            lock(&runtime.pending_passkey_creations)
+                .expect("pending passkey creations")
+                .is_empty()
+        );
+
+        let desktop = desktop_passkey_connection(&runtime, 0x62);
+        let management =
+            dispatch_passkey_request(&runtime, &desktop, 1, 0, &OperationRequest::ListPasskeys);
+        assert_eq!(management.error(), None);
+        assert_eq!(management.body(), &[0x80]);
         assert_eq!(verifier.calls(), 2);
     }
 
@@ -4694,6 +4892,7 @@ mod tests {
                     runtime.execute(
                         operation,
                         runtime.unlock_epoch(),
+                        *client.connection_id(),
                         17,
                         &registration,
                         Instant::now() + Duration::from_secs(1),

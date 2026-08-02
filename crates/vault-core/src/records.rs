@@ -1,4 +1,4 @@
-use std::fmt;
+use std::{collections::BTreeSet, fmt};
 
 use librarian_vault_format::{
     MAX_ORIGIN_BYTES, MAX_PASSKEY_RP_ID_BYTES, MAX_PASSKEY_USER_DISPLAY_NAME_BYTES,
@@ -22,12 +22,12 @@ const RECORD_LABEL_PREFIX: &[u8] = b"librarian/vault/v1/record/";
 const MAX_RECORD_ID_ATTEMPTS: usize = 128;
 const MAX_WEBSITE_ACCOUNT_PAGE_SIZE: usize = 100;
 const MAX_PASSKEY_ASSERTION_CANDIDATES: usize = 64;
+const MAX_PASSKEY_CREDENTIALS: usize = 64;
 const PASSKEY_PUBLIC_KEY_BYTES: usize = 65;
 const PASSKEY_AUTHENTICATOR_DATA_BYTES: usize = 37;
 const PASSKEY_USER_PRESENT: u8 = 0x01;
 const PASSKEY_USER_VERIFIED: u8 = 0x04;
 const PASSKEY_BACKUP_ELIGIBLE: u8 = 0x08;
-const PASSKEY_BACKED_UP: u8 = 0x10;
 
 /// A stable, random identifier with no embedded timestamp or semantic value.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -755,7 +755,7 @@ impl UnlockedVault {
     ///
     /// Returns `Conflict` when an authenticated excluded credential already
     /// exists, `Cancelled` when request authority is revoked, and `Failed` for
-    /// integrity, entropy, or cryptographic failures.
+    /// integrity, capacity, entropy, or cryptographic failures.
     #[allow(
         clippy::too_many_arguments,
         reason = "snapshot authentication and cancellation inputs remain explicit at the crypto boundary"
@@ -772,18 +772,25 @@ impl UnlockedVault {
     ) -> Result<(PreparedRecordMutation, PasskeyCredential), RecordOperationError> {
         self.authenticate_snapshot_metadata(header_bytes, manifest_envelope_bytes)?;
         let mut conflict = false;
-        let mut existing_credential_ids = Vec::new();
+        let mut existing_credential_ids = BTreeSet::new();
+        let mut invalid = false;
         visit_authenticated_records(self, records, should_cancel, |record| {
             if let DecryptedRecord::Passkey(passkey) = record {
+                if !existing_credential_ids.insert(passkey.credential_id) {
+                    invalid = true;
+                    return;
+                }
                 if passkey.rp_id.as_str() == input.rp_id.as_str()
                     && excluded_credential_ids.contains(&passkey.credential_id)
                 {
                     conflict = true;
                 }
-                existing_credential_ids.push(passkey.credential_id);
             }
         })
         .map_err(map_snapshot_operation_error)?;
+        if invalid || !has_passkey_capacity(existing_credential_ids.len()) {
+            return Err(RecordOperationError::Failed);
+        }
         if conflict {
             return Err(RecordOperationError::Conflict);
         }
@@ -866,16 +873,15 @@ impl UnlockedVault {
             return Err(RecordOperationError::Conflict);
         }
         self.authenticate_snapshot_metadata(header_bytes, manifest_envelope_bytes)?;
-        let mut credential_ids = Vec::new();
+        let mut credential_ids = BTreeSet::new();
         let mut passkeys = Vec::new();
         let mut invalid = false;
         visit_authenticated_records(self, records, should_cancel, |record| {
             if let DecryptedRecord::Passkey(passkey) = record {
-                if credential_ids.contains(&passkey.credential_id) {
+                if !credential_ids.insert(passkey.credential_id) {
                     invalid = true;
                     return;
                 }
-                credential_ids.push(passkey.credential_id);
                 let is_allowed =
                     !allow_list_present || allowed_credential_ids.contains(&passkey.credential_id);
                 if passkey.rp_id.as_str() == expected_rp_id.as_str() && is_allowed {
@@ -915,18 +921,17 @@ impl UnlockedVault {
         should_cancel: impl FnMut() -> bool,
     ) -> Result<Vec<PasskeySummary>, RecordOperationError> {
         self.authenticate_snapshot_metadata(header_bytes, manifest_envelope_bytes)?;
-        let mut credential_ids = Vec::new();
+        let mut credential_ids = BTreeSet::new();
         let mut passkeys = Vec::new();
         let mut invalid = false;
         visit_authenticated_records(self, records, should_cancel, |record| {
             if let DecryptedRecord::Passkey(passkey) = record {
-                if credential_ids.contains(&passkey.credential_id)
+                if !credential_ids.insert(passkey.credential_id)
                     || passkeys.len() >= MAX_PASSKEY_ASSERTION_CANDIDATES
                 {
                     invalid = true;
                     return;
                 }
-                credential_ids.push(passkey.credential_id);
                 passkeys.push(PasskeySummary {
                     credential_id: passkey.credential_id,
                     rp_id: passkey.rp_id,
@@ -1006,10 +1011,8 @@ impl UnlockedVault {
             .ok_or(RecordOperationError::Conflict)?;
         let mut authenticator_data = [0_u8; PASSKEY_AUTHENTICATOR_DATA_BYTES];
         authenticator_data[..32].copy_from_slice(&Sha256::digest(expected_rp_id.as_bytes()));
-        authenticator_data[32] = PASSKEY_USER_PRESENT
-            | PASSKEY_USER_VERIFIED
-            | PASSKEY_BACKUP_ELIGIBLE
-            | PASSKEY_BACKED_UP;
+        authenticator_data[32] =
+            PASSKEY_USER_PRESENT | PASSKEY_USER_VERIFIED | PASSKEY_BACKUP_ELIGIBLE;
         authenticator_data[33..].copy_from_slice(&next_counter.to_be_bytes());
         let mut signed_bytes = Zeroizing::new(Vec::with_capacity(
             PASSKEY_AUTHENTICATOR_DATA_BYTES + client_data_hash.len(),
@@ -1500,7 +1503,7 @@ fn normalize_rp_id(value: &str) -> Result<Zeroizing<String>, PasskeyInputError> 
 }
 
 fn allocate_credential_id(
-    existing: &[[u8; PASSKEY_CREDENTIAL_ID_BYTES]],
+    existing: &BTreeSet<[u8; PASSKEY_CREDENTIAL_ID_BYTES]>,
     entropy: &mut impl EntropySource,
 ) -> Result<[u8; PASSKEY_CREDENTIAL_ID_BYTES], RecordOperationError> {
     (0..MAX_RECORD_ID_ATTEMPTS)
@@ -1510,6 +1513,10 @@ fn allocate_credential_id(
                 .then_some(candidate)
         })
         .ok_or(RecordOperationError::Failed)
+}
+
+const fn has_passkey_capacity(existing: usize) -> bool {
+    existing < MAX_PASSKEY_CREDENTIALS
 }
 
 fn generate_signing_key(
@@ -1572,7 +1579,14 @@ impl From<CreateVaultError> for RecordOperationError {
 mod tests {
     use librarian_vault_format::MAX_SERVICE_NAME_BYTES;
 
-    use super::{WebsiteAccountInput, WebsiteAccountInputError};
+    use super::{WebsiteAccountInput, WebsiteAccountInputError, has_passkey_capacity};
+
+    #[test]
+    fn passkey_capacity_stops_before_management_encoding_overflows() {
+        assert!(has_passkey_capacity(63));
+        assert!(!has_passkey_capacity(64));
+        assert!(!has_passkey_capacity(65));
+    }
 
     #[test]
     fn origin_normalization_is_exact_and_whatwg_based() {

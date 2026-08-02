@@ -97,11 +97,12 @@ pub enum OperationCode {
     DeletePasskey = 32,
     ListPasskeysForAssertion = 33,
     ListPasskeys = 34,
+    RollbackPasskeyCreation = 35,
 }
 
 impl OperationCode {
     /// Complete closed operation set for version 1.
-    pub const ALL: [Self; 21] = [
+    pub const ALL: [Self; 22] = [
         Self::Status,
         Self::CreateVault,
         Self::UnlockMasterPassword,
@@ -123,6 +124,7 @@ impl OperationCode {
         Self::DeletePasskey,
         Self::ListPasskeysForAssertion,
         Self::ListPasskeys,
+        Self::RollbackPasskeyCreation,
     ];
 
     #[must_use]
@@ -159,6 +161,7 @@ impl OperationCode {
                     | Self::MakePasskey
                     | Self::GetPasskeyAssertion
                     | Self::ListPasskeysForAssertion
+                    | Self::RollbackPasskeyCreation
             ),
         }
     }
@@ -178,6 +181,7 @@ impl OperationCode {
                 | Self::MakePasskey
                 | Self::GetPasskeyAssertion
                 | Self::DeletePasskey
+                | Self::RollbackPasskeyCreation
         )
     }
 
@@ -201,6 +205,7 @@ impl OperationCode {
                 | Self::DeletePasskey
                 | Self::ListPasskeysForAssertion
                 | Self::ListPasskeys
+                | Self::RollbackPasskeyCreation
         )
     }
 
@@ -214,7 +219,8 @@ impl OperationCode {
             | Self::GetPasskeyAssertion
             | Self::DeletePasskey
             | Self::ListPasskeysForAssertion
-            | Self::ListPasskeys => Some(crate::FEATURE_PASSKEY_PROVIDER),
+            | Self::ListPasskeys
+            | Self::RollbackPasskeyCreation => Some(crate::FEATURE_PASSKEY_PROVIDER),
             _ => None,
         }
     }
@@ -242,6 +248,7 @@ impl OperationCode {
             32 => Some(Self::DeletePasskey),
             33 => Some(Self::ListPasskeysForAssertion),
             34 => Some(Self::ListPasskeys),
+            35 => Some(Self::RollbackPasskeyCreation),
             _ => None,
         }
     }

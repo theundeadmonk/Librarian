@@ -651,7 +651,7 @@ namespace
             rp_hash.size() + 1 + 4 + authenticator_aaguid.size() + 2 +
             librarian_passkey_credential_id_bytes + cose.size());
         authenticator_data.insert(authenticator_data.end(), rp_hash.begin(), rp_hash.end());
-        authenticator_data.push_back(0x5d);
+        authenticator_data.push_back(0x4d);
         authenticator_data.insert(authenticator_data.end(), 4, 0);
         authenticator_data.insert(
             authenticator_data.end(),
@@ -850,14 +850,23 @@ namespace
             auto scrub_credential = scope_exit([&] {
                 SecureZeroMemory(&credential, sizeof(credential));
             });
+            auto const rollback_creation = [&]() noexcept {
+                return callback_hresult(callbacks.rollback_make(
+                    callbacks.context,
+                    &proof,
+                    credential.credential_id,
+                    librarian_passkey_credential_id_bytes));
+            };
             if (active_cancelled.load(std::memory_order_acquire))
             {
-                return NTE_USER_CANCELLED;
+                result = rollback_creation();
+                return FAILED(result) ? result : NTE_USER_CANCELLED;
             }
             result = encode_make_response(api, *decoded.value, credential, response);
             if (FAILED(result))
             {
-                return result;
+                auto const rollback_result = rollback_creation();
+                return FAILED(rollback_result) ? rollback_result : result;
             }
             WEBAUTHN_PLUGIN_CREDENTIAL_DETAILS details{};
             details.cbCredentialId = librarian_passkey_credential_id_bytes;
@@ -873,14 +882,17 @@ namespace
             {
                 CoTaskMemFree(response->pbEncodedResponse);
                 *response = {};
-                return result;
+                static_cast<void>(api.remove_credentials(provider_clsid, 1, &details));
+                auto const rollback_result = rollback_creation();
+                return FAILED(rollback_result) ? rollback_result : result;
             }
             if (!transaction.complete())
             {
                 CoTaskMemFree(response->pbEncodedResponse);
                 *response = {};
                 static_cast<void>(api.remove_credentials(provider_clsid, 1, &details));
-                return NTE_USER_CANCELLED;
+                result = rollback_creation();
+                return FAILED(result) ? result : NTE_USER_CANCELLED;
             }
             return S_OK;
         }
@@ -1259,7 +1271,8 @@ extern "C" std::uint32_t librarian_windows_passkey_provider_run(
     if (supplied_callbacks == nullptr || supplied_callbacks->context == nullptr ||
         supplied_callbacks->status == nullptr || supplied_callbacks->prepare == nullptr ||
         supplied_callbacks->discard == nullptr || supplied_callbacks->list == nullptr ||
-        supplied_callbacks->make == nullptr || supplied_callbacks->get_assertion == nullptr)
+        supplied_callbacks->make == nullptr || supplied_callbacks->rollback_make == nullptr ||
+        supplied_callbacks->get_assertion == nullptr)
     {
         return static_cast<std::uint32_t>(E_INVALIDARG);
     }

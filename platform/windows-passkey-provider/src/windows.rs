@@ -83,6 +83,7 @@ struct AgentSession {
     connection_id: [u8; 16],
     unlock_epoch: u64,
     state: AgentState,
+    next_request_id: u64,
 }
 
 #[repr(C)]
@@ -179,6 +180,8 @@ type ListCallback = unsafe extern "C" fn(
 ) -> u32;
 type MakeCallback =
     unsafe extern "C" fn(*mut c_void, *const NativeRequest, *mut NativeCredential) -> u32;
+type RollbackMakeCallback =
+    unsafe extern "C" fn(*mut c_void, *const NativeRequest, *const u8, u32) -> u32;
 type AssertionCallback = unsafe extern "C" fn(
     *mut c_void,
     *const NativeRequest,
@@ -194,6 +197,7 @@ struct NativeCallbacks {
     discard: DiscardCallback,
     list: ListCallback,
     make: MakeCallback,
+    rollback_make: RollbackMakeCallback,
     get_assertion: AssertionCallback,
 }
 
@@ -243,6 +247,7 @@ pub(crate) fn run() -> Result<(), ProviderError> {
         discard: discard_callback,
         list: list_callback,
         make: make_callback,
+        rollback_make: rollback_make_callback,
         get_assertion: assertion_callback,
     };
     // SAFETY: `callbacks` and its context remain live until the synchronous
@@ -356,6 +361,7 @@ impl ProviderContext {
             connection_id: *frame.header().connection_id(),
             unlock_epoch: server.unlock_epoch(),
             state: server.agent_state(),
+            next_request_id: 1,
         })
     }
 
@@ -393,6 +399,22 @@ impl ProviderContext {
         Ok(prepared.session)
     }
 
+    fn restore_prepared(
+        &self,
+        transaction_id: [u8; 16],
+        session: AgentSession,
+    ) -> Result<(), ProviderError> {
+        let mut prepared = self.prepared.lock().map_err(|_| ProviderError::Protocol)?;
+        if prepared.is_some() {
+            return Err(ProviderError::Protocol);
+        }
+        *prepared = Some(PreparedSession {
+            transaction_id,
+            session,
+        });
+        Ok(())
+    }
+
     fn discard(&self, transaction_id: &[u8; 16]) {
         if let Ok(mut prepared) = self.prepared.lock()
             && prepared
@@ -406,10 +428,11 @@ impl ProviderContext {
 
 impl AgentSession {
     fn execute(
-        self,
+        &mut self,
         operation: &OperationRequest,
         transaction_id: Option<&[u8; 16]>,
     ) -> Result<ResponseEnvelope, ProviderError> {
+        let request_id = self.next_request_id;
         let body = operation.encode().map_err(|_| ProviderError::Protocol)?;
         let mut idempotency_key = None;
         if operation.operation().requires_idempotency_key() {
@@ -434,7 +457,7 @@ impl AgentSession {
             self.version,
             payload.len(),
             self.connection_id,
-            1,
+            request_id,
         )
         .map_err(|_| ProviderError::Protocol)?;
         self.pipe
@@ -454,7 +477,7 @@ impl AgentSession {
                         self.version,
                         0,
                         self.connection_id,
-                        1,
+                        request_id,
                     )
                     .map_err(|_| ProviderError::Protocol)?;
                     self.pipe
@@ -476,11 +499,14 @@ impl AgentSession {
         if frame.header().kind() != MessageKind::Response
             || frame.header().version() != self.version
             || frame.header().connection_id() != &self.connection_id
-            || frame.header().request_id() != 1
+            || frame.header().request_id() != request_id
         {
             return Err(ProviderError::Protocol);
         }
-        ResponseEnvelope::decode(frame.payload()).map_err(|_| ProviderError::Protocol)
+        let response =
+            ResponseEnvelope::decode(frame.payload()).map_err(|_| ProviderError::Protocol)?;
+        self.next_request_id = request_id.checked_add(1).ok_or(ProviderError::Protocol)?;
+        Ok(response)
     }
 }
 
@@ -657,7 +683,7 @@ unsafe extern "C" fn make_callback(
         let request = unsafe { request_ref(request)? };
         let proof = request.transaction_proof()?;
         let transaction_id = *proof.transaction_id();
-        let session = context
+        let mut session = context
             .take_prepared(proof.transaction_id(), proof.agent_challenge())
             .map_err(map_provider_error)?;
         let response = session
@@ -667,12 +693,42 @@ unsafe extern "C" fn make_callback(
             )
             .map_err(map_provider_error)?;
         response_success(&response)?;
+        context
+            .restore_prepared(transaction_id, session)
+            .map_err(map_provider_error)?;
         let decoded = decode_credential(response.body())?;
         // SAFETY: the bridge supplied one writable result structure.
         unsafe {
             credential.write(decoded);
         }
         Ok(())
+    })
+}
+
+unsafe extern "C" fn rollback_make_callback(
+    context: *mut c_void,
+    request: *const NativeRequest,
+    credential_id: *const u8,
+    credential_id_bytes: u32,
+) -> u32 {
+    ffi_result(|| {
+        let context = unsafe { context_ref(context)? };
+        let request = unsafe { request_ref(request)? };
+        let proof = request.transaction_proof()?;
+        let credential_id = fixed_input::<CREDENTIAL_ID_BYTES>(credential_id, credential_id_bytes)?;
+        let mut session = context
+            .take_prepared(proof.transaction_id(), proof.agent_challenge())
+            .map_err(map_provider_error)?;
+        let response = session
+            .execute(
+                &OperationRequest::RollbackPasskeyCreation {
+                    proof,
+                    credential_id,
+                },
+                None,
+            )
+            .map_err(map_provider_error)?;
+        response_success(&response)
     })
 }
 
@@ -701,7 +757,7 @@ unsafe extern "C" fn assertion_callback(
                 .try_into()
                 .map_err(|_| CALLBACK_FAILED)?
         };
-        let session = context
+        let mut session = context
             .take_prepared(proof.transaction_id(), proof.agent_challenge())
             .map_err(map_provider_error)?;
         let response = session
