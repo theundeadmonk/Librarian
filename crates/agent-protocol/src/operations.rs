@@ -461,22 +461,12 @@ impl OperationRequest {
                     id: decode_fixed_bytes(&mut decoder)?,
                 }
             }
-            OperationCode::EnrollWindowsHello => {
-                expect_array(&mut decoder, 1)?;
-                let parent_window = decode_u64(&mut decoder)?;
-                if parent_window == 0 {
-                    return Err(ProtocolError::InvariantViolation);
-                }
-                Self::EnrollWindowsHello { parent_window }
-            }
-            OperationCode::UnlockWindowsHello => {
-                expect_array(&mut decoder, 1)?;
-                let parent_window = decode_u64(&mut decoder)?;
-                if parent_window == 0 {
-                    return Err(ProtocolError::InvariantViolation);
-                }
-                Self::UnlockWindowsHello { parent_window }
-            }
+            OperationCode::EnrollWindowsHello => Self::EnrollWindowsHello {
+                parent_window: decode_parent_window(&mut decoder)?,
+            },
+            OperationCode::UnlockWindowsHello => Self::UnlockWindowsHello {
+                parent_window: decode_parent_window(&mut decoder)?,
+            },
             OperationCode::RemoveWindowsHello => {
                 expect_array(&mut decoder, 0)?;
                 Self::RemoveWindowsHello
@@ -591,6 +581,14 @@ impl OperationRequest {
         }
         checked_request_body(encoder.into_writer().into_bytes())
     }
+}
+
+fn decode_parent_window(decoder: &mut Decoder<'_>) -> Result<u64, ProtocolError> {
+    expect_array(decoder, 1)?;
+    let parent_window = decode_u64(decoder)?;
+    (parent_window != 0)
+        .then_some(parent_window)
+        .ok_or(ProtocolError::InvariantViolation)
 }
 
 fn decode_passkey_request_proof(
