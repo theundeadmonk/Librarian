@@ -6,8 +6,10 @@ use zeroize::Zeroizing;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum PasskeyVerificationError {
+    #[cfg(any(windows, test))]
     Invalid,
     Unavailable,
+    #[cfg(any(windows, test))]
     Failed,
 }
 

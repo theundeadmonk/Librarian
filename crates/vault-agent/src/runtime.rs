@@ -3097,10 +3097,11 @@ fn map_account_error(error: AccountError) -> ExecutionOutcome {
 
 fn map_passkey_verification_error(error: PasskeyVerificationError) -> ExecutionOutcome {
     match error {
+        #[cfg(any(windows, test))]
         PasskeyVerificationError::Invalid => ExecutionOutcome::invalid(),
-        PasskeyVerificationError::Unavailable | PasskeyVerificationError::Failed => {
-            ExecutionOutcome::failed()
-        }
+        PasskeyVerificationError::Unavailable => ExecutionOutcome::failed(),
+        #[cfg(any(windows, test))]
+        PasskeyVerificationError::Failed => ExecutionOutcome::failed(),
     }
 }
 
