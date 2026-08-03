@@ -799,6 +799,8 @@ impl UnlockedVault {
         if self.manifest.entries().len() >= MAX_RECORDS {
             return Err(RecordOperationError::Failed);
         }
+        let committed_at_ms =
+            passkey_manifest_time(self.manifest.committed_at_ms(), committed_at_ms);
         let mut entropy = SystemEntropy;
         let id = self.allocate_record_id(&mut entropy)?;
         let credential_id = allocate_credential_id(&existing_credential_ids, &mut entropy)?;
@@ -1724,12 +1726,13 @@ impl From<CreateVaultError> for RecordOperationError {
 
 #[cfg(test)]
 mod tests {
-    use librarian_vault_format::MAX_SERVICE_NAME_BYTES;
+    use librarian_vault_format::{MAX_SERVICE_NAME_BYTES, PasskeyCreationState};
 
     use super::{
-        WebsiteAccountInput, WebsiteAccountInputError, has_passkey_capacity, passkey_manifest_time,
-        passkey_update_time,
+        PasskeyInput, WebsiteAccountInput, WebsiteAccountInputError, has_passkey_capacity,
+        passkey_manifest_time, passkey_update_time,
     };
+    use crate::{MasterPassword, create_vault};
 
     #[test]
     fn passkey_capacity_stops_before_management_encoding_overflows() {
@@ -1749,6 +1752,37 @@ mod tests {
     fn passkey_manifest_time_never_moves_backwards() {
         assert_eq!(passkey_manifest_time(30, 10), 30);
         assert_eq!(passkey_manifest_time(30, 40), 40);
+    }
+
+    #[test]
+    fn passkey_creation_clamps_a_backward_wall_clock_to_the_manifest() {
+        let created = create_vault(
+            MasterPassword::new("disposable backward-clock password")
+                .expect("test password must be valid"),
+            30,
+        )
+        .expect("test vault must be created");
+        let (header, manifest, _recovery_key, vault) = created.into_parts();
+        let input = PasskeyInput::new(
+            "example.com",
+            &[0x42; 32],
+            "person@example.com",
+            "Disposable Person",
+        )
+        .expect("test passkey input must be valid");
+
+        let result = vault.prepare_add_passkey_with_check(
+            &header,
+            &manifest,
+            &[],
+            input,
+            &[],
+            PasskeyCreationState::Pending,
+            10,
+            || false,
+        );
+
+        assert!(result.is_ok());
     }
 
     #[test]

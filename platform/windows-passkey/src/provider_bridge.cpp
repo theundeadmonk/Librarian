@@ -19,6 +19,7 @@
 #include <cstring>
 #include <limits>
 #include <mutex>
+#include <new>
 #include <span>
 #include <string>
 #include <string_view>
@@ -415,7 +416,7 @@ namespace
         std::span<std::uint8_t const> credential_id,
         wchar_t const* username,
         wchar_t const* hint,
-        std::vector<std::uint8_t>& signature) noexcept
+        std::vector<std::uint8_t>& signature)
     {
         if (agent_challenge.size() != librarian::windows_passkey::agent_challenge_bytes ||
             (!credential_id.empty() &&
@@ -511,7 +512,7 @@ namespace
     [[nodiscard]] bool utf8_to_wide(
         std::uint8_t const* input,
         std::uint32_t input_bytes,
-        std::wstring& output) noexcept
+        std::wstring& output)
     {
         if (input == nullptr || input_bytes == 0 ||
             input_bytes > static_cast<std::uint32_t>(std::numeric_limits<int>::max()))
@@ -619,6 +620,10 @@ namespace
             selected = static_cast<std::size_t>(button - 1000);
             return S_OK;
         }
+        catch (std::bad_alloc const&)
+        {
+            return E_OUTOFMEMORY;
+        }
         catch (...)
         {
             return E_FAIL;
@@ -641,11 +646,11 @@ namespace
         return cose;
     }
 
-    [[nodiscard]] HRESULT encode_make_response(
+    [[nodiscard]] HRESULT encode_make_response_impl(
         webauthn_api const& api,
         WEBAUTHN_CTAPCBOR_MAKE_CREDENTIAL_REQUEST const& request,
         librarian_passkey_credential const& credential,
-        WEBAUTHN_PLUGIN_OPERATION_RESPONSE* response) noexcept
+        WEBAUTHN_PLUGIN_OPERATION_RESPONSE* response)
     {
         if (response == nullptr || request.pbRpId == nullptr || request.cbRpId == 0 ||
             credential.user_handle_bytes == 0 ||
@@ -697,6 +702,39 @@ namespace
         response->cbEncodedResponse = encoded_bytes;
         response->pbEncodedResponse = encoded;
         return S_OK;
+    }
+
+    [[nodiscard]] HRESULT encode_make_response(
+        webauthn_api const& api,
+        WEBAUTHN_CTAPCBOR_MAKE_CREDENTIAL_REQUEST const& request,
+        librarian_passkey_credential const& credential,
+        WEBAUTHN_PLUGIN_OPERATION_RESPONSE* response) noexcept
+    {
+        try
+        {
+            return encode_make_response_impl(api, request, credential, response);
+        }
+        catch (std::bad_alloc const&)
+        {
+            return E_OUTOFMEMORY;
+        }
+        catch (...)
+        {
+            return E_FAIL;
+        }
+    }
+
+    void clear_operation_response(PWEBAUTHN_PLUGIN_OPERATION_RESPONSE response) noexcept
+    {
+        if (response == nullptr)
+        {
+            return;
+        }
+        if (response->pbEncodedResponse != nullptr)
+        {
+            CoTaskMemFree(response->pbEncodedResponse);
+        }
+        *response = {};
     }
 
     [[nodiscard]] HRESULT encode_assertion_response(
@@ -790,6 +828,26 @@ namespace
         HRESULT STDMETHODCALLTYPE MakeCredential(
             PCWEBAUTHN_PLUGIN_OPERATION_REQUEST request,
             PWEBAUTHN_PLUGIN_OPERATION_RESPONSE response) noexcept override
+        {
+            try
+            {
+                return make_credential(request, response);
+            }
+            catch (std::bad_alloc const&)
+            {
+                clear_operation_response(response);
+                return E_OUTOFMEMORY;
+            }
+            catch (...)
+            {
+                clear_operation_response(response);
+                return E_FAIL;
+            }
+        }
+
+        HRESULT make_credential(
+            PCWEBAUTHN_PLUGIN_OPERATION_REQUEST request,
+            PWEBAUTHN_PLUGIN_OPERATION_RESPONSE response)
         {
             if (response == nullptr)
             {
@@ -929,6 +987,26 @@ namespace
         HRESULT STDMETHODCALLTYPE GetAssertion(
             PCWEBAUTHN_PLUGIN_OPERATION_REQUEST request,
             PWEBAUTHN_PLUGIN_OPERATION_RESPONSE response) noexcept override
+        {
+            try
+            {
+                return get_assertion(request, response);
+            }
+            catch (std::bad_alloc const&)
+            {
+                clear_operation_response(response);
+                return E_OUTOFMEMORY;
+            }
+            catch (...)
+            {
+                clear_operation_response(response);
+                return E_FAIL;
+            }
+        }
+
+        HRESULT get_assertion(
+            PCWEBAUTHN_PLUGIN_OPERATION_REQUEST request,
+            PWEBAUTHN_PLUGIN_OPERATION_RESPONSE response)
         {
             if (response == nullptr)
             {

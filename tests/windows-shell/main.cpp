@@ -315,6 +315,31 @@ namespace
         test.Check(model.Accounts().empty(), "lock clears account summaries from the view model");
     }
 
+    void TestPostUnlockPasskeyRefreshCancellation(TestContext& test)
+    {
+        auto client = ClientWithStatus(VaultStatus::Locked);
+        client->expected_password = L"disposable refresh cancellation";
+        client->list_result.accounts.push_back(
+            { L"record", L"Example", L"https://example.com", L"person" });
+        client->passkey_list_result = { ClientError::Cancelled, {} };
+        ShellViewModel model{ client };
+        InitializeModel(model);
+
+        test.Check(model.BeginUnlock(), "unlock begins before a canceled passkey refresh");
+        SecretText password{ L"disposable refresh cancellation" };
+        model.CompleteUnlock(model.ExecuteUnlockRequest(password));
+
+        test.Check(
+            model.State() == ShellState::Unlocked,
+            "a canceled post-unlock passkey refresh preserves the confirmed unlocked state");
+        test.Check(
+            model.Accounts().size() == 1U,
+            "a canceled passkey refresh preserves loaded account summaries");
+        test.Check(
+            model.Passkeys().empty(),
+            "a canceled passkey refresh exposes no stale passkey summaries");
+    }
+
     void TestPasskeyDeletionLifecycle(TestContext& test)
     {
         auto client = ClientWithStatus(VaultStatus::Unlocked);
@@ -874,6 +899,7 @@ int main(int const argc, char const* const* const argv)
     TestContext test;
     TestInitialStates(test);
     TestUnlockLifecycle(test);
+    TestPostUnlockPasskeyRefreshCancellation(test);
     TestPasskeyDeletionLifecycle(test);
     TestActivationRefreshFailsClosed(test);
     TestAccountPagingIsBounded(test);

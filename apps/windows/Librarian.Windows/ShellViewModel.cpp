@@ -47,6 +47,8 @@ namespace librarian::windows
             L"Librarian could not confirm that the vault locked. Access remains hidden until the vault confirms it is locked.";
         constexpr wchar_t AccountLoadCancelledMessage[] =
             L"Librarian could not confirm the account list. Retry vault status.";
+        constexpr wchar_t PasskeyLoadCancelledMessage[] =
+            L"The passkey list refresh was canceled. The vault remains unlocked.";
         constexpr wchar_t UnexpectedMessage[] =
             L"Librarian could not complete the request. No changes were made.";
     }
@@ -783,6 +785,13 @@ namespace librarian::windows
     {
         if (result.error != ClientError::None)
         {
+            if (result.error == ClientError::Cancelled && state_ == ShellState::Unlocked)
+            {
+                passkeys_.clear();
+                message_ = PasskeyLoadCancelledMessage;
+                return;
+            }
+
             ApplyError(result.error);
             return;
         }
