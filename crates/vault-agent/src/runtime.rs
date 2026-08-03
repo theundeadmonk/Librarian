@@ -2294,7 +2294,7 @@ impl AgentRuntime {
                 .remove_cached_credential(&credential_id)
                 .is_err()
             {
-                return Ok(Some(ExecutionOutcome::failed()));
+                continue;
             }
             if should_abort() {
                 return Ok(Some(
@@ -4903,6 +4903,7 @@ mod tests {
         let verifier = Arc::new(TestPasskeyRequestVerifier::default());
         let mut runtime = AgentRuntime::start(&path).expect("restarted runtime");
         runtime.passkey_verifier = verifier.clone();
+        verifier.set_cache_removal_failure(true);
         unlock_test_vault_with_timeout(
             &runtime,
             "disposable restart rollback password",
@@ -4916,7 +4917,25 @@ mod tests {
         assert_eq!(management.error(), None);
         assert_eq!(management.body(), &[0x80]);
 
-        let client = passkey_connection(&runtime, 0x6B);
+        complete_test_lock(&runtime);
+        verifier.set_cache_removal_failure(false);
+        unlock_test_vault_with_timeout(
+            &runtime,
+            "disposable restart rollback password",
+            Duration::from_secs(30),
+        );
+        assert_eq!(
+            verifier.cache_removals(),
+            vec![credential_id, credential_id]
+        );
+
+        let desktop = desktop_passkey_connection(&runtime, 0x6C);
+        let management =
+            dispatch_passkey_request(&runtime, &desktop, 1, 0, &OperationRequest::ListPasskeys);
+        assert_eq!(management.error(), None);
+        assert_eq!(management.body(), &[0x80]);
+
+        let client = passkey_connection(&runtime, 0x6D);
         let missing = dispatch_passkey_request(
             &runtime,
             &client,

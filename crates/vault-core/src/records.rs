@@ -1221,6 +1221,8 @@ impl UnlockedVault {
             return Err(RecordOperationError::Failed);
         }
         let id = found.ok_or(RecordOperationError::NotFound)?;
+        let committed_at_ms =
+            passkey_manifest_time(self.manifest.committed_at_ms(), committed_at_ms);
         let mut entries = self.manifest.entries().to_vec();
         entries.retain(|entry| entry.record_id() != id.as_bytes());
         self.prepare_manifest_mutation(
@@ -1657,9 +1659,11 @@ fn passkey_update_time(
     manifest_committed_at_ms: u64,
     wall_clock_ms: u64,
 ) -> u64 {
-    wall_clock_ms
-        .max(created_at_ms)
-        .max(manifest_committed_at_ms)
+    passkey_manifest_time(manifest_committed_at_ms, wall_clock_ms).max(created_at_ms)
+}
+
+fn passkey_manifest_time(manifest_committed_at_ms: u64, wall_clock_ms: u64) -> u64 {
+    wall_clock_ms.max(manifest_committed_at_ms)
 }
 
 fn generate_signing_key(
@@ -1723,7 +1727,8 @@ mod tests {
     use librarian_vault_format::MAX_SERVICE_NAME_BYTES;
 
     use super::{
-        WebsiteAccountInput, WebsiteAccountInputError, has_passkey_capacity, passkey_update_time,
+        WebsiteAccountInput, WebsiteAccountInputError, has_passkey_capacity, passkey_manifest_time,
+        passkey_update_time,
     };
 
     #[test]
@@ -1738,6 +1743,12 @@ mod tests {
         assert_eq!(passkey_update_time(20, 30, 10), 30);
         assert_eq!(passkey_update_time(30, 20, 10), 30);
         assert_eq!(passkey_update_time(20, 30, 40), 40);
+    }
+
+    #[test]
+    fn passkey_manifest_time_never_moves_backwards() {
+        assert_eq!(passkey_manifest_time(30, 10), 30);
+        assert_eq!(passkey_manifest_time(30, 40), 40);
     }
 
     #[test]
