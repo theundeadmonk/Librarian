@@ -2,7 +2,7 @@ use librarian_vault_core::{
     EncryptedRecord, PasskeyAssertion, PasskeyCredential, PasskeyInput, PasskeySummary,
     PreparedRecordMutation, RecordId, RecordOperationError, WebsiteAccount, WebsiteAccountInput,
 };
-use librarian_vault_format::PASSKEY_CREDENTIAL_ID_BYTES;
+use librarian_vault_format::{PASSKEY_CREDENTIAL_ID_BYTES, PasskeyCreationState};
 
 use crate::{
     errors::{AccountError, StorageError},
@@ -30,6 +30,7 @@ impl VaultAgent {
         self.add_passkey_with_before_commit_and_check(
             input,
             excluded_credential_ids,
+            PasskeyCreationState::Confirmed,
             || false,
             || Ok(()),
         )
@@ -161,6 +162,7 @@ impl VaultAgent {
         &mut self,
         input: PasskeyInput,
         excluded_credential_ids: &[[u8; PASSKEY_CREDENTIAL_ID_BYTES]],
+        creation_state: PasskeyCreationState,
         mut should_cancel: impl FnMut() -> bool,
         before_commit: impl FnOnce() -> Result<(), StorageError>,
     ) -> Result<PasskeyCredential, AccountError> {
@@ -178,6 +180,7 @@ impl VaultAgent {
                 &snapshot.records,
                 input,
                 excluded_credential_ids,
+                creation_state,
                 committed_at_ms,
                 &mut should_cancel,
             )
@@ -188,6 +191,59 @@ impl VaultAgent {
         }
         self.persist_mutation(permit, &snapshot, prepared, before_commit)?;
         Ok(credential)
+    }
+
+    pub(crate) fn pending_passkey_credential_ids_with_check(
+        &mut self,
+        should_cancel: impl FnMut() -> bool,
+    ) -> Result<Vec<[u8; PASSKEY_CREDENTIAL_ID_BYTES]>, AccountError> {
+        let permit = self.require_operation()?;
+        let snapshot = self.load_authenticated_snapshot()?;
+        let result = {
+            let session = self.session.as_ref().ok_or(AccountError::Locked)?;
+            session.list_pending_passkey_credential_ids_with_check(
+                &snapshot.header,
+                &snapshot.manifest,
+                &snapshot.records,
+                should_cancel,
+            )
+        };
+        let credential_ids = self.map_read(result)?;
+        if !self.operation_is_authorized(permit) {
+            return Err(AccountError::Locked);
+        }
+        Ok(credential_ids)
+    }
+
+    pub(crate) fn confirm_passkey_creation_with_before_commit_and_check(
+        &mut self,
+        credential_id: &[u8; PASSKEY_CREDENTIAL_ID_BYTES],
+        mut should_cancel: impl FnMut() -> bool,
+        before_commit: impl FnOnce() -> Result<(), StorageError>,
+    ) -> Result<(), AccountError> {
+        let permit = self.require_operation()?;
+        let snapshot = self.load_authenticated_snapshot()?;
+        let committed_at_ms = unix_time_ms().map_err(|_| {
+            self.lock();
+            AccountError::Failed
+        })?;
+        let result = {
+            let session = self.session.as_ref().ok_or(AccountError::Locked)?;
+            session.prepare_confirm_passkey_creation_with_check(
+                &snapshot.header,
+                &snapshot.manifest,
+                &snapshot.records,
+                credential_id,
+                committed_at_ms,
+                &mut should_cancel,
+            )
+        };
+        let prepared = self.map_preparation(result)?;
+        if should_cancel() {
+            return Err(AccountError::Aborted);
+        }
+        self.persist_mutation(permit, &snapshot, prepared, before_commit)?;
+        Ok(())
     }
 
     /// Produces a transaction-bound assertion and commits its signature count.

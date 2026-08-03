@@ -2029,7 +2029,7 @@ namespace librarian::windows
             details.pbCredentialId = credential_id.data();
             HRESULT const result = remove_credentials(passkey_provider_clsid, 1U, &details);
             FreeLibrary(module);
-            if (FAILED(result))
+            if (FAILED(result) && result != NTE_NOT_FOUND)
             {
                 fail(transport_error::unavailable);
             }

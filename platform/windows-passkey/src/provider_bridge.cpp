@@ -538,6 +538,20 @@ namespace
                    required) == required;
     }
 
+    HRESULT CALLBACK selection_dialog_callback(
+        HWND dialog,
+        UINT notification,
+        WPARAM,
+        LPARAM,
+        LONG_PTR) noexcept
+    {
+        if (notification == TDN_TIMER && active_cancelled.load(std::memory_order_acquire))
+        {
+            SendMessageW(dialog, TDM_CLICK_BUTTON, IDCANCEL, 0);
+        }
+        return S_OK;
+    }
+
     [[nodiscard]] HRESULT select_summary(
         HWND parent,
         std::span<librarian_passkey_summary const> summaries,
@@ -582,13 +596,14 @@ namespace
             config.cbSize = sizeof(config);
             config.hwndParent = parent;
             config.dwFlags = TDF_USE_COMMAND_LINKS | TDF_ALLOW_DIALOG_CANCELLATION |
-                             TDF_POSITION_RELATIVE_TO_WINDOW;
+                             TDF_POSITION_RELATIVE_TO_WINDOW | TDF_CALLBACK_TIMER;
             config.dwCommonButtons = TDCBF_CANCEL_BUTTON;
             config.pszWindowTitle = L"Librarian";
             config.pszMainInstruction = L"Choose a passkey";
             config.pszContent = L"Select the account to use for this sign-in.";
             config.cButtons = static_cast<UINT>(buttons.size());
             config.pButtons = buttons.data();
+            config.pfCallback = selection_dialog_callback;
             int button{};
             auto const result = TaskDialogIndirect(&config, &button, nullptr, nullptr);
             if (FAILED(result))

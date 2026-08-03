@@ -13,6 +13,7 @@ fn main() {
         .join("windows-passkey");
 
     for path in [
+        "include/librarian/windows_passkey/foundation.h",
         "include/librarian/windows_passkey/agent_bridge.h",
         "src/agent_bridge.cpp",
     ] {

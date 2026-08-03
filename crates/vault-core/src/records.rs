@@ -4,9 +4,9 @@ use librarian_vault_format::{
     MAX_ORIGIN_BYTES, MAX_PASSKEY_RP_ID_BYTES, MAX_PASSKEY_USER_DISPLAY_NAME_BYTES,
     MAX_PASSKEY_USER_HANDLE_BYTES, MAX_PASSKEY_USER_NAME_BYTES, MAX_PASSWORD_BYTES, MAX_RECORDS,
     MAX_SERVICE_NAME_BYTES, MAX_USERNAME_BYTES, Manifest, ManifestEntry, ManifestEnvelope,
-    PASSKEY_CREDENTIAL_ID_BYTES, PASSKEY_PRIVATE_KEY_BYTES, PasskeyPlaintext, RecordEnvelope,
-    RecordType, VaultHeader, WebsiteAccountPlaintext, encode_manifest_aad, encode_record_aad,
-    record_type,
+    PASSKEY_CREDENTIAL_ID_BYTES, PASSKEY_PRIVATE_KEY_BYTES, PasskeyCreationState, PasskeyPlaintext,
+    RecordEnvelope, RecordType, VaultHeader, WebsiteAccountPlaintext, encode_manifest_aad,
+    encode_record_aad, record_type,
 };
 use p256::ecdsa::{Signature, SigningKey, signature::Signer};
 use sha2::{Digest, Sha256};
@@ -356,6 +356,7 @@ struct PasskeyRecord {
     revision: u64,
     created_at_ms: u64,
     signature_counter: u32,
+    creation_state: PasskeyCreationState,
     rp_id: Zeroizing<String>,
     user_handle: Zeroizing<Vec<u8>>,
     user_name: Zeroizing<String>,
@@ -767,6 +768,7 @@ impl UnlockedVault {
         records: &[EncryptedRecord],
         input: PasskeyInput,
         excluded_credential_ids: &[[u8; PASSKEY_CREDENTIAL_ID_BYTES]],
+        creation_state: PasskeyCreationState,
         committed_at_ms: u64,
         should_cancel: impl FnMut() -> bool,
     ) -> Result<(PreparedRecordMutation, PasskeyCredential), RecordOperationError> {
@@ -814,6 +816,7 @@ impl UnlockedVault {
             committed_at_ms,
             committed_at_ms,
             0,
+            creation_state,
             input.rp_id,
             input.user_handle,
             input.user_name,
@@ -840,6 +843,117 @@ impl UnlockedVault {
                 public_key,
             },
         ))
+    }
+
+    /// Returns the credential IDs of passkeys whose external publication was
+    /// not durably confirmed.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Cancelled` when request authority is revoked and `Failed` for
+    /// an integrity failure, duplicate credential ID, or oversized result.
+    pub fn list_pending_passkey_credential_ids_with_check(
+        &self,
+        header_bytes: &[u8],
+        manifest_envelope_bytes: &[u8],
+        records: &[EncryptedRecord],
+        should_cancel: impl FnMut() -> bool,
+    ) -> Result<Vec<[u8; PASSKEY_CREDENTIAL_ID_BYTES]>, RecordOperationError> {
+        self.authenticate_snapshot_metadata(header_bytes, manifest_envelope_bytes)?;
+        let mut credential_ids = BTreeSet::new();
+        let mut pending = Vec::new();
+        let mut invalid = false;
+        visit_authenticated_records(self, records, should_cancel, |record| {
+            if let DecryptedRecord::Passkey(passkey) = record {
+                if !credential_ids.insert(passkey.credential_id) {
+                    invalid = true;
+                    return;
+                }
+                if passkey.creation_state == PasskeyCreationState::Pending {
+                    if pending.len() >= MAX_PASSKEY_CREDENTIALS {
+                        invalid = true;
+                        return;
+                    }
+                    pending.push(passkey.credential_id);
+                }
+            }
+        })
+        .map_err(map_snapshot_operation_error)?;
+        if invalid {
+            return Err(RecordOperationError::Failed);
+        }
+        pending.sort_unstable();
+        Ok(pending)
+    }
+
+    /// Prepares the durable publication transition for one pending passkey.
+    ///
+    /// # Errors
+    ///
+    /// Returns `NotFound` only after complete snapshot authentication,
+    /// `Conflict` if the passkey is already confirmed, and `Cancelled` when
+    /// request authority is revoked.
+    pub fn prepare_confirm_passkey_creation_with_check(
+        &self,
+        header_bytes: &[u8],
+        manifest_envelope_bytes: &[u8],
+        records: &[EncryptedRecord],
+        credential_id: &[u8; PASSKEY_CREDENTIAL_ID_BYTES],
+        committed_at_ms: u64,
+        should_cancel: impl FnMut() -> bool,
+    ) -> Result<PreparedRecordMutation, RecordOperationError> {
+        self.authenticate_snapshot_metadata(header_bytes, manifest_envelope_bytes)?;
+        let mut found = None;
+        let mut duplicate = false;
+        visit_authenticated_records(self, records, should_cancel, |record| {
+            if let DecryptedRecord::Passkey(passkey) = record
+                && &passkey.credential_id == credential_id
+                && found.replace(passkey).is_some()
+            {
+                duplicate = true;
+            }
+        })
+        .map_err(map_snapshot_operation_error)?;
+        if duplicate {
+            return Err(RecordOperationError::Failed);
+        }
+        let passkey = found.ok_or(RecordOperationError::NotFound)?;
+        if passkey.creation_state != PasskeyCreationState::Pending {
+            return Err(RecordOperationError::Conflict);
+        }
+        let next_revision = passkey
+            .revision
+            .checked_add(1)
+            .ok_or(RecordOperationError::Conflict)?;
+        let committed_at_ms = passkey_update_time(
+            passkey.created_at_ms,
+            self.manifest.committed_at_ms(),
+            committed_at_ms,
+        );
+        let plaintext = PasskeyPlaintext::new(
+            next_revision,
+            passkey.created_at_ms,
+            committed_at_ms,
+            passkey.signature_counter,
+            PasskeyCreationState::Confirmed,
+            passkey.rp_id,
+            passkey.user_handle,
+            passkey.user_name,
+            passkey.user_display_name,
+            passkey.credential_id,
+            passkey.private_key,
+        )
+        .map_err(|_| RecordOperationError::Failed)?;
+        let plaintext_bytes = plaintext
+            .encode()
+            .map_err(|_| RecordOperationError::Failed)?;
+        self.prepare_plaintext_upsert(
+            RecordMutationKind::Update,
+            passkey.id,
+            &plaintext_bytes,
+            committed_at_ms,
+            &mut SystemEntropy,
+        )
     }
 
     /// Lists public passkey metadata matching one exact assertion request.
@@ -884,7 +998,10 @@ impl UnlockedVault {
                 }
                 let is_allowed =
                     !allow_list_present || allowed_credential_ids.contains(&passkey.credential_id);
-                if passkey.rp_id.as_str() == expected_rp_id.as_str() && is_allowed {
+                if passkey.creation_state == PasskeyCreationState::Confirmed
+                    && passkey.rp_id.as_str() == expected_rp_id.as_str()
+                    && is_allowed
+                {
                     if passkeys.len() >= MAX_PASSKEY_ASSERTION_CANDIDATES {
                         invalid = true;
                         return;
@@ -926,9 +1043,14 @@ impl UnlockedVault {
         let mut invalid = false;
         visit_authenticated_records(self, records, should_cancel, |record| {
             if let DecryptedRecord::Passkey(passkey) = record {
-                if !credential_ids.insert(passkey.credential_id)
-                    || passkeys.len() >= MAX_PASSKEY_ASSERTION_CANDIDATES
-                {
+                if !credential_ids.insert(passkey.credential_id) {
+                    invalid = true;
+                    return;
+                }
+                if passkey.creation_state == PasskeyCreationState::Pending {
+                    return;
+                }
+                if passkeys.len() >= MAX_PASSKEY_ASSERTION_CANDIDATES {
                     invalid = true;
                     return;
                 }
@@ -998,6 +1120,9 @@ impl UnlockedVault {
             return Err(RecordOperationError::Failed);
         }
         let passkey = found.ok_or(RecordOperationError::NotFound)?;
+        if passkey.creation_state != PasskeyCreationState::Confirmed {
+            return Err(RecordOperationError::NotFound);
+        }
         if passkey.rp_id.as_str() != expected_rp_id.as_str() {
             return Err(RecordOperationError::Conflict);
         }
@@ -1034,6 +1159,7 @@ impl UnlockedVault {
             passkey.created_at_ms,
             committed_at_ms,
             next_counter,
+            PasskeyCreationState::Confirmed,
             passkey.rp_id,
             passkey.user_handle,
             passkey.user_name,
@@ -1423,6 +1549,7 @@ fn decrypt_passkey_plaintext(
     let revision = decoded.revision();
     let created_at_ms = decoded.created_at_ms();
     let signature_counter = decoded.signature_counter();
+    let creation_state = decoded.creation_state();
     let (rp_id, user_handle, user_name, user_display_name, credential_id, private_key) =
         decoded.into_fields();
     Ok(DecryptedRecord::Passkey(PasskeyRecord {
@@ -1430,6 +1557,7 @@ fn decrypt_passkey_plaintext(
         revision,
         created_at_ms,
         signature_counter,
+        creation_state,
         rp_id,
         user_handle,
         user_name,

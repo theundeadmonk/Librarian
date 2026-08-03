@@ -33,6 +33,28 @@ pub enum RecordType {
     Passkey,
 }
 
+/// Durable publication state for one vault-backed passkey.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u32)]
+pub enum PasskeyCreationState {
+    Pending = 1,
+    Confirmed = 2,
+}
+
+impl PasskeyCreationState {
+    const fn code(self) -> u32 {
+        self as u32
+    }
+
+    fn from_code(value: u32) -> Result<Self, FormatError> {
+        match value {
+            1 => Ok(Self::Pending),
+            2 => Ok(Self::Confirmed),
+            _ => Err(FormatError::Unsupported),
+        }
+    }
+}
+
 struct SecretWriter {
     bytes: Zeroizing<Vec<u8>>,
 }
@@ -353,6 +375,7 @@ pub struct PasskeyPlaintext {
     created_at_ms: u64,
     modified_at_ms: u64,
     signature_counter: u32,
+    creation_state: PasskeyCreationState,
     rp_id: Zeroizing<String>,
     user_handle: Zeroizing<Vec<u8>>,
     user_name: Zeroizing<String>,
@@ -384,6 +407,7 @@ impl PasskeyPlaintext {
         created_at_ms: u64,
         modified_at_ms: u64,
         signature_counter: u32,
+        creation_state: PasskeyCreationState,
         rp_id: Zeroizing<String>,
         user_handle: Zeroizing<Vec<u8>>,
         user_name: Zeroizing<String>,
@@ -396,6 +420,7 @@ impl PasskeyPlaintext {
             created_at_ms,
             modified_at_ms,
             signature_counter,
+            creation_state,
             rp_id,
             user_handle,
             user_name,
@@ -425,6 +450,11 @@ impl PasskeyPlaintext {
     #[must_use]
     pub const fn signature_counter(&self) -> u32 {
         self.signature_counter
+    }
+
+    #[must_use]
+    pub const fn creation_state(&self) -> PasskeyCreationState {
+        self.creation_state
     }
 
     #[must_use]
@@ -492,8 +522,9 @@ impl PasskeyPlaintext {
         encode_u64(&mut encoder, self.revision);
         encode_u64(&mut encoder, self.created_at_ms);
         encode_u64(&mut encoder, self.modified_at_ms);
-        encode_array(&mut encoder, 7);
+        encode_array(&mut encoder, 8);
         encode_u32(&mut encoder, self.signature_counter);
+        encode_u32(&mut encoder, self.creation_state.code());
         encode_str(&mut encoder, &self.rp_id);
         encode_bytes(&mut encoder, &self.user_handle);
         encode_str(&mut encoder, &self.user_name);
@@ -534,8 +565,9 @@ impl PasskeyPlaintext {
         let revision = decode_u64(&mut decoder)?;
         let created_at_ms = decode_u64(&mut decoder)?;
         let modified_at_ms = decode_u64(&mut decoder)?;
-        expect_array(&mut decoder, 7)?;
+        expect_array(&mut decoder, 8)?;
         let signature_counter = decode_u32(&mut decoder)?;
+        let creation_state = PasskeyCreationState::from_code(decode_u32(&mut decoder)?)?;
         let rp_id = Zeroizing::new(decode_bounded_text(&mut decoder, MAX_PASSKEY_RP_ID_BYTES)?);
         let user_handle = Zeroizing::new(decode_bounded_bytes(
             &mut decoder,
@@ -557,6 +589,7 @@ impl PasskeyPlaintext {
             created_at_ms,
             modified_at_ms,
             signature_counter,
+            creation_state,
             rp_id,
             user_handle,
             user_name,
@@ -787,7 +820,8 @@ mod tests {
     use zeroize::Zeroizing;
 
     use super::{
-        PasskeyPlaintext, RecordEnvelope, RecordType, WebsiteAccountPlaintext, record_type,
+        PasskeyCreationState, PasskeyPlaintext, RecordEnvelope, RecordType,
+        WebsiteAccountPlaintext, record_type,
     };
     use crate::FormatError;
 
@@ -810,6 +844,7 @@ mod tests {
             1_700_000_000_000,
             1_700_000_000_000,
             0,
+            PasskeyCreationState::Confirmed,
             Zeroizing::new("example.com".to_owned()),
             Zeroizing::new(vec![0x21; 32]),
             Zeroizing::new("person@example.com".to_owned()),
@@ -854,6 +889,7 @@ mod tests {
         assert_eq!(decoded.user_handle(), &[0x21; 32]);
         assert_eq!(decoded.credential_id(), &[0x31; 32]);
         assert_eq!(decoded.signature_counter(), 0);
+        assert_eq!(decoded.creation_state(), PasskeyCreationState::Confirmed);
     }
 
     #[test]
@@ -864,6 +900,7 @@ mod tests {
                 1,
                 1,
                 0,
+                PasskeyCreationState::Confirmed,
                 Zeroizing::new("example.com".to_owned()),
                 Zeroizing::new(vec![1]),
                 Zeroizing::new("user".to_owned()),

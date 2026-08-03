@@ -21,6 +21,7 @@ use librarian_agent_protocol::{
     encode_status,
 };
 use librarian_vault_core::{CancellationFlag, MasterPassword, PasskeyInput};
+use librarian_vault_format::PasskeyCreationState;
 use sha2::Sha256;
 use zeroize::Zeroizing;
 
@@ -1427,6 +1428,13 @@ impl AgentRuntime {
             Ok(()) => {
                 let authenticated_vault_id =
                     authenticated_vault_id.ok_or(DispatchError::Internal)?;
+                if let Some(outcome) =
+                    self.cleanup_recovered_passkey_creations(registration, deadline)?
+                {
+                    lock(&self.vault)?.lock();
+                    self.set_locked_unless_shutting_down();
+                    return Ok(outcome);
+                }
                 self.publish_authenticated_unlock(
                     authenticated_ownership,
                     authenticated_vault_id,
@@ -1876,12 +1884,21 @@ impl AgentRuntime {
             return Ok(outcome);
         }
         match result {
-            Ok(()) => self.publish_authenticated_unlock(
-                authenticated_ownership,
-                authenticated_vault_id.ok_or(DispatchError::Internal)?,
-                registration,
-                deadline,
-            ),
+            Ok(()) => {
+                if let Some(outcome) =
+                    self.cleanup_recovered_passkey_creations(registration, deadline)?
+                {
+                    lock(&self.vault)?.lock();
+                    self.set_locked_unless_shutting_down();
+                    return Ok(outcome);
+                }
+                self.publish_authenticated_unlock(
+                    authenticated_ownership,
+                    authenticated_vault_id.ok_or(DispatchError::Internal)?,
+                    registration,
+                    deadline,
+                )
+            }
             Err(UnlockError::Cancelled) => {
                 self.set_locked_unless_shutting_down();
                 Ok(ExecutionOutcome::cancelled())
@@ -2215,6 +2232,94 @@ impl AgentRuntime {
             &replacement_credential_id,
             ExecutionOutcome::retryable_failure(),
         )
+    }
+
+    fn recovered_passkey_cleanup_outcome(
+        &self,
+        registration: &RequestRegistration,
+        deadline: Instant,
+    ) -> ExecutionOutcome {
+        if self.coordinator.lock_active.load(Ordering::Acquire)
+            || self.state() != AgentState::Unlocking
+        {
+            ExecutionOutcome::cancelled()
+        } else if registration.cancellation.is_cancelled() {
+            ExecutionOutcome::cancelled()
+        } else if Instant::now() >= deadline {
+            ExecutionOutcome::deadline()
+        } else {
+            ExecutionOutcome::failed()
+        }
+    }
+
+    fn cleanup_recovered_passkey_creations(
+        &self,
+        registration: &RequestRegistration,
+        deadline: Instant,
+    ) -> Result<Option<ExecutionOutcome>, DispatchError> {
+        let should_abort = || {
+            self.coordinator.lock_active.load(Ordering::Acquire)
+                || self.state() != AgentState::Unlocking
+                || registration.cancellation.is_cancelled()
+                || Instant::now() >= deadline
+        };
+        let credential_ids = {
+            let mut vault = lock(&self.vault)?;
+            match vault.pending_passkey_credential_ids_with_check(should_abort) {
+                Ok(credential_ids) => credential_ids,
+                Err(AccountError::Aborted | AccountError::Locked) => {
+                    return Ok(Some(
+                        self.recovered_passkey_cleanup_outcome(registration, deadline),
+                    ));
+                }
+                Err(AccountError::NotFound | AccountError::Conflict | AccountError::Failed) => {
+                    return Ok(Some(ExecutionOutcome::failed()));
+                }
+            }
+        };
+        for credential_id in credential_ids {
+            if should_abort() {
+                return Ok(Some(
+                    self.recovered_passkey_cleanup_outcome(registration, deadline),
+                ));
+            }
+            let coordinator = Arc::clone(&self.coordinator);
+            let cancellation = Arc::clone(&registration.cancellation);
+            let mut commit_guard = None;
+            let mut vault = lock(&self.vault)?;
+            let result = vault.delete_passkey_with_before_commit_and_check(
+                &credential_id,
+                should_abort,
+                || {
+                    let guard = coordinator
+                        .commit_gate
+                        .lock()
+                        .map_err(|_| crate::errors::StorageError::Conflict)?;
+                    if coordinator.lock_active.load(Ordering::Acquire)
+                        || self.state() != AgentState::Unlocking
+                        || cancellation.is_cancelled()
+                        || Instant::now() >= deadline
+                    {
+                        return Err(crate::errors::StorageError::Aborted);
+                    }
+                    commit_guard = Some(guard);
+                    Ok(())
+                },
+            );
+            release_failed_commit_guard(&result, &mut commit_guard);
+            match result {
+                Ok(()) | Err(AccountError::NotFound) => {}
+                Err(AccountError::Aborted | AccountError::Locked) => {
+                    return Ok(Some(
+                        self.recovered_passkey_cleanup_outcome(registration, deadline),
+                    ));
+                }
+                Err(AccountError::Conflict | AccountError::Failed) => {
+                    return Ok(Some(ExecutionOutcome::failed()));
+                }
+            }
+        }
+        Ok(None)
     }
 
     fn publish_authenticated_unlock(
@@ -2674,6 +2779,7 @@ impl AgentRuntime {
         let result = vault.add_passkey_with_before_commit_and_check(
             input,
             verified.excluded_credential_ids(),
+            PasskeyCreationState::Pending,
             || self.secret_operation_should_abort(request_epoch, registration, deadline),
             || {
                 let guard = coordinator
@@ -2993,23 +3099,85 @@ impl AgentRuntime {
             connection_id,
             transaction_id: *proof.transaction_id(),
         };
-        let _commit = lock(&self.coordinator.commit_gate)?;
-        if let Some(outcome) = self.pre_secret_operation(request_epoch, registration, deadline) {
-            return Ok(outcome);
-        }
-        let mut pending_creations = lock(&self.pending_passkey_creations)?;
-        let Some(pending) = pending_creations.get_mut(&pending_key) else {
+        let expected = lock(&self.pending_passkey_creations)?
+            .get(&pending_key)
+            .copied();
+        let Some(expected) = expected else {
             return Ok(ExecutionOutcome::invalid());
         };
-        if pending.credential_id != *credential_id
-            || pending.authenticated_process_id != authenticated_process_id
-            || pending.unlock_epoch != request_epoch
-            || pending.disconnected
+        if expected.credential_id != *credential_id
+            || expected.authenticated_process_id != authenticated_process_id
+            || expected.unlock_epoch != request_epoch
+            || expected.confirmed
+            || expected.disconnected
         {
             return Ok(ExecutionOutcome::invalid());
         }
-        pending.confirmed = true;
-        Ok(ExecutionOutcome::success(encode_empty_result()?).commit_point())
+        let Some(_mutation) = FlagPermit::acquire(&self.coordinator.mutation_active) else {
+            return Ok(ExecutionOutcome::busy());
+        };
+        if let Some(outcome) = self.pre_secret_operation(request_epoch, registration, deadline) {
+            return Ok(outcome);
+        }
+        let coordinator = Arc::clone(&self.coordinator);
+        let cancellation = Arc::clone(&registration.cancellation);
+        let mut commit_guard = None;
+        let mut vault = lock(&self.vault)?;
+        if let Some(outcome) = self.pre_secret_operation(request_epoch, registration, deadline) {
+            return Ok(outcome);
+        }
+        let result = vault.confirm_passkey_creation_with_before_commit_and_check(
+            credential_id,
+            || self.secret_operation_should_abort(request_epoch, registration, deadline),
+            || {
+                let guard = coordinator
+                    .commit_gate
+                    .lock()
+                    .map_err(|_| crate::errors::StorageError::Conflict)?;
+                let pending_is_exact = self
+                    .pending_passkey_creations
+                    .lock()
+                    .map_err(|_| crate::errors::StorageError::Conflict)?
+                    .get(&pending_key)
+                    == Some(&expected);
+                if coordinator.epoch() != request_epoch
+                    || coordinator.lock_active.load(Ordering::Acquire)
+                    || cancellation.is_cancelled()
+                    || Instant::now() >= deadline
+                    || !pending_is_exact
+                {
+                    return Err(crate::errors::StorageError::Aborted);
+                }
+                commit_guard = Some(guard);
+                Ok(())
+            },
+        );
+        release_failed_commit_guard(&result, &mut commit_guard);
+        match result {
+            Ok(()) => {
+                let mut pending_creations = lock(&self.pending_passkey_creations)?;
+                let Some(pending) = pending_creations.get_mut(&pending_key) else {
+                    return Err(DispatchError::Internal);
+                };
+                if *pending != expected {
+                    return Err(DispatchError::Internal);
+                }
+                pending.confirmed = true;
+                Ok(ExecutionOutcome::success(encode_empty_result()?).commit_point())
+            }
+            Err(AccountError::Aborted) => {
+                self.abort_after_core(&mut vault, request_epoch, registration, deadline)
+            }
+            Err(AccountError::Failed) => self.account_error_after_core(vault, AccountError::Failed),
+            Err(error) => {
+                if let Some(outcome) =
+                    self.post_secret_operation(&mut vault, request_epoch, registration, deadline)
+                {
+                    return Ok(outcome);
+                }
+                Ok(map_account_error(error))
+            }
+        }
     }
 
     #[allow(
@@ -4272,7 +4440,7 @@ mod tests {
         let request = RequestEnvelope::new(
             operation.operation(),
             runtime.unlock_epoch(),
-            5_000,
+            30_000,
             operation
                 .operation()
                 .requires_idempotency_key()
@@ -4294,13 +4462,13 @@ mod tests {
     }
 
     fn unlock_test_vault(runtime: &AgentRuntime, password: &str) {
+        unlock_test_vault_with_timeout(runtime, password, Duration::from_secs(10));
+    }
+
+    fn unlock_test_vault_with_timeout(runtime: &AgentRuntime, password: &str, timeout: Duration) {
         let registration = test_registration(runtime, 0xC1);
         let outcome = runtime
-            .unlock_vault(
-                password,
-                &registration,
-                Instant::now() + Duration::from_secs(10),
-            )
+            .unlock_vault(password, &registration, Instant::now() + timeout)
             .expect("unlock outcome");
         assert_eq!(outcome.error, None);
         assert_eq!(runtime.state(), AgentState::Unlocked);
@@ -4450,10 +4618,22 @@ mod tests {
         assert_eq!(created.error(), None);
         let credential_id = decode_created_passkey(&created);
 
-        let lookup = dispatch_passkey_request(
+        let confirmed = dispatch_passkey_request(
             &runtime,
             &client,
             2,
+            0x46,
+            &OperationRequest::ConfirmPasskeyCreation {
+                proof: test_passkey_proof(0x11, *client.connection_id()),
+                credential_id,
+            },
+        );
+        assert_eq!(confirmed.error(), None);
+
+        let lookup = dispatch_passkey_request(
+            &runtime,
+            &client,
+            3,
             0,
             &OperationRequest::ListPasskeysForAssertion {
                 proof: test_passkey_request_proof(0x15),
@@ -4482,7 +4662,7 @@ mod tests {
             },
         );
         assert_eq!(locked.error(), Some(PublicErrorCode::Locked));
-        assert_eq!(verifier.calls(), 2);
+        assert_eq!(verifier.calls(), 3);
         drop(locked_client);
         drop(runtime);
 
@@ -4611,6 +4791,60 @@ mod tests {
             dispatch_passkey_request(&runtime, &desktop, 1, 0, &OperationRequest::ListPasskeys);
         assert_eq!(management.error(), None);
         assert_eq!(management.body(), &[0x80]);
+        assert_eq!(verifier.calls(), 1);
+    }
+
+    #[test]
+    fn agent_restart_rolls_back_durably_pending_passkey_creation() {
+        let directory = TestDirectory::new();
+        let path = directory.vault_path();
+        let verifier = Arc::new(TestPasskeyRequestVerifier::default());
+        let mut runtime = AgentRuntime::start(&path).expect("runtime");
+        runtime.passkey_verifier = verifier;
+        create_test_vault(&runtime, "disposable restart rollback password");
+        let client = passkey_connection(&runtime, 0x69);
+
+        let created = dispatch_passkey_request(
+            &runtime,
+            &client,
+            1,
+            0x79,
+            &OperationRequest::MakePasskey {
+                proof: test_passkey_proof(0x25, *client.connection_id()),
+            },
+        );
+        assert_eq!(created.error(), None);
+        let credential_id = decode_created_passkey(&created);
+        drop(client);
+        drop(runtime);
+
+        let verifier = Arc::new(TestPasskeyRequestVerifier::default());
+        let mut runtime = AgentRuntime::start(&path).expect("restarted runtime");
+        runtime.passkey_verifier = verifier.clone();
+        unlock_test_vault_with_timeout(
+            &runtime,
+            "disposable restart rollback password",
+            Duration::from_secs(30),
+        );
+
+        let desktop = desktop_passkey_connection(&runtime, 0x6A);
+        let management =
+            dispatch_passkey_request(&runtime, &desktop, 1, 0, &OperationRequest::ListPasskeys);
+        assert_eq!(management.error(), None);
+        assert_eq!(management.body(), &[0x80]);
+
+        let client = passkey_connection(&runtime, 0x6B);
+        let missing = dispatch_passkey_request(
+            &runtime,
+            &client,
+            1,
+            0x7A,
+            &OperationRequest::GetPasskeyAssertion {
+                proof: test_passkey_proof(0x26, *client.connection_id()),
+                credential_id,
+            },
+        );
+        assert_eq!(missing.error(), Some(PublicErrorCode::NotFound));
         assert_eq!(verifier.calls(), 1);
     }
 
