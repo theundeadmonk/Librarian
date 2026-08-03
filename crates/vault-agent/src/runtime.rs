@@ -2241,9 +2241,8 @@ impl AgentRuntime {
     ) -> ExecutionOutcome {
         if self.coordinator.lock_active.load(Ordering::Acquire)
             || self.state() != AgentState::Unlocking
+            || registration.cancellation.is_cancelled()
         {
-            ExecutionOutcome::cancelled()
-        } else if registration.cancellation.is_cancelled() {
             ExecutionOutcome::cancelled()
         } else if Instant::now() >= deadline {
             ExecutionOutcome::deadline()
@@ -4537,6 +4536,27 @@ mod tests {
         credential_id
     }
 
+    fn confirm_test_passkey_creation(
+        runtime: &AgentRuntime,
+        connection: &Connection,
+        idempotency_marker: u8,
+        proof_marker: u8,
+        credential_id: [u8; 32],
+    ) {
+        let response = dispatch_passkey_request(
+            runtime,
+            connection,
+            2,
+            idempotency_marker,
+            &OperationRequest::ConfirmPasskeyCreation {
+                proof: test_passkey_proof(proof_marker, *connection.connection_id()),
+                credential_id,
+            },
+        );
+        assert_eq!(response.error(), None);
+        assert_eq!(response.body(), &[0x80]);
+    }
+
     fn assert_passkey_assertion_response(response: &ResponseEnvelope, credential_id: &[u8; 32]) {
         let mut decoder = Decoder::new(response.body());
         assert_eq!(decoder.array().expect("assertion response"), Some(4));
@@ -4618,17 +4638,7 @@ mod tests {
         assert_eq!(created.error(), None);
         let credential_id = decode_created_passkey(&created);
 
-        let confirmed = dispatch_passkey_request(
-            &runtime,
-            &client,
-            2,
-            0x46,
-            &OperationRequest::ConfirmPasskeyCreation {
-                proof: test_passkey_proof(0x11, *client.connection_id()),
-                credential_id,
-            },
-        );
-        assert_eq!(confirmed.error(), None);
+        confirm_test_passkey_creation(&runtime, &client, 0x46, 0x11, credential_id);
 
         let lookup = dispatch_passkey_request(
             &runtime,
@@ -4869,18 +4879,7 @@ mod tests {
         );
         assert_eq!(created.error(), None);
         let credential_id = decode_created_passkey(&created);
-        let confirmed = dispatch_passkey_request(
-            &runtime,
-            &client,
-            2,
-            0x75,
-            &OperationRequest::ConfirmPasskeyCreation {
-                proof: test_passkey_proof(0x23, *client.connection_id()),
-                credential_id,
-            },
-        );
-        assert_eq!(confirmed.error(), None);
-        assert_eq!(confirmed.body(), &[0x80]);
+        confirm_test_passkey_creation(&runtime, &client, 0x75, 0x23, credential_id);
 
         runtime.disconnect(&client).expect("provider disconnect");
         assert!(
@@ -4917,17 +4916,7 @@ mod tests {
         );
         assert_eq!(created.error(), None);
         let credential_id = decode_created_passkey(&created);
-        let confirmed = dispatch_passkey_request(
-            &runtime,
-            &client,
-            2,
-            0x77,
-            &OperationRequest::ConfirmPasskeyCreation {
-                proof: test_passkey_proof(0x24, *client.connection_id()),
-                credential_id,
-            },
-        );
-        assert_eq!(confirmed.error(), None);
+        confirm_test_passkey_creation(&runtime, &client, 0x77, 0x24, credential_id);
         let rolled_back = dispatch_passkey_request(
             &runtime,
             &client,
