@@ -663,6 +663,13 @@ impl AgentRuntime {
             {
                 return Ok(false);
             }
+            if self
+                .passkey_verifier
+                .remove_cached_credential(&pending.credential_id)
+                .is_err()
+            {
+                return Ok(false);
+            }
             let request_epoch = self.coordinator.epoch();
             let coordinator = Arc::clone(&self.coordinator);
             let mut commit_guard = None;
@@ -2282,6 +2289,18 @@ impl AgentRuntime {
                     self.recovered_passkey_cleanup_outcome(registration, deadline),
                 ));
             }
+            if self
+                .passkey_verifier
+                .remove_cached_credential(&credential_id)
+                .is_err()
+            {
+                return Ok(Some(ExecutionOutcome::failed()));
+            }
+            if should_abort() {
+                return Ok(Some(
+                    self.recovered_passkey_cleanup_outcome(registration, deadline),
+                ));
+            }
             let coordinator = Arc::clone(&self.coordinator);
             let cancellation = Arc::clone(&registration.cancellation);
             let mut commit_guard = None;
@@ -3222,6 +3241,15 @@ impl AgentRuntime {
         if let Some(outcome) = self.pre_secret_operation(request_epoch, registration, deadline) {
             return Ok(outcome);
         }
+        if let Err(error) = self
+            .passkey_verifier
+            .remove_cached_credential(credential_id)
+        {
+            return Ok(map_passkey_verification_error(error));
+        }
+        if let Some(outcome) = self.pre_secret_operation(request_epoch, registration, deadline) {
+            return Ok(outcome);
+        }
         let coordinator = Arc::clone(&self.coordinator);
         let cancellation = Arc::clone(&registration.cancellation);
         let mut commit_guard = None;
@@ -3789,11 +3817,21 @@ mod tests {
     #[derive(Default)]
     struct TestPasskeyRequestVerifier {
         calls: AtomicUsize,
+        cache_removals: Mutex<Vec<[u8; 32]>>,
+        fail_cache_removal: AtomicBool,
     }
 
     impl TestPasskeyRequestVerifier {
         fn calls(&self) -> usize {
             self.calls.load(Ordering::Acquire)
+        }
+
+        fn cache_removals(&self) -> Vec<[u8; 32]> {
+            self.cache_removals.lock().expect("cache removals").clone()
+        }
+
+        fn set_cache_removal_failure(&self, fail: bool) {
+            self.fail_cache_removal.store(fail, Ordering::Release);
         }
 
         fn request_error(proof: &PasskeyRequestProof) -> Option<PasskeyVerificationError> {
@@ -3810,6 +3848,21 @@ mod tests {
     }
 
     impl PasskeyRequestVerifier for TestPasskeyRequestVerifier {
+        fn remove_cached_credential(
+            &self,
+            credential_id: &[u8; 32],
+        ) -> Result<(), PasskeyVerificationError> {
+            self.cache_removals
+                .lock()
+                .map_err(|_| PasskeyVerificationError::Failed)?
+                .push(*credential_id);
+            if self.fail_cache_removal.load(Ordering::Acquire) {
+                Err(PasskeyVerificationError::Failed)
+            } else {
+                Ok(())
+            }
+        }
+
         fn verify_assertion_lookup(
             &self,
             proof: &PasskeyRequestProof,
@@ -4753,6 +4806,7 @@ mod tests {
         );
         assert_eq!(rolled_back.error(), None);
         assert_eq!(rolled_back.body(), &[0x80]);
+        assert_eq!(verifier.cache_removals(), vec![credential_id]);
         assert!(
             lock(&runtime.pending_passkey_creations)
                 .expect("pending passkey creations")
@@ -4787,13 +4841,31 @@ mod tests {
             },
         );
         assert_eq!(created.error(), None);
-        let _ = decode_created_passkey(&created);
+        let credential_id = decode_created_passkey(&created);
 
+        verifier.set_cache_removal_failure(true);
         runtime.disconnect(&client).expect("provider disconnect");
+        assert_eq!(verifier.cache_removals(), vec![credential_id]);
+        assert_eq!(
+            lock(&runtime.pending_passkey_creations)
+                .expect("pending passkey creations")
+                .len(),
+            1
+        );
+        verifier.set_cache_removal_failure(false);
+        assert!(
+            runtime
+                .rollback_disconnected_passkey_creations()
+                .expect("retry disconnected cleanup")
+        );
         assert!(
             lock(&runtime.pending_passkey_creations)
                 .expect("pending passkey creations")
                 .is_empty()
+        );
+        assert_eq!(
+            verifier.cache_removals(),
+            vec![credential_id, credential_id]
         );
 
         let desktop = desktop_passkey_connection(&runtime, 0x64);
@@ -4836,6 +4908,7 @@ mod tests {
             "disposable restart rollback password",
             Duration::from_secs(30),
         );
+        assert_eq!(verifier.cache_removals(), vec![credential_id]);
 
         let desktop = desktop_passkey_connection(&runtime, 0x6A);
         let management =

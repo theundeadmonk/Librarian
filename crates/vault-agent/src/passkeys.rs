@@ -117,6 +117,11 @@ impl VerifiedAssertionRequest {
 }
 
 pub(crate) trait PasskeyRequestVerifier: Send + Sync {
+    fn remove_cached_credential(
+        &self,
+        credential_id: &[u8; PASSKEY_CREDENTIAL_ID_BYTES],
+    ) -> Result<(), PasskeyVerificationError>;
+
     fn verify_assertion_lookup(
         &self,
         proof: &PasskeyRequestProof,
@@ -139,6 +144,14 @@ struct PlatformPasskeyRequestVerifier;
 
 #[cfg(windows)]
 impl PasskeyRequestVerifier for PlatformPasskeyRequestVerifier {
+    fn remove_cached_credential(
+        &self,
+        credential_id: &[u8; PASSKEY_CREDENTIAL_ID_BYTES],
+    ) -> Result<(), PasskeyVerificationError> {
+        librarian_windows_passkey_agent::remove_cached_credential(credential_id)
+            .map_err(map_platform_error)
+    }
+
     fn verify_assertion_lookup(
         &self,
         proof: &PasskeyRequestProof,
@@ -203,6 +216,13 @@ struct PlatformPasskeyRequestVerifier;
 
 #[cfg(not(windows))]
 impl PasskeyRequestVerifier for PlatformPasskeyRequestVerifier {
+    fn remove_cached_credential(
+        &self,
+        _: &[u8; PASSKEY_CREDENTIAL_ID_BYTES],
+    ) -> Result<(), PasskeyVerificationError> {
+        Err(PasskeyVerificationError::Unavailable)
+    }
+
     fn verify_assertion_lookup(
         &self,
         _: &PasskeyRequestProof,

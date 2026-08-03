@@ -146,6 +146,11 @@ unsafe extern "C" {
         allowed_credential_ids_count: *mut u32,
         allow_list_present: *mut u8,
     ) -> u32;
+
+    fn librarian_windows_passkey_remove_cached_credential(
+        credential_id: *const u8,
+        credential_id_bytes: u32,
+    ) -> u32;
 }
 
 /// Verifies and decodes the Windows-signed portion of an assertion request.
@@ -314,6 +319,30 @@ pub fn verify_assertion(
         ),
         client_data_hash,
     })
+}
+
+/// Removes one exact Librarian credential from the Windows passkey cache.
+///
+/// An already-absent credential is treated as success so interrupted cleanup
+/// can be retried safely.
+///
+/// # Errors
+///
+/// Returns an error when the platform cache API is unavailable or removal
+/// fails. The credential identifier is fixed-size and validated by the native
+/// bridge before Windows is called.
+pub fn remove_cached_credential(
+    credential_id: &[u8; CREDENTIAL_ID_BYTES],
+) -> Result<(), VerificationError> {
+    // SAFETY: the pointer references one live fixed-size credential ID for the
+    // duration of the synchronous native call.
+    let result = unsafe {
+        librarian_windows_passkey_remove_cached_credential(
+            credential_id.as_ptr(),
+            CREDENTIAL_ID_BYTES_U32,
+        )
+    };
+    map_result(result)
 }
 
 fn native_proof(proof: &PasskeyTransactionProof) -> Result<NativeProof, VerificationError> {

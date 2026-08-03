@@ -48,6 +48,10 @@ namespace
 
     using get_public_key_function = HRESULT(WINAPI*)(REFCLSID, DWORD*, PBYTE*);
     using free_public_key_function = void(WINAPI*)(PBYTE);
+    using remove_credentials_function = HRESULT(WINAPI*)(
+        REFCLSID,
+        DWORD,
+        PCWEBAUTHN_PLUGIN_CREDENTIAL_DETAILS);
     using decode_make_function = HRESULT(WINAPI*)(
         DWORD,
         const BYTE*,
@@ -78,6 +82,8 @@ namespace
                 "WebAuthNPluginGetUserVerificationPublicKey");
             free_public_key = resolve<free_public_key_function>(
                 "WebAuthNPluginFreePublicKeyResponse");
+            remove_credentials = resolve<remove_credentials_function>(
+                "WebAuthNPluginAuthenticatorRemoveCredentials");
             decode_make = resolve<decode_make_function>(
                 "WebAuthNDecodeMakeCredentialRequest");
             free_make = resolve<free_make_function>(
@@ -106,9 +112,15 @@ namespace
                    decode_assertion != nullptr && free_assertion != nullptr;
         }
 
+        [[nodiscard]] bool cache_removal_complete() const noexcept
+        {
+            return module_ != nullptr && remove_credentials != nullptr;
+        }
+
         get_public_key_function get_operation_key{};
         get_public_key_function get_uv_key{};
         free_public_key_function free_public_key{};
+        remove_credentials_function remove_credentials{};
         decode_make_function decode_make{};
         free_make_function free_make{};
         decode_assertion_function decode_assertion{};
@@ -955,4 +967,24 @@ extern "C" std::uint32_t librarian_windows_passkey_verify_assertion_lookup(
     {
         return failed;
     }
+}
+
+extern "C" std::uint32_t librarian_windows_passkey_remove_cached_credential(
+    std::uint8_t const* credential_id,
+    std::uint32_t credential_id_length) noexcept
+{
+    if (credential_id == nullptr || credential_id_length != credential_id_bytes)
+    {
+        return invalid;
+    }
+    webauthn_api api;
+    if (!api.cache_removal_complete())
+    {
+        return unavailable;
+    }
+    WEBAUTHN_PLUGIN_CREDENTIAL_DETAILS details{};
+    details.cbCredentialId = credential_id_length;
+    details.pbCredentialId = const_cast<PBYTE>(credential_id);
+    auto const result = api.remove_credentials(provider_clsid, 1, &details);
+    return SUCCEEDED(result) || result == NTE_NOT_FOUND ? success : failed;
 }

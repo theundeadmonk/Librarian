@@ -55,4 +55,8 @@ extern "C"
         std::uint32_t allowed_credential_ids_capacity,
         std::uint32_t* allowed_credential_ids_count,
         std::uint8_t* allow_list_present) noexcept;
+
+    std::uint32_t librarian_windows_passkey_remove_cached_credential(
+        std::uint8_t const* credential_id,
+        std::uint32_t credential_id_bytes) noexcept;
 }

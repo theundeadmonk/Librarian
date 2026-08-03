@@ -12,5 +12,5 @@ mod windows;
 #[cfg(windows)]
 pub use windows::{
     VerificationError, VerifiedAssertionLookup, VerifiedAssertionRequest, VerifiedMakeRequest,
-    verify_assertion, verify_assertion_lookup, verify_make,
+    remove_cached_credential, verify_assertion, verify_assertion_lookup, verify_make,
 };

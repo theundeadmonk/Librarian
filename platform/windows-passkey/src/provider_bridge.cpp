@@ -323,7 +323,8 @@ namespace
         {
             return module_ != nullptr && perform_uv != nullptr && free_uv != nullptr &&
                    decode_make != nullptr && free_make != nullptr && encode_make != nullptr &&
-                   encode_assertion != nullptr && add_credentials != nullptr;
+                   encode_assertion != nullptr && add_credentials != nullptr &&
+                   remove_credentials != nullptr;
         }
 
         [[nodiscard]] bool registration_complete() const noexcept
