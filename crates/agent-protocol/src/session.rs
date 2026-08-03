@@ -4,9 +4,10 @@ use std::{
 };
 
 use crate::{
-    AgentState, CURRENT_VERSION, ClientHello, ClientRole, FEATURE_WINDOWS_HELLO, FrameHeader,
-    MAX_IN_FLIGHT_PER_CONNECTION, MAX_PAYLOAD_BYTES, MIN_NEGOTIATED_PAYLOAD_BYTES, MINIMUM_VERSION,
-    MessageKind, OperationCode, PASSKEY_TIMEOUT_MS, RequestEnvelope, ResponseEnvelope, ServerHello,
+    AgentState, CURRENT_VERSION, ClientHello, ClientRole, FEATURE_PASSKEY_PROVIDER,
+    FEATURE_WINDOWS_HELLO, FrameHeader, MAX_IN_FLIGHT_PER_CONNECTION, MAX_PAYLOAD_BYTES,
+    MIN_NEGOTIATED_PAYLOAD_BYTES, MINIMUM_VERSION, MessageKind, OperationCode,
+    PASSKEY_PROVIDER_VERSION, PASSKEY_TIMEOUT_MS, RequestEnvelope, ResponseEnvelope, ServerHello,
     UNLOCK_TIMEOUT_MS, Version, WINDOWS_HELLO_VERSION,
 };
 
@@ -209,6 +210,14 @@ impl Connection {
             .binary_search(&FEATURE_WINDOWS_HELLO)
             .is_ok()
             && selected_version < WINDOWS_HELLO_VERSION
+        {
+            return Err(ConnectionError::UnsupportedFeature);
+        }
+        if hello
+            .required_features()
+            .binary_search(&FEATURE_PASSKEY_PROVIDER)
+            .is_ok()
+            && selected_version < PASSKEY_PROVIDER_VERSION
         {
             return Err(ConnectionError::UnsupportedFeature);
         }
@@ -465,6 +474,9 @@ fn effective_timeout(operation: OperationCode, requested: u32) -> u32 {
         OperationCode::MakePasskey
         | OperationCode::GetPasskeyAssertion
         | OperationCode::DeletePasskey
+        | OperationCode::RollbackPasskeyCreation
+        | OperationCode::ConfirmPasskeyCreation
+        | OperationCode::ListPasskeysForAssertion
         | OperationCode::EnrollWindowsHello
         | OperationCode::UnlockWindowsHello
         | OperationCode::RemoveWindowsHello => PASSKEY_TIMEOUT_MS,

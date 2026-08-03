@@ -62,6 +62,21 @@ namespace librarian::windows
                 return { ClientError::AgentUnavailable, {} };
             }
 
+            [[nodiscard]] PasskeyListResult ListPasskeys() override
+            {
+                if (closed_.load(std::memory_order_acquire))
+                {
+                    return { ClientError::Cancelled, {} };
+                }
+                return { ClientError::AgentUnavailable, {} };
+            }
+
+            [[nodiscard]] ClientResult DeletePasskey(
+                [[maybe_unused]] std::wstring_view const credential_id) override
+            {
+                return ClosedOrUnavailable();
+            }
+
             [[nodiscard]] ClientResult SaveAccount(
                 [[maybe_unused]] AccountDraft const& account) override
             {

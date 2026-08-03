@@ -412,6 +412,7 @@ function Assert-Installed {
         "Librarian.Windows.exe",
         "Librarian.VaultAgent.exe",
         "Librarian.ChromiumNativeHost.exe",
+        "Librarian.PasskeyProvider.exe",
         "Librarian.Identity.msix",
         "Librarian.PayloadHashes",
         "Librarian.Release.json",
@@ -422,14 +423,6 @@ function Assert-Installed {
             (Test-Path -LiteralPath (Join-Path $InstallFolder $name) -PathType Leaf)
         ) "Installed product file '$name' is missing."
     }
-    Assert-True (
-        -not (
-            Test-Path -LiteralPath (
-                Join-Path $InstallFolder "Librarian.PasskeyProvider.exe"
-            )
-        )
-    ) "The installer introduced a passkey-provider placeholder."
-
     $release = Get-Content `
         -LiteralPath (Join-Path $InstallFolder "Librarian.Release.json") `
         -Raw |
@@ -437,14 +430,17 @@ function Assert-Installed {
     Assert-True (
         $release.productVersion -eq $ExpectedVersion -and
         $release.signingMode -eq "development" -and
-        $release.passkeyProvider.included -eq $false
+        $release.passkeyProvider.included -eq $true -and
+        $release.passkeyProvider.clsid -eq
+            "68FE5DF7-9FE6-4145-BBA0-95010F43BFBE"
     ) "The installed release manifest does not match the expected fixture."
 
     foreach ($executable in @(
         "Librarian.IdentityLauncher.exe",
         "Librarian.Windows.exe",
         "Librarian.VaultAgent.exe",
-        "Librarian.ChromiumNativeHost.exe"
+        "Librarian.ChromiumNativeHost.exe",
+        "Librarian.PasskeyProvider.exe"
     )) {
         $signature = Get-AuthenticodeSignature `
             -LiteralPath (Join-Path $InstallFolder $executable)
@@ -780,36 +776,6 @@ try {
             "/log",
             (Join-Path $resolvedLogDirectory "01c-mixed-payload-rejected.log")
         )
-    Assert-ProductAbsent `
-        -InstallFolder $installFolder `
-        -ChromeRegistryPath $chromeRegistryPath `
-        -EdgeRegistryPath $edgeRegistryPath `
-        -ProductRegistryPath $productRegistryPath
-
-    New-Item -ItemType Directory -Path $installFolder -Force | Out-Null
-    $forbiddenProvider = Join-Path $installFolder "Librarian.PasskeyProvider.exe"
-    [IO.File]::WriteAllText(
-        $forbiddenProvider,
-        "disposable issue 19 rejection marker",
-        (New-Object Text.UTF8Encoding($false))
-    )
-    Invoke-FailingProcess `
-        -Label "Reject unexpected passkey provider" `
-        -FilePath $resolvedSignedLowSetup `
-        -Arguments @(
-            "/install",
-            "/quiet",
-            "/norestart",
-            "/log",
-            (Join-Path $resolvedLogDirectory "02-provider-rejected.log")
-        )
-    Assert-True (
-        (Test-Path -LiteralPath $forbiddenProvider -PathType Leaf)
-    ) "Rollback removed the pre-existing rejection marker."
-    Remove-Item -LiteralPath $forbiddenProvider -Force
-    if (@(Get-ChildItem -LiteralPath $installFolder -Force).Count -eq 0) {
-        Remove-Item -LiteralPath $installFolder -Force
-    }
     Assert-ProductAbsent `
         -InstallFolder $installFolder `
         -ChromeRegistryPath $chromeRegistryPath `
@@ -1217,7 +1183,7 @@ if ($null -ne $failure) {
 
 Write-Host ""
 Write-Host "Installer lifecycle validation passed."
-Write-Host "Unsigned, wrong-signer, mixed, and unexpected-provider installs: rejected"
+Write-Host "Unsigned, wrong-signer, and mixed-release installs: rejected"
 Write-Host "Clean install: passed"
 if ($SkipInteractiveDesktopLaunch) {
     Write-Host "Interactive desktop launch: delegated to test-windows-shell-ui.ps1"

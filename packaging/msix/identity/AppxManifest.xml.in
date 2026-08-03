@@ -1,9 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <Package
-  IgnorableNamespaces="uap uap10 rescap"
+  IgnorableNamespaces="uap uap10 com rescap"
   xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
   xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
   xmlns:uap10="http://schemas.microsoft.com/appx/manifest/uap/windows10/10"
+  xmlns:com="http://schemas.microsoft.com/appx/manifest/com/windows10"
   xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities">
   <Identity
     Name="TheUndeadMonk.Librarian.Development"
@@ -68,6 +69,33 @@
         BackgroundColor="transparent"
         Square150x150Logo="Assets\Square150x150Logo.png"
         Square44x44Logo="Assets\Square44x44Logo.png" />
+    </Application>
+    <Application
+      Id="PasskeyProvider"
+      Executable="Librarian.PasskeyProvider.exe"
+      uap10:TrustLevel="mediumIL"
+      uap10:RuntimeBehavior="win32App">
+      <uap:VisualElements
+        AppListEntry="none"
+        DisplayName="Librarian passkey provider"
+        Description="Librarian passkey provider"
+        BackgroundColor="transparent"
+        Square150x150Logo="Assets\Square150x150Logo.png"
+        Square44x44Logo="Assets\Square44x44Logo.png" />
+      <Extensions>
+        <com:Extension Category="windows.comServer">
+          <com:ComServer>
+            <com:ExeServer
+              Executable="Librarian.PasskeyProvider.exe"
+              Arguments="-PluginActivated"
+              DisplayName="Librarian passkey provider">
+              <com:Class
+                Id="68FE5DF7-9FE6-4145-BBA0-95010F43BFBE"
+                DisplayName="Librarian passkey provider" />
+            </com:ExeServer>
+          </com:ComServer>
+        </com:Extension>
+      </Extensions>
     </Application>
   </Applications>
 </Package>

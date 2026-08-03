@@ -63,6 +63,7 @@ impl std::error::Error for UnlockError {}
 pub enum AccountError {
     Locked,
     NotFound,
+    Conflict,
     Aborted,
     Failed,
 }
@@ -71,9 +72,10 @@ impl fmt::Display for AccountError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
             Self::Locked => "the vault is locked",
-            Self::NotFound => "website account was not found",
-            Self::Aborted => "website account operation was aborted",
-            Self::Failed => "website account operation failed",
+            Self::NotFound => "vault record was not found",
+            Self::Conflict => "vault record conflicts with the request",
+            Self::Aborted => "vault record operation was aborted",
+            Self::Failed => "vault record operation failed",
         })
     }
 }

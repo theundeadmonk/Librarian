@@ -49,6 +49,20 @@ namespace librarian::windows
         std::optional<std::uint32_t> next_offset;
     };
 
+    struct PasskeySummary
+    {
+        std::wstring credential_id;
+        std::wstring rp_id;
+        std::wstring user_name;
+        std::wstring user_display_name;
+    };
+
+    struct PasskeyListResult
+    {
+        ClientError error{ ClientError::None };
+        std::vector<PasskeySummary> passkeys;
+    };
+
     class SecretText final
     {
     public:
@@ -103,6 +117,8 @@ namespace librarian::windows
         [[nodiscard]] virtual ClientResult RemoveWindowsHello() = 0;
         [[nodiscard]] virtual ClientResult Lock() = 0;
         [[nodiscard]] virtual AccountListResult ListAccounts(std::uint32_t offset) = 0;
+        [[nodiscard]] virtual PasskeyListResult ListPasskeys() = 0;
+        [[nodiscard]] virtual ClientResult DeletePasskey(std::wstring_view credential_id) = 0;
         [[nodiscard]] virtual ClientResult SaveAccount(AccountDraft const& account) = 0;
         // Close is permanent and must linearize with request startup: an
         // in-flight request is cancelled and every later request fails closed.

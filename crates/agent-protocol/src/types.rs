@@ -95,11 +95,15 @@ pub enum OperationCode {
     MakePasskey = 30,
     GetPasskeyAssertion = 31,
     DeletePasskey = 32,
+    ListPasskeysForAssertion = 33,
+    ListPasskeys = 34,
+    RollbackPasskeyCreation = 35,
+    ConfirmPasskeyCreation = 36,
 }
 
 impl OperationCode {
     /// Complete closed operation set for version 1.
-    pub const ALL: [Self; 19] = [
+    pub const ALL: [Self; 23] = [
         Self::Status,
         Self::CreateVault,
         Self::UnlockMasterPassword,
@@ -119,6 +123,10 @@ impl OperationCode {
         Self::MakePasskey,
         Self::GetPasskeyAssertion,
         Self::DeletePasskey,
+        Self::ListPasskeysForAssertion,
+        Self::ListPasskeys,
+        Self::RollbackPasskeyCreation,
+        Self::ConfirmPasskeyCreation,
     ];
 
     #[must_use]
@@ -138,6 +146,8 @@ impl OperationCode {
                     | Self::EnrollWindowsHello
                     | Self::RemoveWindowsHello
                     | Self::UnlockWindowsHello
+                    | Self::DeletePasskey
+                    | Self::ListPasskeys
             ),
             ClientRole::NativeHost => matches!(
                 self,
@@ -149,7 +159,12 @@ impl OperationCode {
             ),
             ClientRole::PasskeyProvider => matches!(
                 self,
-                Self::Status | Self::MakePasskey | Self::GetPasskeyAssertion | Self::DeletePasskey
+                Self::Status
+                    | Self::MakePasskey
+                    | Self::GetPasskeyAssertion
+                    | Self::ListPasskeysForAssertion
+                    | Self::RollbackPasskeyCreation
+                    | Self::ConfirmPasskeyCreation
             ),
         }
     }
@@ -167,7 +182,10 @@ impl OperationCode {
                 | Self::CaptureCredential
                 | Self::UpdateCredential
                 | Self::MakePasskey
+                | Self::GetPasskeyAssertion
                 | Self::DeletePasskey
+                | Self::RollbackPasskeyCreation
+                | Self::ConfirmPasskeyCreation
         )
     }
 
@@ -189,6 +207,10 @@ impl OperationCode {
                 | Self::MakePasskey
                 | Self::GetPasskeyAssertion
                 | Self::DeletePasskey
+                | Self::ListPasskeysForAssertion
+                | Self::ListPasskeys
+                | Self::RollbackPasskeyCreation
+                | Self::ConfirmPasskeyCreation
         )
     }
 
@@ -198,6 +220,13 @@ impl OperationCode {
             Self::EnrollWindowsHello | Self::RemoveWindowsHello | Self::UnlockWindowsHello => {
                 Some(crate::FEATURE_WINDOWS_HELLO)
             }
+            Self::MakePasskey
+            | Self::GetPasskeyAssertion
+            | Self::DeletePasskey
+            | Self::ListPasskeysForAssertion
+            | Self::ListPasskeys
+            | Self::RollbackPasskeyCreation
+            | Self::ConfirmPasskeyCreation => Some(crate::FEATURE_PASSKEY_PROVIDER),
             _ => None,
         }
     }
@@ -223,6 +252,10 @@ impl OperationCode {
             30 => Some(Self::MakePasskey),
             31 => Some(Self::GetPasskeyAssertion),
             32 => Some(Self::DeletePasskey),
+            33 => Some(Self::ListPasskeysForAssertion),
+            34 => Some(Self::ListPasskeys),
+            35 => Some(Self::RollbackPasskeyCreation),
+            36 => Some(Self::ConfirmPasskeyCreation),
             _ => None,
         }
     }

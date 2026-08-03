@@ -646,6 +646,7 @@ try {
     $expectedProductExecutables = @(
         "Librarian.ChromiumNativeHost.exe",
         "Librarian.IdentityLauncher.exe",
+        "Librarian.PasskeyProvider.exe",
         "Librarian.VaultAgent.exe",
         "Librarian.Windows.exe"
     )
@@ -653,7 +654,7 @@ try {
         ($productExecutableNames -join "`n") -eq
             ($expectedProductExecutables -join "`n")
     ) (
-        "The MSI must contain the three identity-bearing executables and the " +
+        "The MSI must contain all identity-bearing executables and the " +
         "dedicated identity launcher. " +
         "Found: $($productExecutableNames -join ', ')."
     )
@@ -667,12 +668,6 @@ try {
         "The self-contained Windows App SDK executable scope changed. Found: " +
         "$($runtimeExecutableNames -join ', ')."
     )
-    Assert-True (
-        -not (($fileNodes | ForEach-Object {
-            $_.GetAttribute("Name")
-        }) -match "PasskeyProvider")
-    ) "The MSI must not contain a passkey-provider placeholder."
-
     $coreFeature = $decompiled.SelectSingleNode(
         "//*[local-name()='Feature' and @Id='Core']"
     )
@@ -1009,8 +1004,13 @@ try {
         $releaseManifest.developmentLayout.desktopSha256 -match '^[0-9A-F]{64}$'
     ) "The release manifest must bind the loose-layout desktop hash."
     Assert-True (
-        $releaseManifest.passkeyProvider.included -eq $false
-    ) "The release manifest must state that the passkey provider is absent."
+        $releaseManifest.passkeyProvider.included -eq $true -and
+        $releaseManifest.passkeyProvider.applicationId -eq "PasskeyProvider" -and
+        $releaseManifest.passkeyProvider.clsid -eq
+            "68FE5DF7-9FE6-4145-BBA0-95010F43BFBE" -and
+        $releaseManifest.passkeyProvider.aaguid -eq
+            "B79A73F8-4BD4-45E7-A817-B62F31ACAEC5"
+    ) "The release manifest has invalid passkey-provider metadata."
 
     foreach ($manifestCase in @(
         [PSCustomObject]@{
@@ -1043,6 +1043,7 @@ try {
         "Desktop",
         "VaultAgent",
         "ChromiumNativeHost",
+        "PasskeyProvider",
         "IdentityPackage"
     )
     $releaseHashes = [ordered]@{}
@@ -1197,6 +1198,10 @@ try {
         [PSCustomObject]@{
             Executable = "Librarian.ChromiumNativeHost.exe"
             ApplicationId = "ChromiumNativeHost"
+        },
+        [PSCustomObject]@{
+            Executable = "Librarian.PasskeyProvider.exe"
+            ApplicationId = "PasskeyProvider"
         }
     )) {
         $executablePath = Get-ExtractedMsiFile `
@@ -1574,9 +1579,9 @@ try {
             "passed"
         })
     )
-    Write-Host "Product-role executables: 3"
+    Write-Host "Product-role executables: 4"
     Write-Host "Identity launcher: present"
-    Write-Host "Passkey provider: absent (owned by issue #18)"
+    Write-Host "Passkey provider: present and release-bound"
 } finally {
     if (Test-Path -LiteralPath $resolvedInspectionRoot) {
         Remove-Item -LiteralPath $resolvedInspectionRoot -Recurse -Force

@@ -20,8 +20,11 @@ pub use message::{
     ClientHello, EndpointDescriptor, ProtocolError, RequestEnvelope, ResponseEnvelope, ServerHello,
 };
 pub use operations::{
-    AccountFields, AccountView, OperationRequest, encode_account, encode_account_id,
-    encode_account_summaries, encode_empty_result, encode_status,
+    AccountFields, AccountView, OperationRequest, PasskeyAssertionView, PasskeyCredentialView,
+    PasskeyManagementSummaryView, PasskeyRequestProof, PasskeySummaryView, PasskeyTransactionProof,
+    encode_account, encode_account_id, encode_account_summaries, encode_empty_result,
+    encode_passkey_assertion, encode_passkey_credential, encode_passkey_management_summaries,
+    encode_passkey_summaries, encode_status,
 };
 pub use session::{
     BeginRequestError, Connection, ConnectionError, ConnectionLimits, RequestCompletion,
@@ -59,8 +62,12 @@ pub const PASSKEY_TIMEOUT_MS: u32 = 120_000;
 /// Oldest protocol revision accepted by this agent.
 pub const MINIMUM_VERSION: Version = Version::new(1, 0);
 /// Current trusted-protocol version.
-pub const CURRENT_VERSION: Version = Version::new(1, 1);
+pub const CURRENT_VERSION: Version = Version::new(1, 2);
 /// First protocol revision that defines agent-owned Windows Hello operations.
 pub const WINDOWS_HELLO_VERSION: Version = Version::new(1, 1);
 /// Explicit feature grant required for every Windows Hello operation.
 pub const FEATURE_WINDOWS_HELLO: u16 = 1;
+/// Explicit feature grant required for vault-backed passkey operations.
+pub const FEATURE_PASSKEY_PROVIDER: u16 = 2;
+/// First protocol revision that defines vault-backed passkey schemas.
+pub const PASSKEY_PROVIDER_VERSION: Version = Version::new(1, 2);

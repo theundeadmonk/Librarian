@@ -67,6 +67,35 @@ delete-account-body = [record-id: bytes .size 16]
 enroll-windows-hello-body = [parent-window: 1..18446744073709551615]
 unlock-windows-hello-body = [parent-window: 1..18446744073709551615]
 remove-windows-hello-body = []
+make-passkey-body = [passkey-transaction-proof]
+get-passkey-assertion-body = [
+  passkey-transaction-proof,
+  credential-id: bytes .size 32
+]
+delete-passkey-body = [credential-id: bytes .size 32]
+list-passkeys-for-assertion-body = [passkey-request-proof]
+list-passkeys-body = []
+confirm-passkey-creation-body = [
+  passkey-transaction-proof,
+  credential-id: bytes .size 32
+]
+rollback-passkey-creation-body = [
+  passkey-transaction-proof,
+  credential-id: bytes .size 32
+]
+
+passkey-request-proof = (
+  transaction-id: bytes .size 16,
+  request-type: 1,
+  windows-request-signature: bytes .size (1..2048),
+  encoded-ctap2-request: bytes .size (1..49152)
+)
+
+passkey-transaction-proof = (
+  passkey-request-proof,
+  agent-connection-challenge: bytes .size 16,
+  windows-uv-signature: bytes .size (1..2048)
+)
 
 account-fields = (
   service-name: text .size (0..256),
@@ -78,6 +107,31 @@ account-fields = (
 status-result = [agent-state: 1..7, unlock-epoch: uint]
 empty-result = []
 account-id-result = [record-id: bytes .size 16]
+passkey-credential-result = [
+  credential-id: bytes .size 32,
+  user-handle: bytes .size (1..64),
+  uncompressed-p256-public-key: bytes .size 65
+]
+passkey-assertion-result = [
+  credential-id: bytes .size 32,
+  user-handle: bytes .size (1..64),
+  authenticator-data: bytes .size 37,
+  es256-signature-der: bytes .size (1..80)
+]
+passkey-summaries-result = [*64 passkey-summary]
+passkey-summary = [
+  credential-id: bytes .size 32,
+  user-handle: bytes .size (1..64),
+  user-name: text .size (1..256),
+  user-display-name: text .size (1..256)
+]
+passkey-management-summaries-result = [*64 passkey-management-summary]
+passkey-management-summary = [
+  credential-id: bytes .size 32,
+  rp-id: text .size (1..253),
+  user-name: text .size (1..256),
+  user-display-name: text .size (1..256)
+]
 account-result = [
   record-id: bytes .size 16,
   revision: uint,

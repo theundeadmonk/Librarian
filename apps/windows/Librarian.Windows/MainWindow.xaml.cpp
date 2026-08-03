@@ -533,6 +533,61 @@ namespace winrt::Librarian::Windows::implementation
         return NavigateAccountPage(true);
     }
 
+    fire_and_forget MainWindow::OnDeletePasskeyClicked(
+        [[maybe_unused]] IInspectable const& sender,
+        [[maybe_unused]] RoutedEventArgs const& event)
+    {
+        auto lifetime = get_strong();
+        auto const index = PasskeysListView().SelectedIndex();
+        auto const& passkeys = view_model_.Passkeys();
+        if (index < 0 || static_cast<std::size_t>(index) >= passkeys.size())
+        {
+            co_return;
+        }
+        auto const passkey = passkeys[static_cast<std::size_t>(index)];
+        auto confirmation = ContentDialog();
+        confirmation.XamlRoot(RootLayout().XamlRoot());
+        confirmation.Title(box_value(L"Delete this passkey?"));
+        confirmation.Content(box_value(
+            std::wstring{L"Delete the passkey for "} + passkey.rp_id +
+            L" (" + passkey.user_name + L") from Windows and this vault?"));
+        confirmation.PrimaryButtonText(L"Delete");
+        confirmation.CloseButtonText(L"Cancel");
+        confirmation.DefaultButton(ContentDialogButton::Close);
+        if (co_await confirmation.ShowAsync() != ContentDialogResult::Primary ||
+            lifetime->is_closed_.load(std::memory_order_acquire) ||
+            !lifetime->view_model_.BeginDeletePasskey())
+        {
+            co_return;
+        }
+
+        auto const dispatcher = DispatcherQueue();
+        Render();
+        co_await resume_background();
+        if (lifetime->is_closed_.load(std::memory_order_acquire))
+        {
+            co_return;
+        }
+        auto outcome = std::make_shared<librarian::windows::ShellRequestOutcome>(
+            lifetime->view_model_.ExecuteDeletePasskeyRequest(passkey.credential_id));
+        if (lifetime->is_closed_.load(std::memory_order_acquire))
+        {
+            co_return;
+        }
+        if (!dispatcher.TryEnqueue([lifetime, outcome]
+        {
+            if (lifetime->is_closed_.load(std::memory_order_acquire))
+            {
+                return;
+            }
+            lifetime->view_model_.CompleteDeletePasskey(std::move(*outcome));
+            lifetime->RenderSecurityTransitionIfOpen();
+        }))
+        {
+            co_return;
+        }
+    }
+
     void MainWindow::Render()
     {
         using librarian::windows::ShellState;
@@ -565,14 +620,52 @@ namespace winrt::Librarian::Windows::implementation
         if (state == ShellState::Unlocked)
         {
             RenderAccounts();
+            RenderPasskeys();
         }
         else if (state != ShellState::Saving)
         {
             AccountsListView().Items().Clear();
+            PasskeysListView().Items().Clear();
             ClearAccountEditor();
         }
 
         QueueFocusCurrentState();
+    }
+
+    void MainWindow::RenderPasskeys()
+    {
+        auto const& passkeys = view_model_.Passkeys();
+        PasskeysListView().Items().Clear();
+        EmptyPasskeysTextBlock().Visibility(VisibleWhen(passkeys.empty()));
+        PasskeysListView().Visibility(VisibleWhen(!passkeys.empty()));
+        DeletePasskeyButton().Visibility(VisibleWhen(!passkeys.empty()));
+        for (auto const& passkey : passkeys)
+        {
+            auto details = StackPanel();
+            details.Spacing(2);
+
+            auto rp_id = TextBlock();
+            rp_id.Text(passkey.rp_id);
+            AutomationProperties::SetName(
+                rp_id,
+                hstring{std::wstring{L"Relying party: "} + passkey.rp_id});
+            rp_id.Style(
+                Application::Current().Resources().Lookup(
+                    box_value(L"BodyStrongTextBlockStyle")).as<Style>());
+            details.Children().Append(rp_id);
+
+            auto user_name = TextBlock();
+            user_name.Text(passkey.user_name);
+            AutomationProperties::SetName(
+                user_name,
+                hstring{std::wstring{L"Passkey username: "} + passkey.user_name});
+            user_name.TextWrapping(TextWrapping::Wrap);
+            details.Children().Append(user_name);
+
+            auto item = ListViewItem();
+            item.Content(details);
+            PasskeysListView().Items().Append(item);
+        }
     }
 
     void MainWindow::RenderAccounts()

@@ -29,7 +29,8 @@ use zeroize::Zeroizing;
 mod records;
 
 pub use records::{
-    EncryptedRecord, PreparedRecordMutation, RecordId, RecordMutationKind, RecordOperationError,
+    EncryptedRecord, PasskeyAssertion, PasskeyCredential, PasskeyInput, PasskeyInputError,
+    PasskeySummary, PreparedRecordMutation, RecordId, RecordMutationKind, RecordOperationError,
     WebsiteAccount, WebsiteAccountInput, WebsiteAccountInputError,
 };
 

@@ -159,9 +159,15 @@ hierarchy, master-password unlock, guarded local SQLite ownership, and the
 single website-account CRUD subset from issues #10 and #11. Each mutation
 commits one opaque record envelope and the next encrypted manifest generation
 in the same immediate transaction. Account origins use the pinned WHATWG URL
-parser and are stored as exact normalized HTTP(S) origins. Browser site access,
-native messaging, and production passkey storage remain disabled until their
-security gates and implementation issues are complete. The packaged desktop now
+parser and are stored as exact normalized HTTP(S) origins. Browser site access
+and native messaging remain disabled until their security gates and
+implementation issues are complete. Vault-backed passkey storage and the
+packaged Windows provider are available only for disposable development testing
+until their review and real relying-party validation gates complete. Each
+private-key operation binds the Windows Hello approval to the selected
+credential and to a fresh authenticated agent connection; the agent accepts it
+only as that connection's first request, so a captured proof cannot be replayed
+with a new idempotency key or after a process restart. The packaged desktop now
 reaches the vault agent through the authenticated issue #13 transport. The
 Windows Hello native component owns platform-credential enrollment, PRF
 evaluation, strict authenticator-response validation, and credential removal

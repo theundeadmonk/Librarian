@@ -3,6 +3,7 @@
 #include <bcrypt.h>
 #include <msi.h>
 #include <msiquery.h>
+#include <ncrypt.h>
 #include <sddl.h>
 #include <shlobj.h>
 #include <softpub.h>
@@ -39,18 +40,25 @@ namespace
         L"TheUndeadMonk.Librarian.Development"};
     constexpr std::wstring_view package_publisher{
         L"CN=Librarian Development"};
-    constexpr std::array<std::wstring_view, 5> signed_payload_files{
+    constexpr GUID provider_clsid{
+        0x68fe5df7,
+        0x9fe6,
+        0x4145,
+        {0xbb, 0xa0, 0x95, 0x01, 0x0f, 0x43, 0xbf, 0xbe}};
+    constexpr std::array<std::wstring_view, 6> signed_payload_files{
         L"Librarian.IdentityLauncher.exe",
         L"Librarian.Windows.exe",
         L"Librarian.VaultAgent.exe",
         L"Librarian.ChromiumNativeHost.exe",
+        L"Librarian.PasskeyProvider.exe",
         L"Librarian.Identity.msix",
     };
-    constexpr std::array<std::wstring_view, 8> required_payload_files{
+    constexpr std::array<std::wstring_view, 9> required_payload_files{
         L"Librarian.IdentityLauncher.exe",
         L"Librarian.Windows.exe",
         L"Librarian.VaultAgent.exe",
         L"Librarian.ChromiumNativeHost.exe",
+        L"Librarian.PasskeyProvider.exe",
         L"Librarian.Identity.msix",
         L"Librarian.Release.json",
         L"com.theundeadmonk.librarian.chrome.json",
@@ -58,9 +66,35 @@ namespace
     };
     constexpr std::wstring_view payload_hash_manifest_name{
         L"Librarian.PayloadHashes"};
-    constexpr std::wstring_view forbidden_provider{
-        L"Librarian.PasskeyProvider.exe"};
     using sha256_digest = std::array<std::uint8_t, 32>;
+
+    void unregister_passkey_provider()
+    {
+        HMODULE const module = LoadLibraryExW(
+            L"webauthn.dll",
+            nullptr,
+            LOAD_LIBRARY_SEARCH_SYSTEM32);
+        if (module == nullptr)
+        {
+            throw winrt::hresult_error{HRESULT_FROM_WIN32(GetLastError())};
+        }
+        using remove_authenticator_function = HRESULT(WINAPI*)(REFCLSID);
+        auto const remove_authenticator =
+            reinterpret_cast<remove_authenticator_function>(
+                GetProcAddress(module, "WebAuthNPluginRemoveAuthenticator"));
+        if (remove_authenticator == nullptr)
+        {
+            FreeLibrary(module);
+            throw winrt::hresult_error{
+                HRESULT_FROM_WIN32(ERROR_PROC_NOT_FOUND)};
+        }
+        HRESULT const result = remove_authenticator(provider_clsid);
+        FreeLibrary(module);
+        if (FAILED(result) && result != NTE_NOT_FOUND)
+        {
+            throw winrt::hresult_error{result};
+        }
+    }
 
     struct validation_error
     {
@@ -1295,14 +1329,6 @@ namespace
                 fail(L"Setup refused a payload signed by another publisher.");
             }
         }
-        if (std::filesystem::exists(
-                data.install_folder / forbidden_provider))
-        {
-            fail(
-                L"Setup refused an unexpected passkey provider before "
-                L"issue #18.");
-        }
-
         payload_manifest const manifest = read_payload_manifest(
             data.install_folder,
             data.manifest_hash);
@@ -1378,6 +1404,7 @@ UnregisterCurrentUserIdentity(MSIHANDLE installer)
                 parse_version(fields[1]);
             std::uint64_t const installed =
                 comparable_version(installed_version);
+            unregister_passkey_provider();
             PackageManager const manager;
             std::vector<Package> removable_packages;
             for (Package const& package :

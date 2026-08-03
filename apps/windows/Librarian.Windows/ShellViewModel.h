@@ -24,6 +24,7 @@ namespace librarian::windows
     {
         ClientResult request;
         std::optional<AccountListResult> accounts;
+        std::optional<PasskeyListResult> passkeys;
     };
 
     class ShellViewModel final
@@ -62,6 +63,8 @@ namespace librarian::windows
         void CancelAccountEditor();
         [[nodiscard]] bool BeginSaveAccount();
         void CompleteSaveAccount(ShellRequestOutcome outcome);
+        [[nodiscard]] bool BeginDeletePasskey();
+        void CompleteDeletePasskey(ShellRequestOutcome outcome);
         [[nodiscard]] std::optional<std::uint32_t> BeginNextAccountPage();
         [[nodiscard]] std::optional<std::uint32_t> BeginPreviousAccountPage();
         void CompleteNextAccountPage(AccountListResult result);
@@ -82,12 +85,15 @@ namespace librarian::windows
             AccountDraft const& account) const;
         [[nodiscard]] AccountListResult ExecuteAccountPageRequest(
             std::uint32_t offset) const;
+        [[nodiscard]] ShellRequestOutcome ExecuteDeletePasskeyRequest(
+            std::wstring_view credential_id) const;
 
         void Close() noexcept;
 
         [[nodiscard]] ShellState State() const noexcept;
         [[nodiscard]] std::wstring const& Message() const noexcept;
         [[nodiscard]] std::vector<AccountSummary> const& Accounts() const noexcept;
+        [[nodiscard]] std::vector<PasskeySummary> const& Passkeys() const noexcept;
         [[nodiscard]] bool IsAccountEditorVisible() const noexcept;
         [[nodiscard]] bool IsLockRequestPending() const noexcept;
         [[nodiscard]] bool HasNextAccountPage() const noexcept;
@@ -107,6 +113,7 @@ namespace librarian::windows
             RemoveWindowsHello,
             Lock,
             SaveAccount,
+            DeletePasskey,
             NextAccountPage,
             PreviousAccountPage,
         };
@@ -126,6 +133,7 @@ namespace librarian::windows
         void ApplyLockFailure(ClientError error);
         void Apply(ShellRequestOutcome outcome);
         void ApplyAccounts(AccountListResult result);
+        void ApplyPasskeys(PasskeyListResult result);
         void ApplyError(ClientError error);
         void SetVaultStatus(VaultStatus status);
 
@@ -135,6 +143,7 @@ namespace librarian::windows
         PendingAction pending_action_{ PendingAction::None };
         std::wstring message_;
         std::vector<AccountSummary> accounts_;
+        std::vector<PasskeySummary> passkeys_;
         std::optional<std::uint32_t> next_account_offset_;
         std::optional<std::uint32_t> pending_account_offset_;
         std::vector<std::uint32_t> previous_account_offsets_;

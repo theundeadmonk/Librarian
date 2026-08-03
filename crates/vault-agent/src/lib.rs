@@ -6,6 +6,7 @@
 mod errors;
 mod filesystem;
 mod lifecycle;
+mod passkeys;
 mod records;
 mod runtime;
 mod snapshot;
@@ -15,8 +16,9 @@ mod windows_hello;
 
 pub use errors::{AccountError, CreateError, UnlockError};
 pub use librarian_vault_core::{
-    RecordId, WebsiteAccount, WebsiteAccountInput, WebsiteAccountInputError,
-    WindowsHelloInstallationKey, WindowsHelloPrfOutput,
+    PasskeyAssertion, PasskeyCredential, PasskeyInput, PasskeyInputError, PasskeySummary, RecordId,
+    WebsiteAccount, WebsiteAccountInput, WebsiteAccountInputError, WindowsHelloInstallationKey,
+    WindowsHelloPrfOutput,
 };
 pub use lifecycle::{OperationPermit, VaultAgent};
 pub use runtime::{AgentRuntime, DispatchError, RuntimeStartError};

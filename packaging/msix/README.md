@@ -36,7 +36,7 @@ installer structural suite. Build validation must not install a package, trust
 a certificate, or enable secret-bearing product paths automatically. MakeAppx
 uses `/nv` because external executable and visual-resource paths intentionally
 do not resolve inside the identity package, as required by Microsoft's manual
-external-location packaging procedure. The passkey-provider executable does
-not exist yet; the current setup rejects that incomplete role rather than
-registering a placeholder. Issue #18 will extend the same lifecycle when the
-real provider exists.
+external-location packaging procedure. The same manifest declares the real
+passkey-provider application and COM local server. The identity launcher
+invokes that identity-bearing provider to register or unregister the
+authenticator; no placeholder or mock provider is packaged.

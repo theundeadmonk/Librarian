@@ -39,7 +39,7 @@ The MVP will be delivered as four complete Windows vertical slices. The first sl
 
 The existing passkey-provider feasibility spike is intentionally maintained separately from this production repository because it contains disposable Microsoft sample code and mock credential storage.
 
-The production repository now has a Windows-only development slice for the accepted component boundaries. Its packaged desktop reaches the local vault agent through authenticated IPC, can create and unlock an encrypted vault, manage the current website-account subset, and optionally use Windows Hello as a convenience unlock while preserving the master-password fallback. Browser and passkey-provider integration remain incomplete, and production credential use remains prohibited until the remaining security gates are complete. See [Windows development](DEVELOPMENT.md) for the pinned toolchain, single-command build, and disposable local test workflow.
+The production repository now has a Windows-only development slice for the accepted component boundaries. Its packaged desktop reaches the local vault agent through authenticated IPC, can create and unlock an encrypted vault, manage the current website-account subset, optionally use Windows Hello as a convenience unlock while preserving the master-password fallback, and route Windows passkey operations through a vault-backed provider. Browser integration and production-readiness gates remain incomplete, and production credential use remains prohibited until those gates are complete. See [Windows development](DEVELOPMENT.md) for the pinned toolchain, single-command build, and disposable local test workflow.
 
 ## Security
 

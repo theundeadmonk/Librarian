@@ -45,6 +45,9 @@ $binaries = [ordered]@{
     ChromiumNativeHost = Join-Path (
         Join-Path $repoRoot "target\x86_64-pc-windows-msvc\release"
     ) "librarian-chromium-native-host.exe"
+    PasskeyProvider = Join-Path (
+        Join-Path $repoRoot "target\x86_64-pc-windows-msvc\release"
+    ) "librarian-passkey-provider.exe"
     Desktop = Join-Path (
         Join-Path $repoRoot "$Platform\$Configuration\Librarian.Windows"
     ) "Librarian.Windows.exe"

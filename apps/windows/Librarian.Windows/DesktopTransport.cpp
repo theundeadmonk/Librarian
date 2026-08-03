@@ -11,6 +11,8 @@
 #include <sddl.h>
 #include <shlobj.h>
 #include <shobjidl_core.h>
+#include <webauthn.h>
+#include <webauthnplugin.h>
 
 #include <algorithm>
 #include <array>
@@ -40,11 +42,17 @@ namespace librarian::windows
         constexpr std::size_t maximum_descriptor_bytes = 4'096U;
         constexpr std::uint32_t frame_write_allowance_ms = 2'000U;
         constexpr std::uint16_t protocol_major = 1U;
-        constexpr std::uint16_t protocol_minor = 1U;
+        constexpr std::uint16_t protocol_minor = 2U;
         constexpr std::uint16_t windows_hello_feature = 1U;
+        constexpr std::uint16_t passkey_provider_feature = 2U;
         constexpr std::uint32_t medium_integrity_rid = 0x2000U;
         constexpr std::wstring_view desktop_executable{L"Librarian.Windows.exe"};
         constexpr std::wstring_view agent_executable{L"Librarian.VaultAgent.exe"};
+        constexpr CLSID passkey_provider_clsid{
+            0x68fe5df7,
+            0x9fe6,
+            0x4145,
+            {0xbb, 0xa0, 0x95, 0x01, 0x0f, 0x43, 0xbf, 0xbe}};
         constexpr std::wstring_view endpoint_relative_path{
             L"Librarian\\agent-endpoint-v1.cbor"};
         constexpr std::wstring_view pipe_prefix{
@@ -1528,8 +1536,9 @@ namespace librarian::windows
             writer.unsigned_value(protocol_minor);
             writer.unsigned_value(1U);
             writer.bytes(context.desktop_build_id);
-            writer.array(1U);
+            writer.array(2U);
             writer.unsigned_value(windows_hello_feature);
+            writer.unsigned_value(passkey_provider_feature);
             return writer.take();
         }
 
@@ -1550,8 +1559,9 @@ namespace librarian::windows
             std::uint64_t const major = reader.unsigned_value();
             std::uint64_t const minor = reader.unsigned_value();
             std::uint64_t const role = reader.unsigned_value();
-            if (reader.array() != 1U ||
-                reader.unsigned_value() != windows_hello_feature)
+            if (reader.array() != 2U ||
+                reader.unsigned_value() != windows_hello_feature ||
+                reader.unsigned_value() != passkey_provider_feature)
             {
                 fail(transport_error::invalid);
             }
@@ -1696,6 +1706,8 @@ namespace librarian::windows
             enroll_windows_hello = 10U,
             remove_windows_hello = 11U,
             unlock_windows_hello = 12U,
+            delete_passkey = 32U,
+            list_passkeys = 34U,
         };
 
         bool requires_idempotency(operation const value)
@@ -1703,7 +1715,8 @@ namespace librarian::windows
             return value == operation::create_vault ||
                    value == operation::add_account ||
                    value == operation::enroll_windows_hello ||
-                   value == operation::remove_windows_hello;
+                   value == operation::remove_windows_hello ||
+                   value == operation::delete_passkey;
         }
 
         struct decoded_response
@@ -1800,6 +1813,9 @@ namespace librarian::windows
                 return ClientError::None;
             case 3U:
                 return ClientError::Locked;
+            case 4U:
+                return requested_operation == operation::delete_passkey ?
+                    ClientError::None : ClientError::Unexpected;
             case 6U:
                 return ClientError::Busy;
             case 7U:
@@ -1883,21 +1899,140 @@ namespace librarian::windows
             std::vector<AccountSummary> accounts;
         };
 
-        std::wstring record_identifier(std::span<std::uint8_t const> const bytes)
+        std::wstring hex_identifier(
+            std::span<std::uint8_t const> const bytes,
+            std::size_t const expected_bytes)
         {
             constexpr wchar_t digits[] = L"0123456789abcdef";
-            if (bytes.size() != 16U)
+            if (bytes.size() != expected_bytes || !nonzero(bytes))
             {
                 fail(transport_error::invalid);
             }
             std::wstring result;
-            result.reserve(32U);
+            result.reserve(expected_bytes * 2U);
             for (std::uint8_t const byte : bytes)
             {
                 result.push_back(digits[byte >> 4U]);
                 result.push_back(digits[byte & 0x0fU]);
             }
             return result;
+        }
+
+        std::wstring record_identifier(std::span<std::uint8_t const> const bytes)
+        {
+            return hex_identifier(bytes, 16U);
+        }
+
+        PasskeyListResult decode_passkey_list(std::span<std::uint8_t const> const body)
+        {
+            cbor_reader reader{body};
+            std::uint64_t const count = reader.array();
+            if (count > 64U)
+            {
+                fail(transport_error::invalid);
+            }
+            std::vector<PasskeySummary> passkeys;
+            passkeys.reserve(static_cast<std::size_t>(count));
+            for (std::uint64_t index = 0U; index < count; ++index)
+            {
+                if (reader.array() != 4U)
+                {
+                    fail(transport_error::invalid);
+                }
+                auto const credential_id = hex_identifier(reader.bytes(32U), 32U);
+                auto const rp_id = wide(reader.text(253U));
+                auto const user_name = wide(reader.text(256U));
+                auto const user_display_name = wide(reader.text(256U));
+                if (rp_id.empty() || user_name.empty() || user_display_name.empty())
+                {
+                    fail(transport_error::invalid);
+                }
+                passkeys.push_back({
+                    credential_id,
+                    rp_id,
+                    user_name,
+                    user_display_name,
+                });
+            }
+            reader.finish();
+            return {ClientError::None, std::move(passkeys)};
+        }
+
+        bool valid_credential_identifier(std::wstring_view const value) noexcept
+        {
+            return value.size() == 64U &&
+                std::ranges::all_of(value, [](wchar_t const character) {
+                    return (character >= L'0' && character <= L'9') ||
+                           (character >= L'a' && character <= L'f');
+                }) &&
+                std::ranges::any_of(value, [](wchar_t const character) {
+                    return character != L'0';
+                });
+        }
+
+        std::array<std::uint8_t, 32U> credential_identifier_bytes(
+            std::wstring_view const credential_id)
+        {
+            if (!valid_credential_identifier(credential_id))
+            {
+                fail(transport_error::invalid);
+            }
+            auto nibble = [](wchar_t const value) -> std::uint8_t {
+                if (value >= L'0' && value <= L'9')
+                {
+                    return static_cast<std::uint8_t>(value - L'0');
+                }
+                return static_cast<std::uint8_t>(value - L'a' + 10);
+            };
+            std::array<std::uint8_t, 32U> bytes{};
+            for (std::size_t index = 0; index < bytes.size(); ++index)
+            {
+                bytes[index] = static_cast<std::uint8_t>(
+                    (nibble(credential_id[index * 2U]) << 4U) |
+                    nibble(credential_id[index * 2U + 1U]));
+            }
+            return bytes;
+        }
+
+        secret_bytes delete_passkey_body(std::span<std::uint8_t const, 32U> const credential_id)
+        {
+            cbor_writer writer;
+            writer.array(1U);
+            writer.bytes(credential_id);
+            return writer.take();
+        }
+
+        void remove_cached_passkey(
+            std::span<std::uint8_t const, 32U> const credential_id)
+        {
+            using remove_credentials_function = HRESULT(WINAPI*)(
+                REFCLSID,
+                DWORD,
+                PCWEBAUTHN_PLUGIN_CREDENTIAL_DETAILS);
+            HMODULE const module = LoadLibraryExW(
+                L"webauthn.dll",
+                nullptr,
+                LOAD_LIBRARY_SEARCH_SYSTEM32);
+            if (module == nullptr)
+            {
+                fail(transport_error::unavailable);
+            }
+            auto const remove_credentials = reinterpret_cast<remove_credentials_function>(
+                GetProcAddress(module, "WebAuthNPluginAuthenticatorRemoveCredentials"));
+            if (remove_credentials == nullptr)
+            {
+                FreeLibrary(module);
+                fail(transport_error::unavailable);
+            }
+            WEBAUTHN_PLUGIN_CREDENTIAL_DETAILS details{};
+            details.cbCredentialId = static_cast<DWORD>(credential_id.size());
+            details.pbCredentialId = credential_id.data();
+            HRESULT const result = remove_credentials(passkey_provider_clsid, 1U, &details);
+            FreeLibrary(module);
+            if (FAILED(result) && result != NTE_NOT_FOUND)
+            {
+                fail(transport_error::unavailable);
+            }
         }
 
         account_page decode_account_page(std::span<std::uint8_t const> const body)
@@ -2096,6 +2231,76 @@ namespace librarian::windows
                 catch (transport_exception const& error)
                 {
                     return {map_transport_error(error.error()), {}};
+                }
+            }
+
+            [[nodiscard]] PasskeyListResult ListPasskeys() override
+            {
+                std::scoped_lock request_lock{request_gate_};
+                if (closed_.load(std::memory_order_acquire))
+                {
+                    return {ClientError::Cancelled, {}};
+                }
+                try
+                {
+                    auto response = send_locked(
+                        operation::list_passkeys,
+                        empty_body().value(),
+                        5'000U);
+                    ClientError const error = map_public_error(
+                        response.error,
+                        operation::list_passkeys);
+                    if (error != ClientError::None)
+                    {
+                        return {error, {}};
+                    }
+                    return decode_passkey_list(response.body.value());
+                }
+                catch (transport_exception const& error)
+                {
+                    return {map_transport_error(error.error()), {}};
+                }
+            }
+
+            [[nodiscard]] ClientResult DeletePasskey(
+                std::wstring_view const credential_id) override
+            {
+                std::scoped_lock request_lock{request_gate_};
+                if (closed_.load(std::memory_order_acquire))
+                {
+                    return {ClientError::Cancelled, VaultStatus::Locked};
+                }
+                try
+                {
+                    auto const identifier = credential_identifier_bytes(credential_id);
+                    remove_cached_passkey(identifier);
+                    auto body = delete_passkey_body(identifier);
+                    auto response = send_locked(
+                        operation::delete_passkey,
+                        body.value(),
+                        120'000U);
+                    ClientError const error = map_public_error(
+                        response.error,
+                        operation::delete_passkey);
+                    if (error != ClientError::None)
+                    {
+                        return {
+                            error,
+                            error == ClientError::Locked ?
+                                VaultStatus::Locked : VaultStatus::Unlocked,
+                        };
+                    }
+                    return {
+                        ClientError::None,
+                        VaultStatus::Unlocked,
+                    };
+                }
+                catch (transport_exception const& error)
+                {
+                    return {
+                        map_transport_error(error.error()),
+                        VaultStatus::Unlocked,
+                    };
                 }
             }
 

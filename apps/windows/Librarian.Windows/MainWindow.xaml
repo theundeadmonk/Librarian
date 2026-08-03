@@ -188,6 +188,35 @@
                             </StackPanel>
                         </Border>
 
+                        <Border
+                            BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                            BorderThickness="1"
+                            CornerRadius="8"
+                            Padding="16">
+                            <StackPanel Spacing="8">
+                                <TextBlock
+                                    AutomationProperties.HeadingLevel="Level3"
+                                    Style="{StaticResource BodyStrongTextBlockStyle}"
+                                    Text="Vault-backed passkeys" />
+                                <TextBlock
+                                    x:Name="EmptyPasskeysTextBlock"
+                                    Text="No passkeys are stored in this vault yet."
+                                    TextWrapping="Wrap" />
+                                <ListView
+                                    x:Name="PasskeysListView"
+                                    AutomationProperties.Name="Vault-backed passkeys"
+                                    SelectionMode="Single"
+                                    TabIndex="5" />
+                                <Button
+                                    x:Name="DeletePasskeyButton"
+                                    AutomationProperties.Name="Delete selected passkey"
+                                    Click="OnDeletePasskeyClicked"
+                                    Content="Delete selected passkey"
+                                    HorizontalAlignment="Left"
+                                    TabIndex="6" />
+                            </StackPanel>
+                        </Border>
+
                         <TextBlock
                             x:Name="EmptyAccountsTextBlock"
                             Text="No accounts are stored in this vault yet."

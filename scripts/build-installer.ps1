@@ -23,6 +23,7 @@ param(
         "Desktop",
         "VaultAgent",
         "ChromiumNativeHost",
+        "PasskeyProvider",
         "IdentityPackage"
     )]
     [string]$CiOnlyPayloadOverrideRole,
@@ -663,6 +664,9 @@ $vaultAgent = Join-Path $repoRoot (
 $nativeHost = Join-Path $repoRoot (
     "target\x86_64-pc-windows-msvc\release\librarian-chromium-native-host.exe"
 )
+$passkeyProvider = Join-Path $repoRoot (
+    "target\x86_64-pc-windows-msvc\release\librarian-passkey-provider.exe"
+)
 $customActionProject = Join-Path $repoRoot (
     "packaging\windows\custom-actions\Librarian.Setup.CustomActions.vcxproj"
 )
@@ -680,6 +684,7 @@ foreach ($requiredPath in @(
     $desktopOutput,
     $vaultAgent,
     $nativeHost,
+    $passkeyProvider,
     $customActionProject,
     $identityLauncherProject
 )) {
@@ -776,6 +781,9 @@ Copy-Item `
     -LiteralPath $nativeHost `
     -Destination (Join-Path $payloadDirectory "Librarian.ChromiumNativeHost.exe")
 Copy-Item `
+    -LiteralPath $passkeyProvider `
+    -Destination (Join-Path $payloadDirectory "Librarian.PasskeyProvider.exe")
+Copy-Item `
     -LiteralPath $identityPackageSource `
     -Destination (Join-Path $payloadDirectory "Librarian.Identity.msix")
 Copy-Item `
@@ -822,6 +830,17 @@ $manifestCases = @(
         Executable = Join-Path (
             $payloadDirectory
         ) "Librarian.ChromiumNativeHost.exe"
+    },
+    [PSCustomObject]@{
+        Source = Join-Path $repoRoot (
+            "platform\windows-passkey-provider\app.manifest"
+        )
+        Rendered = Join-Path (
+            $intermediateDirectory
+        ) "Librarian.PasskeyProvider.manifest"
+        Executable = Join-Path (
+            $payloadDirectory
+        ) "Librarian.PasskeyProvider.exe"
     }
 )
 foreach ($case in $manifestCases) {
@@ -893,6 +912,7 @@ if ($DevelopmentCertificateThumbprint) {
         (Join-Path $payloadDirectory "Librarian.Windows.exe"),
         (Join-Path $payloadDirectory "Librarian.VaultAgent.exe"),
         (Join-Path $payloadDirectory "Librarian.ChromiumNativeHost.exe"),
+        (Join-Path $payloadDirectory "Librarian.PasskeyProvider.exe"),
         (Join-Path $payloadDirectory "Librarian.Identity.msix"),
         (Join-Path $customActionInputDirectory "Librarian.Setup.CustomActions.dll")
     )) {
@@ -909,6 +929,7 @@ $componentPaths = [ordered]@{
     Desktop = "Librarian.Windows.exe"
     VaultAgent = "Librarian.VaultAgent.exe"
     ChromiumNativeHost = "Librarian.ChromiumNativeHost.exe"
+    PasskeyProvider = "Librarian.PasskeyProvider.exe"
     IdentityPackage = "Librarian.Identity.msix"
 }
 $componentHashes = [ordered]@{}
@@ -943,8 +964,10 @@ $releaseManifest = [ordered]@{
         edgeOrigin = "chrome-extension://$EdgeExtensionId/"
     }
     passkeyProvider = [ordered]@{
-        included = $false
-        owner = "issue #18"
+        included = $true
+        applicationId = "PasskeyProvider"
+        clsid = "68FE5DF7-9FE6-4145-BBA0-95010F43BFBE"
+        aaguid = "B79A73F8-4BD4-45E7-A817-B62F31ACAEC5"
     }
 }
 [IO.File]::WriteAllText(

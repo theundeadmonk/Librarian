@@ -1,11 +1,13 @@
 use librarian_agent_protocol::{
     AccountFields, AccountView, AgentEvent, AgentState, BeginRequestError, CURRENT_VERSION,
     ClientHello, ClientRole, Connection, ConnectionError, ConnectionLimits, CorrelationId,
-    EndpointDescriptor, EventQueue, FEATURE_WINDOWS_HELLO, Frame, FrameError, FrameHeader,
-    MAX_EVENT_QUEUE, MAX_PAYLOAD_BYTES, MIN_NEGOTIATED_PAYLOAD_BYTES, MessageKind,
-    ORDINARY_TIMEOUT_MS, OperationCode, OperationRequest, ProtocolError, PublicErrorCode,
-    RequestCompletion, RequestEnvelope, ResponseEnvelope, RetryCategory, UNLOCK_TIMEOUT_MS,
-    Version, encode_account, encode_account_summaries,
+    EndpointDescriptor, EventQueue, FEATURE_PASSKEY_PROVIDER, FEATURE_WINDOWS_HELLO, Frame,
+    FrameError, FrameHeader, MAX_EVENT_QUEUE, MAX_PAYLOAD_BYTES, MIN_NEGOTIATED_PAYLOAD_BYTES,
+    MessageKind, ORDINARY_TIMEOUT_MS, OperationCode, OperationRequest,
+    PasskeyManagementSummaryView, PasskeyRequestProof, PasskeyTransactionProof, ProtocolError,
+    PublicErrorCode, RequestCompletion, RequestEnvelope, ResponseEnvelope, RetryCategory,
+    UNLOCK_TIMEOUT_MS, Version, encode_account, encode_account_summaries,
+    encode_passkey_management_summaries,
 };
 use zeroize::Zeroizing;
 
@@ -347,6 +349,161 @@ fn implemented_operation_bodies_are_canonical_bounded_and_strict() {
 }
 
 #[test]
+fn passkey_transaction_bodies_bind_a_nonzero_agent_challenge() {
+    let proof = PasskeyTransactionProof::new(
+        [0x11; 16],
+        1,
+        &[0x22; 64],
+        &[0x33; 128],
+        [0x34; 16],
+        &[0x44; 64],
+    )
+    .expect("bounded proof");
+    let encoded = OperationRequest::MakePasskey { proof }
+        .encode()
+        .expect("make-passkey body");
+    let decoded = OperationRequest::decode(OperationCode::MakePasskey, &encoded)
+        .expect("canonical passkey body");
+    let decoded_proof = decoded.passkey_proof().expect("passkey proof");
+    assert_eq!(decoded_proof.transaction_id(), &[0x11; 16]);
+    assert_eq!(decoded_proof.agent_challenge(), &[0x34; 16]);
+
+    let assertion = OperationRequest::GetPasskeyAssertion {
+        proof: PasskeyTransactionProof::new(
+            [0x51; 16],
+            1,
+            &[0x52; 64],
+            &[0x53; 128],
+            [0x54; 16],
+            &[0x55; 64],
+        )
+        .expect("bounded proof"),
+        credential_id: [0x55; 32],
+    };
+    let encoded = assertion.encode().expect("assertion body");
+    let decoded = OperationRequest::decode(OperationCode::GetPasskeyAssertion, &encoded)
+        .expect("canonical assertion body");
+    assert_eq!(decoded.passkey_credential_id(), Some([0x55; 32]));
+
+    let confirmation = OperationRequest::ConfirmPasskeyCreation {
+        proof: PasskeyTransactionProof::new(
+            [0x61; 16],
+            1,
+            &[0x62; 64],
+            &[0x63; 128],
+            [0x64; 16],
+            &[0x65; 64],
+        )
+        .expect("bounded confirmation proof"),
+        credential_id: [0x66; 32],
+    };
+    let encoded = confirmation.encode().expect("confirmation body");
+    let decoded = OperationRequest::decode(OperationCode::ConfirmPasskeyCreation, &encoded)
+        .expect("canonical confirmation body");
+    assert_eq!(decoded.passkey_credential_id(), Some([0x66; 32]));
+
+    let rollback = OperationRequest::RollbackPasskeyCreation {
+        proof: PasskeyTransactionProof::new(
+            [0x71; 16],
+            1,
+            &[0x72; 64],
+            &[0x73; 128],
+            [0x74; 16],
+            &[0x75; 64],
+        )
+        .expect("bounded rollback proof"),
+        credential_id: [0x76; 32],
+    };
+    let encoded = rollback.encode().expect("rollback body");
+    let decoded = OperationRequest::decode(OperationCode::RollbackPasskeyCreation, &encoded)
+        .expect("canonical rollback body");
+    assert_eq!(decoded.passkey_credential_id(), Some([0x76; 32]));
+    assert_eq!(
+        decoded
+            .passkey_proof()
+            .expect("rollback proof")
+            .transaction_id(),
+        &[0x71; 16]
+    );
+    assert!(OperationCode::RollbackPasskeyCreation.is_authorized_for(ClientRole::PasskeyProvider));
+    assert!(!OperationCode::RollbackPasskeyCreation.is_authorized_for(ClientRole::Desktop));
+    assert!(OperationCode::RollbackPasskeyCreation.requires_idempotency_key());
+    assert!(OperationCode::RollbackPasskeyCreation.requires_unlocked_epoch());
+    assert_eq!(
+        OperationCode::RollbackPasskeyCreation.required_feature(),
+        Some(FEATURE_PASSKEY_PROVIDER)
+    );
+
+    assert!(matches!(
+        PasskeyTransactionProof::new([0; 16], 1, &[1], &[2], [4; 16], &[3]),
+        Err(ProtocolError::InvariantViolation)
+    ));
+    assert!(matches!(
+        PasskeyTransactionProof::new([1; 16], 1, &[1], &[2], [0; 16], &[3]),
+        Err(ProtocolError::InvariantViolation)
+    ));
+}
+
+#[test]
+fn passkey_lookup_proof_is_canonical_and_does_not_require_uv() {
+    let lookup = OperationRequest::ListPasskeysForAssertion {
+        proof: PasskeyRequestProof::new([0x71; 16], 1, &[0x72; 64], &[0x73; 128])
+            .expect("bounded request proof"),
+    };
+    let encoded = lookup.encode().expect("lookup body");
+    let decoded = OperationRequest::decode(OperationCode::ListPasskeysForAssertion, &encoded)
+        .expect("canonical lookup");
+    assert_eq!(
+        decoded
+            .passkey_request_proof()
+            .expect("request proof")
+            .transaction_id(),
+        &[0x71; 16]
+    );
+    assert!(!OperationCode::ListPasskeysForAssertion.requires_idempotency_key());
+    assert!(OperationCode::ListPasskeysForAssertion.requires_unlocked_epoch());
+}
+
+#[test]
+fn desktop_passkey_management_is_feature_gated_and_canonical() {
+    let request = OperationRequest::ListPasskeys;
+    let encoded = request.encode().expect("management list body");
+    assert_eq!(encoded.as_slice(), &[0x80]);
+    assert!(matches!(
+        OperationRequest::decode(OperationCode::ListPasskeys, &encoded),
+        Ok(OperationRequest::ListPasskeys)
+    ));
+    assert!(OperationCode::ListPasskeys.is_authorized_for(ClientRole::Desktop));
+    assert!(!OperationCode::ListPasskeys.is_authorized_for(ClientRole::PasskeyProvider));
+    assert!(OperationCode::DeletePasskey.is_authorized_for(ClientRole::Desktop));
+    assert!(!OperationCode::DeletePasskey.is_authorized_for(ClientRole::PasskeyProvider));
+    assert_eq!(
+        OperationCode::ListPasskeys.required_feature(),
+        Some(FEATURE_PASSKEY_PROVIDER)
+    );
+
+    let passkeys = [PasskeyManagementSummaryView {
+        credential_id: [0x81; 32],
+        rp_id: "example.com",
+        user_name: "person@example.com",
+        user_display_name: "Disposable Person",
+    }];
+    let encoded =
+        encode_passkey_management_summaries(&passkeys).expect("bounded public management summary");
+    assert!(!encoded.is_empty());
+    let invalid = [PasskeyManagementSummaryView {
+        credential_id: [0; 32],
+        rp_id: "example.com",
+        user_name: "person@example.com",
+        user_display_name: "Disposable Person",
+    }];
+    assert!(matches!(
+        encode_passkey_management_summaries(&invalid),
+        Err(ProtocolError::InvariantViolation)
+    ));
+}
+
+#[test]
 fn handshake_claims_never_grant_authority() {
     assert!(matches!(
         Connection::negotiate(
@@ -476,6 +633,34 @@ fn legacy_protocol_versions_cannot_use_windows_hello() {
         old_protocol.begin_request(&hello_header, &hello_unlock, 1),
         Err(BeginRequestError::Unauthorized)
     );
+}
+
+#[test]
+fn legacy_protocol_versions_cannot_grant_passkey_operations() {
+    let legacy = ClientHello::new(
+        CLIENT_NONCE,
+        Version::new(1, 1),
+        Version::new(1, 1),
+        ClientRole::PasskeyProvider,
+        BUILD_ID,
+        vec![FEATURE_PASSKEY_PROVIDER],
+    )
+    .expect("well-formed legacy hello");
+    assert!(matches!(
+        Connection::negotiate(
+            ClientRole::PasskeyProvider,
+            17,
+            BUILD_ID,
+            &legacy,
+            &[FEATURE_PASSKEY_PROVIDER],
+            SERVER_NONCE,
+            CONNECTION_ID,
+            AgentState::Unlocked,
+            9,
+            ConnectionLimits::default(),
+        ),
+        Err(ConnectionError::UnsupportedFeature)
+    ));
 }
 
 #[test]
