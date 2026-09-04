@@ -2,6 +2,7 @@
 #include <bcrypt.h>
 #include <shellapi.h>
 #include <shlobj.h>
+#include <shobjidl_core.h>
 
 #include <winrt/Windows.ApplicationModel.h>
 #include <winrt/Windows.Foundation.h>
@@ -776,13 +777,50 @@ namespace
         validate_external_location(*exact, install_folder);
     }
 
-    void run_provider_registration(
+    std::wstring desktop_application_user_model_id(
         std::filesystem::path const& install_folder,
+        PackageVersion const& expected_version)
+    {
+        PackageManager const manager;
+        std::uint64_t const expected = comparable_version(expected_version);
+        std::wstring application_user_model_id;
+        for (Package const& package : current_user_packages(manager))
+        {
+            if (comparable_version(package.Id().Version()) != expected)
+            {
+                continue;
+            }
+            if (!application_user_model_id.empty() ||
+                !package.Status().VerifyIsOK())
+            {
+                fail(
+                    L"Librarian refused an ambiguous or unhealthy package "
+                    L"identity.");
+            }
+            validate_external_location(package, install_folder);
+            application_user_model_id = package.Id().FamilyName().c_str();
+            application_user_model_id.append(L"!Desktop");
+        }
+        if (application_user_model_id.empty())
+        {
+            fail(L"Librarian could not locate its desktop identity.");
+        }
+        return application_user_model_id;
+    }
+
+    void run_provider_registration(
+        std::wstring_view application_user_model_id,
         bool register_provider);
 
-    void remove_current_user_identity()
+    void remove_current_user_identity(
+        std::filesystem::path const& install_folder,
+        PackageVersion const& expected_version)
     {
-        run_provider_registration(module_path().parent_path(), false);
+        run_provider_registration(
+            desktop_application_user_model_id(
+                install_folder,
+                expected_version),
+            false);
         PackageManager const manager;
         for (Package const& package : current_user_packages(manager))
         {
@@ -858,34 +896,45 @@ namespace
     }
 
     void run_provider_registration(
-        std::filesystem::path const& install_folder,
+        std::wstring_view application_user_model_id,
         bool register_provider)
     {
-        std::filesystem::path const provider =
-            install_folder / L"Librarian.PasskeyProvider.exe";
-        std::wstring command_line = quote_argument(provider.native());
-        command_line.append(
-            register_provider ? L" --register" : L" --unregister");
+        winrt::com_ptr<IApplicationActivationManager> activation_manager;
+        if (FAILED(CoCreateInstance(
+                CLSID_ApplicationActivationManager,
+                nullptr,
+                CLSCTX_INPROC_SERVER,
+                IID_PPV_ARGS(activation_manager.put()))))
+        {
+            fail(
+                L"Librarian could not initialize passkey provider "
+                L"registration.");
+        }
 
-        STARTUPINFOW startup{};
-        startup.cb = sizeof(startup);
-        PROCESS_INFORMATION information{};
-        if (!CreateProcessW(
-                provider.c_str(),
-                command_line.data(),
-                nullptr,
-                nullptr,
-                FALSE,
-                CREATE_NO_WINDOW,
-                nullptr,
-                install_folder.c_str(),
-                &startup,
-                &information))
+        DWORD process_id = 0U;
+        std::wstring const model_id{application_user_model_id};
+        HRESULT const activation_result =
+            activation_manager->ActivateApplication(
+                model_id.c_str(),
+                register_provider ?
+                    L"--register-passkey-provider" :
+                    L"--unregister-passkey-provider",
+                AO_NONE,
+                &process_id);
+        if (FAILED(activation_result) || process_id == 0U)
         {
             fail(L"Librarian could not start passkey provider registration.");
         }
-        file_handle const process{information.hProcess};
-        file_handle const thread{information.hThread};
+
+        file_handle const process{OpenProcess(
+            SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION |
+                PROCESS_TERMINATE,
+            FALSE,
+            process_id)};
+        if (process.value == nullptr)
+        {
+            fail(L"Librarian could not observe passkey provider registration.");
+        }
         DWORD const wait_result = WaitForSingleObject(process.value, 30'000U);
         if (wait_result == WAIT_TIMEOUT)
         {
@@ -898,7 +947,25 @@ namespace
             fail(L"Librarian could not wait for passkey provider registration.");
         }
         DWORD exit_code{};
-        if (!GetExitCodeProcess(process.value, &exit_code) || exit_code != 0U)
+        if (!GetExitCodeProcess(process.value, &exit_code))
+        {
+            fail(L"Librarian could not update passkey provider registration.");
+        }
+        // The package-identified desktop command validates its installed
+        // identity before calling the Windows registration API. Its
+        // OperationFailed public result is therefore the narrow
+        // platform-unavailable case: keep password fallback, desktop launch,
+        // and browser status available. Identity, activation, timeout, and
+        // unexpected failures remain fatal.
+        constexpr DWORD provider_platform_unavailable = 11U;
+        if (register_provider && exit_code == provider_platform_unavailable)
+        {
+            OutputDebugStringW(
+                L"Librarian passkey provider registration is unavailable; "
+                L"continuing with password fallback.");
+            return;
+        }
+        if (exit_code != 0U)
         {
             fail(L"Librarian could not update passkey provider registration.");
         }
@@ -1128,14 +1195,20 @@ int WINAPI wWinMain(
             validate_payload(install_folder);
         if (requested == operation::unregister)
         {
-            remove_current_user_identity();
+            remove_current_user_identity(
+                install_folder,
+                manifest.version);
             return 0;
         }
 
         ensure_current_user_identity(
             install_folder,
             manifest.version);
-        run_provider_registration(install_folder, true);
+        run_provider_registration(
+            desktop_application_user_model_id(
+                install_folder,
+                manifest.version),
+            true);
         if (requested == operation::launch)
         {
             launch_desktop(install_folder);

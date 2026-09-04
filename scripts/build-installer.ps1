@@ -10,10 +10,10 @@ param(
     [string]$ProductVersion,
 
     [ValidatePattern("^[a-p]{32}$")]
-    [string]$ChromeExtensionId = "abcdefghijklmnopabcdefghijklmnop",
+    [string]$ChromeExtensionId = "jiifjoajanfeoabbkmpodkgfmabhikkh",
 
     [ValidatePattern("^[a-p]{32}$")]
-    [string]$EdgeExtensionId = "ponmlkjihgfedcbaponmlkjihgfedcba",
+    [string]$EdgeExtensionId = "jiifjoajanfeoabbkmpodkgfmabhikkh",
 
     [ValidatePattern("^[A-Fa-f0-9]{40}$")]
     [string]$DevelopmentCertificateThumbprint,

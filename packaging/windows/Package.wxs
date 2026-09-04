@@ -84,7 +84,7 @@
         <CreateFolder>
           <PermissionEx
             Id="LibrarianInstallFolderPermissions"
-            Sddl="O:SYG:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;GRGX;;;BU)" />
+            Sddl="O:SYG:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;BU)" />
         </CreateFolder>
         <File
           Id="DesktopExecutable"

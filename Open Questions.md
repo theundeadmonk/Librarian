@@ -13,12 +13,13 @@ These items are intentionally unresolved. They should be answered through feasib
 ## Windows and browser feasibility
 
 - Confirm packaging, registration, upgrades, and removal of the native passkey component.
-- Define the Chrome native-messaging protocol between the extension and native
-  host through
+- Review and accept, amend, or reject the status-only Chrome and Edge
+  native-messaging schema, extension identity, cancellation lifecycle, and
+  deterministic missing, locked, updating, and incompatible behavior proposed
+  by [[ADRs/0008 Chromium Native Messaging Boundary]] through
   [issue #16](https://github.com/theundeadmonk/Librarian/issues/16). The
-  host-to-agent boundary follows
+  host-to-agent boundary remains governed by
   [[ADRs/0006 Authenticated Local IPC and Client Authorization]].
-- Decide what the extension should do when the native app is missing, locked, updating, or incompatible.
 - Test form detection against multi-step, dynamically rendered, embedded, and unusual sign-in forms.
 - Define strict origin-matching rules and the UI for suspicious or ambiguous matches.
 

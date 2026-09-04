@@ -3,6 +3,8 @@
 #include <cstddef>
 #include <cstdint>
 
+#include "librarian/windows_passkey/registration.h"
+
 extern "C"
 {
     constexpr std::size_t librarian_passkey_credential_id_bytes = 32;
@@ -110,13 +112,6 @@ extern "C"
 
     std::uint32_t librarian_windows_passkey_provider_run(
         librarian_passkey_provider_callbacks const* callbacks) noexcept;
-
-    std::uint32_t librarian_windows_passkey_provider_register() noexcept;
-
-    std::uint32_t librarian_windows_passkey_provider_unregister() noexcept;
-
-    std::uint32_t librarian_windows_passkey_provider_registration_state(
-        std::uint32_t* registered) noexcept;
 
     std::uint32_t librarian_windows_passkey_provider_request_cancelled(
         std::uint8_t const* transaction_id,

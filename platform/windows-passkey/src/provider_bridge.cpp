@@ -53,22 +53,6 @@ namespace
         0x9fe6,
         0x4145,
         {0xbb, 0xa0, 0x95, 0x01, 0x0f, 0x43, 0xbf, 0xbe}};
-    constexpr std::uint8_t authenticator_info[]{
-        0xa5,
-        0x01, 0x81, 0x68, 'F', 'I', 'D', 'O', '_', '2', '_', '1',
-        0x03, 0x50,
-        0xb7, 0x9a, 0x73, 0xf8, 0x4b, 0xd4, 0x45, 0xe7,
-        0xa8, 0x17, 0xb6, 0x2f, 0x31, 0xac, 0xae, 0xc5,
-        0x04, 0xa3,
-        0x62, 'r', 'k', 0xf5,
-        0x62, 'u', 'p', 0xf5,
-        0x62, 'u', 'v', 0xf5,
-        0x09, 0x81, 0x68, 'i', 'n', 't', 'e', 'r', 'n', 'a', 'l',
-        0x0a, 0x81, 0xa2,
-        0x63, 'a', 'l', 'g', 0x26,
-        0x64, 't', 'y', 'p', 'e',
-        0x6a, 'p', 'u', 'b', 'l', 'i', 'c', '-', 'k', 'e', 'y'};
-
     std::atomic<std::uint32_t> server_objects{};
     std::atomic<std::uint32_t> server_locks{};
     std::atomic<std::int64_t> last_activity_ticks{};
@@ -259,18 +243,6 @@ namespace
     using free_credentials_function = void(WINAPI*)(
         DWORD,
         PWEBAUTHN_PLUGIN_CREDENTIAL_DETAILS);
-    using get_authenticator_state_function = HRESULT(WINAPI*)(
-        REFCLSID,
-        AUTHENTICATOR_STATE*);
-    using add_authenticator_function = HRESULT(WINAPI*)(
-        PCWEBAUTHN_PLUGIN_ADD_AUTHENTICATOR_OPTIONS,
-        PWEBAUTHN_PLUGIN_ADD_AUTHENTICATOR_RESPONSE*);
-    using free_add_authenticator_response_function = void(WINAPI*)(
-        PWEBAUTHN_PLUGIN_ADD_AUTHENTICATOR_RESPONSE);
-    using update_authenticator_function = HRESULT(WINAPI*)(
-        PCWEBAUTHN_PLUGIN_UPDATE_AUTHENTICATOR_DETAILS);
-    using remove_authenticator_function = HRESULT(WINAPI*)(REFCLSID);
-
     class webauthn_api final
     {
     public:
@@ -296,17 +268,6 @@ namespace
                 "WebAuthNPluginAuthenticatorGetAllCredentials");
             free_credentials = resolve<free_credentials_function>(
                 "WebAuthNPluginAuthenticatorFreeCredentialDetailsArray");
-            get_authenticator_state = resolve<get_authenticator_state_function>(
-                "WebAuthNPluginGetAuthenticatorState");
-            add_authenticator = resolve<add_authenticator_function>(
-                "WebAuthNPluginAddAuthenticator");
-            free_add_authenticator_response =
-                resolve<free_add_authenticator_response_function>(
-                    "WebAuthNPluginFreeAddAuthenticatorResponse");
-            update_authenticator = resolve<update_authenticator_function>(
-                "WebAuthNPluginUpdateAuthenticatorDetails");
-            remove_authenticator = resolve<remove_authenticator_function>(
-                "WebAuthNPluginRemoveAuthenticator");
         }
 
         webauthn_api(webauthn_api const&) = delete;
@@ -328,14 +289,6 @@ namespace
                    remove_credentials != nullptr;
         }
 
-        [[nodiscard]] bool registration_complete() const noexcept
-        {
-            return module_ != nullptr && get_authenticator_state != nullptr &&
-                   add_authenticator != nullptr &&
-                   free_add_authenticator_response != nullptr &&
-                   update_authenticator != nullptr && remove_authenticator != nullptr;
-        }
-
         [[nodiscard]] bool credential_cache_complete() const noexcept
         {
             return module_ != nullptr && remove_credentials != nullptr &&
@@ -352,11 +305,6 @@ namespace
         remove_credentials_function remove_credentials{};
         get_all_credentials_function get_all_credentials{};
         free_credentials_function free_credentials{};
-        get_authenticator_state_function get_authenticator_state{};
-        add_authenticator_function add_authenticator{};
-        free_add_authenticator_response_function free_add_authenticator_response{};
-        update_authenticator_function update_authenticator{};
-        remove_authenticator_function remove_authenticator{};
 
     private:
         template <typename function_type>
@@ -1275,101 +1223,6 @@ extern "C" std::uint32_t librarian_windows_passkey_provider_request_cancelled(
                    active_cancelled.load(std::memory_order_acquire)
                ? 1
                : 0;
-}
-
-extern "C" std::uint32_t librarian_windows_passkey_provider_register() noexcept
-{
-    webauthn_api const api;
-    if (!api.registration_complete())
-    {
-        return static_cast<std::uint32_t>(HRESULT_FROM_WIN32(ERROR_PROC_NOT_FOUND));
-    }
-
-    AUTHENTICATOR_STATE state{};
-    HRESULT result = api.get_authenticator_state(provider_clsid, &state);
-    if (result == NTE_NOT_FOUND)
-    {
-        WEBAUTHN_PLUGIN_ADD_AUTHENTICATOR_OPTIONS const options{
-            L"Librarian",
-            provider_clsid,
-            nullptr,
-            nullptr,
-            nullptr,
-            static_cast<DWORD>(std::size(authenticator_info)),
-            authenticator_info,
-            0U,
-            nullptr};
-        PWEBAUTHN_PLUGIN_ADD_AUTHENTICATOR_RESPONSE response{};
-        result = api.add_authenticator(&options, &response);
-        if (FAILED(result))
-        {
-            return static_cast<std::uint32_t>(result);
-        }
-        bool const valid_response =
-            response != nullptr && response->pbOpSignPubKey != nullptr &&
-            response->cbOpSignPubKey != 0U;
-        api.free_add_authenticator_response(response);
-        if (!valid_response)
-        {
-            static_cast<void>(api.remove_authenticator(provider_clsid));
-            return static_cast<std::uint32_t>(E_UNEXPECTED);
-        }
-        return 0;
-    }
-    if (FAILED(result))
-    {
-        return static_cast<std::uint32_t>(result);
-    }
-
-    WEBAUTHN_PLUGIN_UPDATE_AUTHENTICATOR_DETAILS const details{
-        L"Librarian",
-        provider_clsid,
-        provider_clsid,
-        nullptr,
-        nullptr,
-        static_cast<DWORD>(std::size(authenticator_info)),
-        authenticator_info,
-        0U,
-        nullptr};
-    return static_cast<std::uint32_t>(api.update_authenticator(&details));
-}
-
-extern "C" std::uint32_t librarian_windows_passkey_provider_unregister() noexcept
-{
-    webauthn_api const api;
-    if (!api.registration_complete())
-    {
-        return static_cast<std::uint32_t>(HRESULT_FROM_WIN32(ERROR_PROC_NOT_FOUND));
-    }
-    HRESULT const result = api.remove_authenticator(provider_clsid);
-    return result == NTE_NOT_FOUND ? 0U : static_cast<std::uint32_t>(result);
-}
-
-extern "C" std::uint32_t librarian_windows_passkey_provider_registration_state(
-    std::uint32_t* registered) noexcept
-{
-    if (registered == nullptr)
-    {
-        return static_cast<std::uint32_t>(E_POINTER);
-    }
-    *registered = 0;
-    webauthn_api const api;
-    if (!api.registration_complete())
-    {
-        return static_cast<std::uint32_t>(HRESULT_FROM_WIN32(ERROR_PROC_NOT_FOUND));
-    }
-    AUTHENTICATOR_STATE state{};
-    HRESULT const result = api.get_authenticator_state(provider_clsid, &state);
-    if (result == NTE_NOT_FOUND)
-    {
-        return 0;
-    }
-    if (FAILED(result))
-    {
-        return static_cast<std::uint32_t>(result);
-    }
-    *registered = 1;
-    return 0;
 }
 
 extern "C" std::uint32_t librarian_windows_passkey_provider_run(

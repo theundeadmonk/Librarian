@@ -29,6 +29,13 @@ and documented origin/parent-window arguments, and waits for
 The real passkey-provider role is package-identified in the same external
 location. The launcher registers it with Windows only after package identity
 converges, and unregisters it before removing a temporary development identity.
+It invokes narrow, headless command modes on the package-identified desktop
+application, which owns the shared registration API boundary just as Microsoft's
+Passkey Manager sample does. The provider's COM-server application identity is
+reserved exclusively for Windows-initiated passkey operations. If the
+identity-validated command reports that the Windows registration API is
+unavailable, the launcher preserves master-password fallback and continues to
+the desktop or browser host. Every other failure remains fail closed.
 
 The WinUI app is built with the Windows App SDK self-contained deployment mode
 and Microsoft's hybrid CRT configuration. Its required Windows App SDK runtime
@@ -42,10 +49,12 @@ features. They are offered only when the corresponding browser is detected.
 The inert, colocated manifests are always installed and included in the
 MSI-bound payload hashes; the optional features publish only their machine
 registry keys, so an unselected browser cannot discover the host. Each manifest
-allows one exact extension origin. Setup never bundles, force-installs, or
-trusts a browser extension; issue
-[#16](https://github.com/theundeadmonk/Librarian/issues/16) owns the real store
-IDs and browser connection.
+allows one exact extension origin. Setup never bundles or force-installs a
+browser extension. The source manifest contains a public-only development key
+whose derived ID is allowed by the default fixture in both browsers. It is not
+a signing key or a published-store identity. Release packaging must replace
+the fixture IDs with the independently assigned Chrome Web Store and Edge
+Add-ons IDs.
 
 The identity-launcher path remains relative to each colocated manifest. Chrome
 and Edge both explicitly support a path relative to the manifest directory on
@@ -89,9 +98,11 @@ Outputs are written below `artifacts\installer\`:
 - `payload\Librarian.Identity.msix`
 - `payload\Librarian.Release.json`
 
-The default Chrome and Edge extension IDs are disposable `[a-p]{32}` fixture
-values. They are not published extension identities. An unsigned fixture must
-never be installed.
+The default Chrome and Edge extension ID is the deterministic development ID
+`jiifjoajanfeoabbkmpodkgfmabhikkh`. It is derived from the public key in
+`apps/browser-extension/manifest.json`, contains no private key material, and
+is not a published extension identity. An unsigned fixture must never be
+installed.
 
 The structural suite decompiles the MSI, extracts the Burn bundle, checks the
 four product roles and launcher boundary, feature conditions, registry

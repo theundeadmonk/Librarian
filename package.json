@@ -10,6 +10,7 @@
   "scripts": {
     "build:extension": "npm run build --workspace @librarian/browser-extension",
     "check:extension": "npm run check --workspace @librarian/browser-extension",
+    "test:extension": "npm run test --workspace @librarian/browser-extension",
     "check:test-parity": "node --test scripts/rust-test-parity.test.mjs"
   },
   "engines": {

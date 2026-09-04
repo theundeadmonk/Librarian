@@ -122,11 +122,12 @@ below are complete.
 Use two distinct, versioned protocols:
 
 - **Extension protocol:** Chromium native messaging between the extension and
-  the native host. Requests include the verified browser origin, operation
-  type, and a short-lived correlation identifier. Responses disclose no more
-  than the selected operation requires. Its exact schema and browser-specific
-  authorization remain owned by
-  [issue #16](https://github.com/theundeadmonk/Librarian/issues/16).
+  the native host. [[ADRs/0008 Chromium Native Messaging Boundary]] proposes
+  the exact status-only schema, caller-extension authorization, one-request
+  connection lifecycle, compatibility, cancellation, and public failure
+  states through [issue #16](https://github.com/theundeadmonk/Librarian/issues/16).
+  Website-origin credential operations remain closed until issue #17 amends
+  that protocol.
 - **Trusted local protocol:** mutually authenticated, local-only Windows named
   pipes between the desktop app, native host, passkey provider, and vault
   agent. [[ADRs/0006 Authenticated Local IPC and Client Authorization]]

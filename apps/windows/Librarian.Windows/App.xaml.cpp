@@ -2,9 +2,14 @@
 #include "App.xaml.h"
 #include "MainWindow.xaml.h"
 
+#include "librarian/windows_passkey/registration.h"
+
+#include <shellapi.h>
 #include <shlobj.h>
 
 #include <winrt/Windows.ApplicationModel.h>
+#include <winrt/Windows.ApplicationModel.Activation.h>
+#include <winrt/Microsoft.Windows.AppLifecycle.h>
 
 #include <array>
 #include <cstdint>
@@ -201,6 +206,81 @@ namespace
             return false;
         }
     }
+
+    struct process_arguments
+    {
+        bool valid{false};
+        winrt::hstring command;
+    };
+
+    process_arguments read_process_arguments()
+    {
+        int argument_count = 0;
+        LPWSTR* arguments = CommandLineToArgvW(
+            GetCommandLineW(),
+            &argument_count);
+        if (arguments == nullptr)
+        {
+            return {};
+        }
+        struct argument_guard
+        {
+            LPWSTR* value;
+            ~argument_guard()
+            {
+                LocalFree(value);
+            }
+        } const guard{arguments};
+
+        if (argument_count == 1)
+        {
+            return {.valid = true};
+        }
+        if (argument_count == 2)
+        {
+            return {
+                .valid = true,
+                .command = winrt::hstring{arguments[1]},
+            };
+        }
+        return {};
+    }
+
+    process_arguments read_activation_arguments()
+    {
+        using Microsoft::Windows::AppLifecycle::AppInstance;
+        using Microsoft::Windows::AppLifecycle::ExtendedActivationKind;
+        using Windows::ApplicationModel::Activation::ILaunchActivatedEventArgs;
+
+        try
+        {
+            auto const activation =
+                AppInstance::GetCurrent().GetActivatedEventArgs();
+            if (activation.Kind() != ExtendedActivationKind::Launch)
+            {
+                return {};
+            }
+            auto const launch =
+                activation.Data().try_as<ILaunchActivatedEventArgs>();
+            if (!launch)
+            {
+                return {};
+            }
+            winrt::hstring const command = launch.Arguments();
+            if (!command.empty())
+            {
+                return {
+                    .valid = true,
+                    .command = command,
+                };
+            }
+            return read_process_arguments();
+        }
+        catch (winrt::hresult_error const&)
+        {
+            return {};
+        }
+    }
 }
 
 namespace winrt::Librarian::Windows::implementation
@@ -219,7 +299,8 @@ namespace winrt::Librarian::Windows::implementation
 #endif
     }
 
-    void App::OnLaunched([[maybe_unused]] LaunchActivatedEventArgs const& event)
+    void App::OnLaunched(
+        [[maybe_unused]] LaunchActivatedEventArgs const& event)
     {
         if (!has_current_product_identity())
         {
@@ -232,6 +313,47 @@ namespace winrt::Librarian::Windows::implementation
                 MB_OK | MB_ICONERROR | MB_SETFOREGROUND);
             Application::Current().Exit();
             return;
+        }
+        process_arguments const request = read_activation_arguments();
+        if (!request.valid)
+        {
+            ExitProcess(1U);
+        }
+        winrt::hstring const& arguments = request.command;
+        if (!arguments.empty())
+        {
+            constexpr DWORD operation_failed = 11U;
+            DWORD exit_code = operation_failed;
+            if (arguments == L"--register-passkey-provider")
+            {
+                exit_code =
+                    librarian_windows_passkey_provider_register() == 0U ?
+                        0U :
+                        operation_failed;
+            }
+            else if (arguments == L"--unregister-passkey-provider")
+            {
+                exit_code =
+                    librarian_windows_passkey_provider_unregister() == 0U ?
+                        0U :
+                        operation_failed;
+            }
+            else if (arguments == L"--passkey-provider-registration-state")
+            {
+                constexpr DWORD not_found = 4U;
+                std::uint32_t registered = 0U;
+                std::uint32_t const result =
+                    librarian_windows_passkey_provider_registration_state(
+                        &registered);
+                exit_code = result != 0U ?
+                                operation_failed :
+                                (registered == 1U ? 0U : not_found);
+            }
+            else
+            {
+                exit_code = 1U;
+            }
+            ExitProcess(exit_code);
         }
         if (!window)
         {

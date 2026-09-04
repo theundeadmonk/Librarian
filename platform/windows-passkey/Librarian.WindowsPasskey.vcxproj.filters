@@ -12,7 +12,13 @@
     <ClInclude Include="include\librarian\windows_passkey\foundation.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="include\librarian\windows_passkey\registration.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClCompile Include="src\foundation.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="src\registration.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
   </ItemGroup>

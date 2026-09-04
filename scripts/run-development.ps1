@@ -8,7 +8,9 @@ param(
 
     [switch]$ValidateOnly,
 
-    [switch]$SmokeTest
+    [switch]$SmokeTest,
+
+    [switch]$SkipPasskeyProviderRegistration
 )
 
 Set-StrictMode -Version Latest
@@ -86,6 +88,10 @@ function Get-ManifestContext {
         "http://schemas.microsoft.com/appx/manifest/uap/windows10"
     )
     $namespaceManager.AddNamespace(
+        "uap10",
+        "http://schemas.microsoft.com/appx/manifest/uap/windows10/10"
+    )
+    $namespaceManager.AddNamespace(
         "com",
         "http://schemas.microsoft.com/appx/manifest/com/windows10"
     )
@@ -104,17 +110,23 @@ function Add-DevelopmentApplications {
 
     $package = $Manifest.DocumentElement
     $comNamespace = "http://schemas.microsoft.com/appx/manifest/com/windows10"
+    $uap10Namespace = "http://schemas.microsoft.com/appx/manifest/uap/windows10/10"
     $package.SetAttribute("xmlns:com", $comNamespace)
+    $package.SetAttribute("xmlns:uap10", $uap10Namespace)
     $ignorableNamespaces = @(
         $package.IgnorableNamespaces.Split(
             [char[]]@(" ", "`t", "`r", "`n"),
             [StringSplitOptions]::RemoveEmptyEntries
         )
     )
-    if ("com" -notin $ignorableNamespaces) {
+    foreach ($ignorableNamespace in @("com", "uap10")) {
+        if ($ignorableNamespace -in $ignorableNamespaces) {
+            continue
+        }
+        $ignorableNamespaces += $ignorableNamespace
         $package.SetAttribute(
             "IgnorableNamespaces",
-            (($ignorableNamespaces + "com") -join " ")
+            ($ignorableNamespaces -join " ")
         )
     }
 
@@ -134,7 +146,9 @@ function Add-DevelopmentApplications {
         $null -eq $applications -or
         $null -eq $desktop -or
         $desktop.Executable -ne "Librarian.Windows.exe" -or
-        $desktop.EntryPoint -ne "Windows.FullTrustApplication"
+        $desktop.EntryPoint -ne "Windows.FullTrustApplication" -or
+        $desktop.GetAttribute("TrustLevel", $uap10Namespace) -ne "mediumIL" -or
+        $desktop.GetAttribute("RuntimeBehavior", $uap10Namespace) -ne "packagedClassicApp"
     ) {
         throw "The generated Windows package layout has an unexpected desktop application."
     }
@@ -180,6 +194,8 @@ function Add-DevelopmentApplications {
         $application.SetAttribute("Id", $applicationSpec.Id)
         $application.SetAttribute("Executable", $applicationSpec.Executable)
         $application.SetAttribute("EntryPoint", "Windows.FullTrustApplication")
+        $application.SetAttribute("TrustLevel", $uap10Namespace, "mediumIL")
+        $application.SetAttribute("RuntimeBehavior", $uap10Namespace, "win32App")
 
         $visualElements = $Manifest.CreateElement(
             "uap",
@@ -294,6 +310,21 @@ function Stop-ExpectedProcess {
     catch [System.InvalidOperationException] {
         # The process exited between the state and path checks.
     }
+}
+
+function Invoke-ProviderCommand {
+    param(
+        [Parameter(Mandatory)]
+        [string]$PackageFamilyName,
+
+        [Parameter(Mandatory)]
+        [string]$Argument
+    )
+
+    return [LibrarianDevelopmentPackageActivator]::ActivateAndWait(
+        "$PackageFamilyName!Desktop",
+        $Argument
+    )
 }
 
 try {
@@ -570,22 +601,6 @@ try {
         throw "The loose package exposes an unexpected application entry."
     }
 
-    & $providerPath --registration-state
-    $providerRegistrationState = $LASTEXITCODE
-    if ($providerRegistrationState -eq 4) {
-        & $providerPath --register
-        if ($LASTEXITCODE -ne 0) {
-            throw "The passkey provider registration failed with exit code $LASTEXITCODE."
-        }
-        $providerRegisteredByScript = $true
-    }
-    elseif ($providerRegistrationState -ne 0) {
-        throw (
-            "The passkey provider registration state could not be read " +
-            "(exit code $providerRegistrationState)."
-        )
-    }
-
     if (-not ("LibrarianDevelopmentPackageActivator" -as [type])) {
         Add-Type -TypeDefinition @"
 using System;
@@ -613,7 +628,33 @@ public class LibrarianDevelopmentApplicationActivationManager { }
 
 public static class LibrarianDevelopmentPackageActivator
 {
-    public static uint Activate(string applicationUserModelId)
+    private const uint ProcessQueryLimitedInformation = 0x1000;
+    private const uint Synchronize = 0x00100000;
+    private const uint WaitObject0 = 0;
+    private const uint WaitTimeout = 258;
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern IntPtr OpenProcess(
+        uint desiredAccess,
+        bool inheritHandle,
+        uint processId);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern uint WaitForSingleObject(
+        IntPtr handle,
+        uint milliseconds);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool GetExitCodeProcess(
+        IntPtr process,
+        out uint exitCode);
+
+    [DllImport("kernel32.dll")]
+    private static extern bool CloseHandle(IntPtr handle);
+
+    private static uint ActivateCore(
+        string applicationUserModelId,
+        string arguments)
     {
         var manager =
             (ILibrarianDevelopmentApplicationActivationManager)
@@ -623,7 +664,7 @@ public static class LibrarianDevelopmentPackageActivator
             uint processId;
             var result = manager.ActivateApplication(
                 applicationUserModelId,
-                null,
+                arguments,
                 LibrarianDevelopmentPackageActivateOptions.None,
                 out processId);
             Marshal.ThrowExceptionForHR(result);
@@ -634,8 +675,75 @@ public static class LibrarianDevelopmentPackageActivator
             Marshal.FinalReleaseComObject(manager);
         }
     }
+
+    public static uint Activate(string applicationUserModelId)
+    {
+        return ActivateCore(applicationUserModelId, null);
+    }
+
+    public static int ActivateAndWait(
+        string applicationUserModelId,
+        string arguments)
+    {
+        var processId = ActivateCore(applicationUserModelId, arguments);
+        var process = OpenProcess(
+            Synchronize | ProcessQueryLimitedInformation,
+            false,
+            processId);
+        if (process == IntPtr.Zero)
+        {
+            throw new System.ComponentModel.Win32Exception(
+                Marshal.GetLastWin32Error());
+        }
+        try
+        {
+            var waitResult = WaitForSingleObject(process, 30000);
+            if (waitResult == WaitTimeout)
+            {
+                throw new TimeoutException(
+                    "The packaged development command timed out.");
+            }
+            if (waitResult != WaitObject0)
+            {
+                throw new System.ComponentModel.Win32Exception(
+                    Marshal.GetLastWin32Error());
+            }
+            uint exitCode;
+            if (!GetExitCodeProcess(process, out exitCode))
+            {
+                throw new System.ComponentModel.Win32Exception(
+                    Marshal.GetLastWin32Error());
+            }
+            return exitCode <= Int32.MaxValue ? (int)exitCode : 1;
+        }
+        finally
+        {
+            CloseHandle(process);
+        }
+    }
 }
 "@
+    }
+
+    if (-not $SkipPasskeyProviderRegistration) {
+        $providerRegistrationState = Invoke-ProviderCommand `
+            -PackageFamilyName $package.PackageFamilyName `
+            -Argument "--passkey-provider-registration-state"
+        if ($providerRegistrationState -eq 4) {
+            $providerRegisterExitCode = Invoke-ProviderCommand `
+                -PackageFamilyName $package.PackageFamilyName `
+                -Argument "--register-passkey-provider"
+            if ($providerRegisterExitCode -ne 0) {
+                throw "The passkey provider registration failed with exit code $providerRegisterExitCode."
+            }
+            $providerRegisteredByScript = $true
+        }
+        elseif ($providerRegistrationState -ne 0) {
+            throw (
+                "The passkey provider registration state could not be read " +
+                "(exit code $providerRegistrationState)."
+            )
+        }
     }
 
     $desktopProcessId = [LibrarianDevelopmentPackageActivator]::Activate(
@@ -688,11 +796,13 @@ finally {
         finally {
             try {
                 if ($providerRegisteredByScript) {
-                    & $providerPath --unregister
-                    if ($LASTEXITCODE -ne 0) {
+                    $providerUnregisterExitCode = Invoke-ProviderCommand `
+                        -PackageFamilyName $package.PackageFamilyName `
+                        -Argument "--unregister-passkey-provider"
+                    if ($providerUnregisterExitCode -ne 0) {
                         throw (
                             "The temporary passkey provider registration could not be removed " +
-                            "(exit code $LASTEXITCODE)."
+                            "(exit code $providerUnregisterExitCode)."
                         )
                     }
                 }

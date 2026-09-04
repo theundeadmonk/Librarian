@@ -236,6 +236,27 @@ Invoke-CheckedProcess `
     ) `
     -WorkingDirectory $repoRoot
 
+Invoke-CheckedProcess `
+    -Label "Extension protocol tests" `
+    -FilePath $toolchain.Node `
+    -Arguments @(
+        "--test",
+        "apps\browser-extension\tests\native.test.mjs"
+    ) `
+    -WorkingDirectory $repoRoot
+
+Invoke-CheckedProcess `
+    -Label "Extension package" `
+    -FilePath $powerShellHost `
+    -Arguments @(
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        (Join-Path $PSScriptRoot "package-browser-extension.ps1")
+    ) `
+    -WorkingDirectory $repoRoot
+
 $solution = Join-Path $repoRoot "Librarian.sln"
 $msbuildRestoreLog = Join-Path $logs "msbuild-restore-$Configuration-$Platform.log"
 $msbuildLog = Join-Path $logs "msbuild-$Configuration-$Platform.log"

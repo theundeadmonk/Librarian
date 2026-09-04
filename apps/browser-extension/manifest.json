@@ -1,11 +1,18 @@
 {
   "manifest_version": 3,
-  "name": "Librarian (Foundation)",
-  "description": "Build-only foundation. Credential access is not implemented.",
+  "name": "Librarian",
+  "description": "Connects Chrome and Edge to the Librarian desktop app.",
   "version": "0.1.0",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA1YS3UzTM1QE8p77bMpfqwpSHs3kbRtYjkU+Gz764vOfrxVT1tk0acPw8fUcbM+s+Qo9ku787Sw81o/HHeFUeiv4eaPnXGH/aaByu7F1tcFhJ4m57WP6e+kS6EOeYuFtiGWpCxJBhMv9x2+POQKhYL6AEEmGZhSzG7w7fCMyPq69YDrS60HT+dGvqpUkt/d4fNzOBxHjyLfnz1praK59UpG6rPqxO4399SC8UN7/jjljfgdeWZKUcpWww4UhzRAI2739L+uDTb8AHm+k6eDIBH/YCDMssUs/NakiSUzQlzWzIGIA3c7JVB4TJRb5zEmXfUXfOkBZ9nU/e6q6Q3QUnwQIDAQAB",
+  "minimum_chrome_version": "105",
   "background": {
     "service_worker": "dist/background.js",
     "type": "module"
   },
-  "permissions": []
+  "action": {
+    "default_title": "Check Librarian connection"
+  },
+  "permissions": [
+    "nativeMessaging"
+  ]
 }

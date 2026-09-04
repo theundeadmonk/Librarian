@@ -38,6 +38,8 @@ const AGENT_EXECUTABLE: &str = "Librarian.VaultAgent.exe";
 #[cfg(windows)]
 const DESKTOP_EXECUTABLE: &str = "Librarian.Windows.exe";
 #[cfg(windows)]
+const NATIVE_HOST_EXECUTABLE: &str = "Librarian.ChromiumNativeHost.exe";
+#[cfg(windows)]
 const PASSKEY_PROVIDER_EXECUTABLE: &str = "Librarian.PasskeyProvider.exe";
 #[cfg(windows)]
 const LOCAL_STATE_DIRECTORY: &str = "Librarian";
@@ -112,6 +114,12 @@ fn run() -> Result<(), HostError> {
     );
     let policies = vec![
         desktop_policy(
+            observation,
+            package_full_name,
+            package_family_name,
+            &install_root,
+        ),
+        native_host_policy(
             observation,
             package_full_name,
             package_family_name,
@@ -281,6 +289,26 @@ fn passkey_provider_policy(
         package_full_name: package_full_name.to_owned(),
         package_family_name: package_family_name.to_owned(),
         application_user_model_id: Some(format!("{package_family_name}!PasskeyProvider")),
+    }
+}
+
+#[cfg(windows)]
+fn native_host_policy(
+    current: &PeerObservation,
+    package_full_name: &str,
+    package_family_name: &str,
+    install_root: &Path,
+) -> PeerPolicy {
+    PeerPolicy {
+        role: ComponentRole::NativeHost,
+        session_id: current.session_id,
+        user_sid: current.user_sid.clone(),
+        logon_sid: current.logon_sid.clone(),
+        maximum_integrity_rid: MEDIUM_INTEGRITY_RID,
+        image_path: install_root.join(NATIVE_HOST_EXECUTABLE),
+        package_full_name: package_full_name.to_owned(),
+        package_family_name: package_family_name.to_owned(),
+        application_user_model_id: Some(format!("{package_family_name}!ChromiumNativeHost")),
     }
 }
 

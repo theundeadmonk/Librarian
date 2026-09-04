@@ -341,13 +341,13 @@ function Assert-BrowserState {
             Name = "Chrome"
             RegistryPath = $ChromeRegistryPath
             Manifest = "com.theundeadmonk.librarian.chrome.json"
-            Origin = "chrome-extension://abcdefghijklmnopabcdefghijklmnop/"
+            Origin = "chrome-extension://jiifjoajanfeoabbkmpodkgfmabhikkh/"
         },
         [PSCustomObject]@{
             Name = "Edge"
             RegistryPath = $EdgeRegistryPath
             Manifest = "com.theundeadmonk.librarian.edge.json"
-            Origin = "chrome-extension://ponmlkjihgfedcbaponmlkjihgfedcba/"
+            Origin = "chrome-extension://jiifjoajanfeoabbkmpodkgfmabhikkh/"
         }
     )) {
         $manifestPath = Join-Path $InstallFolder $browser.Manifest
@@ -979,7 +979,7 @@ try {
 
     Invoke-CurrentUserNativeHostLauncher `
         -LauncherPath $identityLauncher `
-        -Origin "chrome-extension://abcdefghijklmnopabcdefghijklmnop/" `
+        -Origin "chrome-extension://jiifjoajanfeoabbkmpodkgfmabhikkh/" `
         -ExpectedVersion $HighVersion
     Invoke-SuccessfulProcess `
         -Label "Repair with current-user identity" `

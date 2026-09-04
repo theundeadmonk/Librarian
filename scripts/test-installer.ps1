@@ -902,7 +902,7 @@ try {
         $null -ne $installFolderPermission -and
         $installFolderPermission.GetAttribute("Sddl") -eq (
             "O:SYG:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)" +
-            "(A;OICI;GRGX;;;BU)"
+            "(A;OICI;0x1200a9;;;BU)"
         )
     ) (
         "The Program Files directory must replace any pre-existing ACL with " +
