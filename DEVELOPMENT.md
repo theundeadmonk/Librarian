@@ -66,6 +66,12 @@ Rust tests use optimized test code with debug assertions and overflow checks
 enabled. This keeps the vault-agent integration suite's production request
 deadlines representative without relaxing those deadlines.
 
+Windows Rust commands use `--target x86_64-pc-windows-msvc`. The corresponding
+`.cargo/config.toml` setting statically links the CRT into the Rust executables
+and their C/C++ dependencies so a clean Windows PC needs no separate Visual C++
+Redistributable. Linux linkage is unchanged. Installer validation checks the
+actual shipped executable imports, not just the build configuration.
+
 ## Run the current Windows product
 
 After a successful Release build, start a development session without

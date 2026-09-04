@@ -1,0 +1,6 @@
+# The Windows installer must run on a clean PC without the VC++ Redistributable.
+# cc-rs also reads crt-static and uses /MT for the C/C++ bridges and SQLite.
+# Keep this target-specific so Linux builds and host build tools are unchanged
+# when Cargo is invoked with the explicit --target used by the build scripts.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

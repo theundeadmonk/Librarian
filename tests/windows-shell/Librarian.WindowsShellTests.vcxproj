@@ -49,6 +49,12 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClInclude Include="..\..\packaging\windows\identity-launcher\src\NativeHostStartup.h">
+      <Link>NativeHostStartup.h</Link>
+    </ClInclude>
+    <ClInclude Include="..\..\apps\windows\Librarian.Windows\DesktopLaunchArguments.h">
+      <Link>DesktopLaunchArguments.h</Link>
+    </ClInclude>
     <ClInclude Include="..\..\apps\windows\Librarian.Windows\DesktopClient.h">
       <Link>DesktopClient.h</Link>
     </ClInclude>

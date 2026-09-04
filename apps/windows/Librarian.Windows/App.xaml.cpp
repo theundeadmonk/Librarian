@@ -1,5 +1,6 @@
 #include "pch.h"
 #include "App.xaml.h"
+#include "DesktopLaunchArguments.h"
 #include "MainWindow.xaml.h"
 
 #include "librarian/windows_passkey/registration.h"
@@ -9,7 +10,6 @@
 
 #include <winrt/Windows.ApplicationModel.h>
 #include <winrt/Windows.ApplicationModel.Activation.h>
-#include <winrt/Microsoft.Windows.AppLifecycle.h>
 
 #include <array>
 #include <cstdint>
@@ -207,74 +207,36 @@ namespace
         }
     }
 
-    struct process_arguments
+    librarian::windows::DesktopLaunchRequest read_activation_arguments()
     {
-        bool valid{false};
-        winrt::hstring command;
-    };
-
-    process_arguments read_process_arguments()
-    {
-        int argument_count = 0;
-        LPWSTR* arguments = CommandLineToArgvW(
-            GetCommandLineW(),
-            &argument_count);
-        if (arguments == nullptr)
-        {
-            return {};
-        }
-        struct argument_guard
-        {
-            LPWSTR* value;
-            ~argument_guard()
-            {
-                LocalFree(value);
-            }
-        } const guard{arguments};
-
-        if (argument_count == 1)
-        {
-            return {.valid = true};
-        }
-        if (argument_count == 2)
-        {
-            return {
-                .valid = true,
-                .command = winrt::hstring{arguments[1]},
-            };
-        }
-        return {};
-    }
-
-    process_arguments read_activation_arguments()
-    {
-        using Microsoft::Windows::AppLifecycle::AppInstance;
-        using Microsoft::Windows::AppLifecycle::ExtendedActivationKind;
+        using Windows::ApplicationModel::AppInstance;
+        using Windows::ApplicationModel::Activation::ActivationKind;
         using Windows::ApplicationModel::Activation::ILaunchActivatedEventArgs;
 
         try
         {
-            auto const activation =
-                AppInstance::GetCurrent().GetActivatedEventArgs();
-            if (activation.Kind() != ExtendedActivationKind::Launch)
+            // Unlike the Windows App SDK wrapper, the platform API does not
+            // synthesize a Launch payload containing the entire command line.
+            auto const activation = AppInstance::GetActivatedEventArgs();
+            if (!activation)
+            {
+                return librarian::windows::ParseDesktopLaunchArguments(
+                    std::nullopt, GetCommandLineW());
+            }
+            if (activation.Kind() != ActivationKind::Launch)
             {
                 return {};
             }
             auto const launch =
-                activation.Data().try_as<ILaunchActivatedEventArgs>();
+                activation.try_as<ILaunchActivatedEventArgs>();
             if (!launch)
             {
                 return {};
             }
             winrt::hstring const command = launch.Arguments();
-            if (!command.empty())
-            {
-                return {
-                    .valid = true,
-                    .command = command,
-                };
-            }
-            return read_process_arguments();
+            return librarian::windows::ParseDesktopLaunchArguments(
+                std::wstring_view{command.c_str(), command.size()},
+                GetCommandLineW());
         }
         catch (winrt::hresult_error const&)
         {
@@ -314,12 +276,12 @@ namespace winrt::Librarian::Windows::implementation
             Application::Current().Exit();
             return;
         }
-        process_arguments const request = read_activation_arguments();
+        auto const request = read_activation_arguments();
         if (!request.valid)
         {
             ExitProcess(1U);
         }
-        winrt::hstring const& arguments = request.command;
+        std::wstring const& arguments = request.command;
         if (!arguments.empty())
         {
             constexpr DWORD operation_failed = 11U;

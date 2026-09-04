@@ -48,7 +48,7 @@
       Id="Desktop"
       Executable="Librarian.Windows.exe"
       uap10:TrustLevel="mediumIL"
-      uap10:RuntimeBehavior="packagedClassicApp">
+      uap10:RuntimeBehavior="win32App">
       <uap:VisualElements
         AppListEntry="none"
         DisplayName="Librarian"

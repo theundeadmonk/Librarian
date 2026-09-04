@@ -252,11 +252,7 @@ foreach ($applicationId in $expectedApplications.Keys) {
     if ($application.GetAttribute("TrustLevel", $namespaceManager.LookupNamespace("uap10")) -ne "mediumIL") {
         throw "Application '$applicationId' must use mediumIL."
     }
-    $expectedRuntimeBehavior = if ($applicationId -eq "Desktop") {
-        "packagedClassicApp"
-    } else {
-        "win32App"
-    }
+    $expectedRuntimeBehavior = "win32App"
     if (
         $application.GetAttribute(
             "RuntimeBehavior",

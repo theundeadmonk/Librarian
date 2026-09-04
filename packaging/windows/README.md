@@ -40,7 +40,12 @@ the desktop or browser host. Every other failure remains fail closed.
 The WinUI app is built with the Windows App SDK self-contained deployment mode
 and Microsoft's hybrid CRT configuration. Its required Windows App SDK runtime
 files are installed beside the executable, so the one setup does not require a
-separate Windows App SDK or Visual C++ Redistributable installation. The pinned
+separate Windows App SDK or Visual C++ Redistributable installation. The Rust
+product executables use the target-specific static CRT setting in
+`.cargo/config.toml`; their C/C++ bridges and bundled SQLite inherit that same
+linkage through `cc-rs`. Installer validation inspects all five Librarian
+executables extracted from the MSI and rejects external Visual C++ runtime
+imports, including the Rust roles. The pinned
 runtime currently contributes Microsoft's `RestartAgent.exe`; it is a runtime
 helper, not a fourth Librarian product role or package identity.
 

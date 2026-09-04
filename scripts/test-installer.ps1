@@ -1262,6 +1262,27 @@ try {
             "'$($manifestCase.Executable)' does not embed the expected " +
             "external package identity."
         )
+        if ($manifestCase.ApplicationId -eq "Desktop") {
+            $embeddedNamespaces.AddNamespace("asmv3", "urn:schemas-microsoft-com:asm.v3")
+            $embeddedNamespaces.AddNamespace("winrt", "urn:schemas-microsoft-com:winrt.v1")
+            # Version stamping must retain the compiler-generated registrations,
+            # not just the identity and version from the source app.manifest.
+            foreach ($runtimeClass in @(
+                @{ File = "Microsoft.UI.Xaml.dll"; Class = "Microsoft.UI.Xaml.Application" },
+                @{ File = "CoreMessagingXP.dll"; Class = "Microsoft.UI.Dispatching.DispatcherQueueController" },
+                @{ File = "Microsoft.WindowsAppRuntime.dll"; Class = "Microsoft.Windows.AppLifecycle.AppInstance" }
+            )) {
+                $registration = $embeddedManifest.SelectSingleNode(
+                    "/assembly:assembly/asmv3:file[@name='$($runtimeClass.File)']/" +
+                    "winrt:activatableClass[@name='$($runtimeClass.Class)']",
+                    $embeddedNamespaces
+                )
+                Assert-True ($null -ne $registration) (
+                    "The installed desktop manifest is missing runtime activation " +
+                    "registration '$($runtimeClass.Class)'."
+                )
+            }
+        }
     }
 
     $identityLauncherPath = Get-ExtractedMsiFile `
@@ -1358,30 +1379,29 @@ try {
     Assert-True (
         $dumpbinCandidates.Count -gt 0
     ) "Visual Studio dumpbin.exe could not be resolved."
-    $desktopDependencies = Invoke-CapturedProcess `
-        -FilePath $dumpbinCandidates[-1] `
-        -Arguments @("/nologo", "/dependents", $desktopExecutablePath) `
-        -WorkingDirectory $repoRoot
-    Assert-True (
-        $desktopDependencies.ExitCode -eq 0 -and
-        $desktopDependencies.StandardOutput -notmatch
-            '(?im)^\s*(MSVCP|VCRUNTIME)\d+(?:_\d+)?(?:D)?\.dll\s*$'
-    ) (
-        "The desktop executable must use the hybrid CRT instead of requiring " +
-        "a separately installed Visual C++ runtime."
-    )
-    $launcherDependencies = Invoke-CapturedProcess `
-        -FilePath $dumpbinCandidates[-1] `
-        -Arguments @("/nologo", "/dependents", $identityLauncherPath) `
-        -WorkingDirectory $repoRoot
-    Assert-True (
-        $launcherDependencies.ExitCode -eq 0 -and
-        $launcherDependencies.StandardOutput -notmatch
-            '(?im)^\s*(MSVCP|VCRUNTIME)\d+(?:_\d+)?(?:D)?\.dll\s*$'
-    ) (
-        "The identity launcher must remain self-contained and must not " +
-        "require a separately installed Visual C++ runtime."
-    )
+    # Check the binaries extracted from the MSI, including the Rust roles.
+    # Developer machines can hide missing runtime dependencies that prevent
+    # these executables from reaching main() on a clean Windows installation.
+    foreach ($executableName in $expectedProductExecutables) {
+        $executablePath = Get-ExtractedMsiFile `
+            -DecompiledMsi $decompiled `
+            -ExtractRoot $msiExtractRoot `
+            -Name $executableName
+        $dependencies = Invoke-CapturedProcess `
+            -FilePath $dumpbinCandidates[-1] `
+            -Arguments @("/nologo", "/dependents", $executablePath) `
+            -WorkingDirectory $repoRoot
+        Assert-True (
+            $dependencies.ExitCode -eq 0
+        ) "dumpbin failed to inspect '$executableName'."
+        Assert-True (
+            $dependencies.StandardOutput -notmatch
+                '(?im)^\s*(MSVCP|MSVCR|VCRUNTIME|CONCRT|VCOMP)\d[\w]*\.dll\s*$'
+        ) (
+            "'$executableName' must remain self-contained and must not " +
+            "require a separately installed Visual C++ runtime."
+        )
+    }
     $dumpbinResult = Invoke-CapturedProcess `
         -FilePath $dumpbinCandidates[-1] `
         -Arguments @("/nologo", "/exports", $customActionBinary) `

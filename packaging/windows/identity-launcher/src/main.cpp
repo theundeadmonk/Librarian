@@ -3,6 +3,7 @@
 #include <shellapi.h>
 #include <shlobj.h>
 #include <shobjidl_core.h>
+#include "NativeHostStartup.h"
 
 #include <winrt/Windows.ApplicationModel.h>
 #include <winrt/Windows.Foundation.h>
@@ -979,23 +980,23 @@ namespace
         {
             fail(L"Librarian received an invalid native-host request.");
         }
-        for (DWORD const standard_handle_id : {
-                 STD_INPUT_HANDLE,
-                 STD_OUTPUT_HANDLE})
+        HANDLE standard_error = GetStdHandle(STD_ERROR_HANDLE);
+        file_handle null_error;
+        if (standard_error == nullptr || standard_error == INVALID_HANDLE_VALUE)
         {
-            HANDLE const standard_handle =
-                GetStdHandle(standard_handle_id);
-            if (standard_handle == nullptr ||
-                standard_handle == INVALID_HANDLE_VALUE ||
-                !SetHandleInformation(
-                    standard_handle,
-                    HANDLE_FLAG_INHERIT,
-                    HANDLE_FLAG_INHERIT))
-            {
-                fail(
-                    L"Librarian could not preserve the browser messaging "
-                    L"channel.");
-            }
+            // Diagnostics must never be redirected into framed protocol stdout.
+            null_error.value = CreateFileW(
+                L"NUL", GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+            standard_error = null_error.value;
+        }
+        STARTUPINFOW startup{};
+        if (!librarian::identity_launcher::configure_native_host_startup(
+                startup,
+                {GetStdHandle(STD_INPUT_HANDLE),
+                 GetStdHandle(STD_OUTPUT_HANDLE), standard_error}))
+        {
+            fail(L"Librarian could not preserve the browser messaging channel.");
         }
 
         std::filesystem::path const host =
@@ -1007,8 +1008,6 @@ namespace
             command_line.append(quote_argument(argument));
         }
 
-        STARTUPINFOW startup{};
-        startup.cb = sizeof(startup);
         PROCESS_INFORMATION information{};
         if (!CreateProcessW(
                 host.c_str(),

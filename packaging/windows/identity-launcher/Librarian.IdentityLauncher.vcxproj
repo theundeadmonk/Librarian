@@ -66,6 +66,7 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="src\main.cpp" />
+    <ClInclude Include="src\NativeHostStartup.h" />
     <Manifest Include="app.manifest" />
   </ItemGroup>
   <ItemGroup>

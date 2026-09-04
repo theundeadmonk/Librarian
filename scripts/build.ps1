@@ -27,7 +27,9 @@ function Invoke-CheckedProcess {
         [string[]]$Arguments,
 
         [Parameter(Mandatory)]
-        [string]$WorkingDirectory
+        [string]$WorkingDirectory,
+
+        [hashtable]$EnvironmentVariables = @{}
     )
 
     Write-Host ""
@@ -43,6 +45,9 @@ function Invoke-CheckedProcess {
     $startInfo.RedirectStandardError = $true
     $startInfo.EnvironmentVariables["Path"] = $env:Path
     $startInfo.EnvironmentVariables["PATHEXT"] = $env:PATHEXT
+    foreach ($entry in $EnvironmentVariables.GetEnumerator()) {
+        $startInfo.EnvironmentVariables[$entry.Key] = [string]$entry.Value
+    }
 
     if ([IO.Path]::GetExtension($FilePath) -eq ".cmd") {
         $startInfo.FileName = $env:ComSpec
@@ -166,7 +171,14 @@ Invoke-CheckedProcess `
         "--target",
         "x86_64-pc-windows-msvc"
     ) `
-    -WorkingDirectory $repoRoot
+    -WorkingDirectory $repoRoot `
+    -EnvironmentVariables @{
+        # These tests enforce production request deadlines and exercise their
+        # own concurrency internally. Bound independent libtest cases so
+        # high-core-count hosts do not turn unrelated durable-vault setup into
+        # deadline failures through machine-wide CPU and filesystem contention.
+        RUST_TEST_THREADS = "4"
+    }
 
 Invoke-CheckedProcess `
     -Label "Rust documentation tests" `

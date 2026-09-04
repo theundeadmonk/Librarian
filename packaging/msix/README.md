@@ -22,6 +22,12 @@ template: it uses a neutral package architecture and keeps referenced visual
 assets outside the identity package. The MSI-owned external installation
 location must provide any image paths that Windows needs to resolve.
 
+All external application identities, including the WinUI desktop, use
+`win32App` runtime behavior. The separate full development MSIX uses
+`packagedClassicApp` for its desktop. Installer version stamping must preserve
+the desktop's compiler-generated embedded manifest: its self-contained WinRT
+activation registrations are not present in the source `app.manifest` alone.
+
 Browser integrations are optional. Setup may register the native host for an
 installed browser only after user selection; browser extensions remain
 user-confirmed installations from the official Chrome Web Store or Microsoft
