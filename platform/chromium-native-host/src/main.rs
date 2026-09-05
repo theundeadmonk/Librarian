@@ -3,6 +3,9 @@
 #![forbid(unsafe_code)]
 
 #[cfg(any(windows, test))]
+mod chromium_arguments;
+
+#[cfg(any(windows, test))]
 mod protocol;
 
 #[cfg(windows)]

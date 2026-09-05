@@ -282,6 +282,33 @@ mod tests {
     }
 
     #[test]
+    fn relays_every_agent_status_with_its_wire_name() {
+        let cases = [
+            (AgentStatus::Starting, "starting"),
+            (AgentStatus::NoVault, "noVault"),
+            (AgentStatus::Locked, "locked"),
+            (AgentStatus::Unlocking, "unlocking"),
+            (AgentStatus::Unlocked, "unlocked"),
+            (AgentStatus::Updating, "updating"),
+            (AgentStatus::ShuttingDown, "shuttingDown"),
+        ];
+        for (status, expected) in cases {
+            let mut input = Cursor::new(frame(&request("")));
+            let mut output = Vec::new();
+            serve_once(&mut input, &mut output, |_| Ok(status)).expect("relay status");
+            assert_eq!(
+                response(&output),
+                serde_json::json!({
+                    "status": "ok",
+                    "protocolVersion": 1,
+                    "requestId": REQUEST_ID,
+                    "agentStatus": expected
+                })
+            );
+        }
+    }
+
+    #[test]
     fn rejects_unknown_fields_before_relay() {
         let called = Cell::new(false);
         let mut input = Cursor::new(frame(&request(",\"unexpected\":true")));

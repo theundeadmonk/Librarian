@@ -19,7 +19,10 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
-use crate::protocol::{AgentStatus, BridgeFailure, serve_once};
+use crate::{
+    chromium_arguments::{valid_extension_origin, valid_parent_window},
+    protocol::{AgentStatus, BridgeFailure, serve_once},
+};
 
 const HOST_EXECUTABLE: &str = "Librarian.ChromiumNativeHost.exe";
 const AGENT_EXECUTABLE: &str = "Librarian.VaultAgent.exe";
@@ -237,23 +240,6 @@ fn read_host_manifest(path: &Path) -> Result<String, HostError> {
     Ok(manifest.allowed_origins[0].clone())
 }
 
-fn valid_extension_origin(value: &str) -> bool {
-    const PREFIX: &str = "chrome-extension://";
-    value.len() == PREFIX.len() + 33
-        && value.starts_with(PREFIX)
-        && value.ends_with('/')
-        && value[PREFIX.len()..value.len() - 1]
-            .bytes()
-            .all(|byte| (b'a'..=b'p').contains(&byte))
-}
-
-fn valid_parent_window(value: &str) -> bool {
-    const PREFIX: &str = "--parent-window=";
-    value.strip_prefix(PREFIX).is_some_and(|handle| {
-        !handle.is_empty() && handle.len() <= 20 && handle.bytes().all(|b| b.is_ascii_digit())
-    })
-}
-
 fn local_endpoint_path(package_family_name: &str) -> Result<PathBuf, HostError> {
     let local_app_data = env::var_os("LOCALAPPDATA").ok_or(HostError::Discovery)?;
     let local_state = PathBuf::from(local_app_data)
@@ -310,27 +296,5 @@ const fn map_bridge_error(error: HostError) -> BridgeFailure {
         HostError::InvalidInvocation | HostError::Input | HostError::Output => {
             BridgeFailure::OperationFailed
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn chromium_arguments_are_exactly_bounded() {
-        assert!(valid_extension_origin(
-            "chrome-extension://abcdefghijklmnopabcdefghijklmnop/"
-        ));
-        assert!(!valid_extension_origin(
-            "chrome-extension://abcdefghijklmnopabcdefghijklmnop"
-        ));
-        assert!(!valid_extension_origin(
-            "chrome-extension://abcdefghijklmnopabcdefghijklmn0p/"
-        ));
-        assert!(valid_parent_window("--parent-window=0"));
-        assert!(valid_parent_window("--parent-window=18446744073709551615"));
-        assert!(!valid_parent_window("--parent-window="));
-        assert!(!valid_parent_window("--parent-window=-1"));
     }
 }

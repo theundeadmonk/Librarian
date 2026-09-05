@@ -4,6 +4,8 @@
 #include <shlobj.h>
 #include <shobjidl_core.h>
 #include "NativeHostStartup.h"
+#include "LaunchOperation.h"
+#include "../../../../platform/windows-passkey/include/librarian/windows_passkey/registration.h"
 
 #include <winrt/Windows.ApplicationModel.h>
 #include <winrt/Windows.Foundation.h>
@@ -24,6 +26,7 @@
 
 namespace
 {
+    using librarian::identity_launcher::operation;
     using winrt::Windows::ApplicationModel::Package;
     using winrt::Windows::ApplicationModel::PackageVersion;
     using winrt::Windows::Foundation::Uri;
@@ -952,23 +955,18 @@ namespace
         {
             fail(L"Librarian could not update passkey provider registration.");
         }
-        // The package-identified desktop command validates its installed
-        // identity before calling the Windows registration API. Its
-        // OperationFailed public result is therefore the narrow
-        // platform-unavailable case: keep password fallback, desktop launch,
-        // and browser status available. Identity, activation, timeout, and
-        // unexpected failures remain fatal.
-        constexpr DWORD provider_platform_unavailable = 11U;
-        if (register_provider && exit_code == provider_platform_unavailable)
+        namespace registration = librarian::windows_passkey::registration_command;
+        // The desktop distinguishes unsupported APIs from operation failures.
+        // Identity, activation, timeout, and unexpected API errors remain fatal.
+        if (!registration::can_continue(exit_code, register_provider))
+        {
+            fail(L"Librarian could not update passkey provider registration.");
+        }
+        if (exit_code == registration::platform_unavailable)
         {
             OutputDebugStringW(
                 L"Librarian passkey provider registration is unavailable; "
                 L"continuing with password fallback.");
-            return;
-        }
-        if (exit_code != 0U)
-        {
-            fail(L"Librarian could not update passkey provider registration.");
         }
     }
 
@@ -1039,14 +1037,6 @@ namespace
                    static_cast<int>(exit_code) :
                    1;
     }
-
-    enum class operation
-    {
-        launch,
-        register_only,
-        unregister,
-        native_host,
-    };
 
     struct launch_request
     {
@@ -1192,33 +1182,22 @@ int WINAPI wWinMain(
             validate_installation();
         payload_manifest const manifest =
             validate_payload(install_folder);
-        if (requested == operation::unregister)
-        {
-            remove_current_user_identity(
-                install_folder,
-                manifest.version);
-            return 0;
-        }
-
-        ensure_current_user_identity(
-            install_folder,
-            manifest.version);
-        run_provider_registration(
-            desktop_application_user_model_id(
-                install_folder,
-                manifest.version),
-            true);
-        if (requested == operation::launch)
-        {
-            launch_desktop(install_folder);
-        }
-        else if (requested == operation::native_host)
-        {
-            return launch_native_host(
-                install_folder,
-                request.native_host_arguments);
-        }
-        return 0;
+        std::wstring desktop_model_id;
+        return librarian::identity_launcher::dispatch_operation(
+            requested,
+            [&] {
+                ensure_current_user_identity(install_folder, manifest.version);
+                // Preserve the final unique, healthy, exact-version identity
+                // check even when browser startup skips provider registration.
+                desktop_model_id = desktop_application_user_model_id(
+                    install_folder, manifest.version);
+            },
+            [&] { remove_current_user_identity(install_folder, manifest.version); },
+            [&] {
+                run_provider_registration(desktop_model_id, true);
+            },
+            [&] { launch_desktop(install_folder); },
+            [&] { return launch_native_host(install_folder, request.native_host_arguments); });
     }
     catch (validation_error const& error)
     {

@@ -1,6 +1,8 @@
 #include "../../apps/windows/Librarian.Windows/ShellViewModel.h"
 #include "../../apps/windows/Librarian.Windows/DesktopLaunchArguments.h"
 #include "../../packaging/windows/identity-launcher/src/NativeHostStartup.h"
+#include "../../packaging/windows/identity-launcher/src/LaunchOperation.h"
+#include "../../platform/windows-passkey/include/librarian/windows_passkey/registration.h"
 
 #include <atomic>
 #include <fstream>
@@ -50,6 +52,84 @@ namespace
     private:
         int failures_{ 0 };
     };
+
+    void TestRegistrationResults(TestContext& test)
+    {
+        namespace registration = librarian::windows_passkey::registration_command;
+        test.Check(registration::exit_code(S_OK) == registration::success &&
+            registration::can_continue(registration::success, true) &&
+            registration::can_continue(registration::success, false),
+            "successful provider operations continue");
+        for (HRESULT const result : {HRESULT_FROM_WIN32(ERROR_PROC_NOT_FOUND), E_NOTIMPL})
+        {
+            auto const unavailable = registration::exit_code(static_cast<std::uint32_t>(result));
+            test.Check(unavailable == registration::platform_unavailable &&
+                registration::can_continue(unavailable, true) &&
+                !registration::can_continue(unavailable, false),
+                "only registration with missing or unimplemented APIs permits password fallback");
+        }
+        for (HRESULT const result : {E_ACCESSDENIED, E_UNEXPECTED, E_FAIL, E_INVALIDARG,
+            HRESULT_FROM_WIN32(ERROR_MOD_NOT_FOUND), HRESULT_FROM_WIN32(ERROR_BAD_EXE_FORMAT)})
+        {
+            auto const code = registration::exit_code(static_cast<std::uint32_t>(result));
+            test.Check(code == registration::operation_failed &&
+                !registration::can_continue(code, true) &&
+                !registration::can_continue(code, false),
+                "unexpected registration, update, response, and loader failures remain fatal");
+        }
+        for (std::uint32_t const code : {1U, registration::not_registered, 42U, 0xC0000135U})
+        {
+            test.Check(!registration::can_continue(code, true) &&
+                !registration::can_continue(code, false),
+                "not-registered, rejected activation, and crash exits are not platform fallback");
+        }
+    }
+
+    void TestLaunchOperations(TestContext& test)
+    {
+        using librarian::identity_launcher::dispatch_operation;
+        using librarian::identity_launcher::operation;
+        // Keep injected failures runtime-controlled under MSVC whole-program
+        // optimization so both successful and throwing callback paths exist.
+        volatile bool inject_failure = true;
+        for (auto const& [requested, expected] : std::vector<std::pair<operation, std::string>>{
+            {operation::native_host, "identity host "},
+            {operation::launch, "identity provider desktop "},
+            {operation::register_only, "identity provider "},
+            {operation::unregister, "remove "}})
+        {
+            std::string calls;
+            int const result = dispatch_operation(requested,
+                [&] { calls += "identity "; }, [&] { calls += "remove "; },
+                [&] { calls += "provider "; }, [&] { calls += "desktop "; },
+                [&] { calls += "host "; return 37; });
+            test.Check(calls == expected, "launcher follows the identity-first operation-specific sequence");
+            test.Check(result == (requested == operation::native_host ? 37 : 0),
+                "launcher preserves the native host exit code");
+        }
+        for (operation const requested : {operation::native_host, operation::launch, operation::register_only})
+        {
+            bool child_started = false;
+            bool failed = false;
+            try
+            {
+                dispatch_operation(requested, [&] { if (inject_failure) throw 1; }, [] {},
+                    [&] { child_started = true; }, [&] { child_started = true; },
+                    [&] { child_started = true; return 0; });
+            }
+            catch (int) { failed = true; }
+            test.Check(failed && !child_started, "identity failure prevents all child activation");
+        }
+        bool desktop_started = false;
+        bool failed = false;
+        try
+        {
+            dispatch_operation(operation::launch, [] {}, [] {}, [&] { if (inject_failure) throw 1; },
+                [&] { desktop_started = true; }, [] { return 0; });
+        }
+        catch (int) { failed = true; }
+        test.Check(failed && !desktop_started, "fatal provider failure still prevents desktop launch");
+    }
 
     struct TestHandle
     {
@@ -1026,6 +1106,8 @@ int main(int const argc, char const* const* const argv)
     TestContext test;
     TestNativeHostStreams(test);
     TestDesktopLaunchArguments(test);
+    TestRegistrationResults(test);
+    TestLaunchOperations(test);
     TestInitialStates(test);
     TestUnlockLifecycle(test);
     TestPostUnlockPasskeyRefreshCancellation(test);

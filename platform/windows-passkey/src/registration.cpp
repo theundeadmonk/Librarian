@@ -76,10 +76,17 @@ namespace
             }
         }
 
-        [[nodiscard]] bool complete() const noexcept
+        [[nodiscard]] HRESULT availability() const noexcept
         {
-            return module_ != nullptr && get_state != nullptr && add != nullptr &&
-                   free_response != nullptr && update != nullptr && remove != nullptr;
+            if (module_ == nullptr)
+            {
+                // A loader failure (including a missing dependency export) is
+                // not proof that this OS lacks the plugin APIs. Keep it fatal.
+                return E_FAIL;
+            }
+            return get_state != nullptr && add != nullptr && free_response != nullptr &&
+                   update != nullptr && remove != nullptr ? S_OK :
+                   HRESULT_FROM_WIN32(ERROR_PROC_NOT_FOUND);
         }
 
         get_state_function get_state{};
@@ -102,9 +109,9 @@ namespace
 extern "C" std::uint32_t librarian_windows_passkey_provider_register() noexcept
 {
     registration_api const api;
-    if (!api.complete())
+    if (FAILED(api.availability()))
     {
-        return static_cast<std::uint32_t>(HRESULT_FROM_WIN32(ERROR_PROC_NOT_FOUND));
+        return static_cast<std::uint32_t>(api.availability());
     }
 
     AUTHENTICATOR_STATE state{};
@@ -159,9 +166,9 @@ extern "C" std::uint32_t librarian_windows_passkey_provider_register() noexcept
 extern "C" std::uint32_t librarian_windows_passkey_provider_unregister() noexcept
 {
     registration_api const api;
-    if (!api.complete())
+    if (FAILED(api.availability()))
     {
-        return static_cast<std::uint32_t>(HRESULT_FROM_WIN32(ERROR_PROC_NOT_FOUND));
+        return static_cast<std::uint32_t>(api.availability());
     }
     HRESULT const result = api.remove(provider_clsid);
     return result == NTE_NOT_FOUND ? 0U : static_cast<std::uint32_t>(result);
@@ -176,9 +183,9 @@ extern "C" std::uint32_t librarian_windows_passkey_provider_registration_state(
     }
     *registered = 0U;
     registration_api const api;
-    if (!api.complete())
+    if (FAILED(api.availability()))
     {
-        return static_cast<std::uint32_t>(HRESULT_FROM_WIN32(ERROR_PROC_NOT_FOUND));
+        return static_cast<std::uint32_t>(api.availability());
     }
     AUTHENTICATOR_STATE state{};
     HRESULT const result = api.get_state(provider_clsid, &state);

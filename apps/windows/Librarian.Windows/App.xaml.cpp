@@ -284,32 +284,26 @@ namespace winrt::Librarian::Windows::implementation
         std::wstring const& arguments = request.command;
         if (!arguments.empty())
         {
-            constexpr DWORD operation_failed = 11U;
-            DWORD exit_code = operation_failed;
+            namespace registration = librarian::windows_passkey::registration_command;
+            DWORD exit_code = registration::operation_failed;
             if (arguments == L"--register-passkey-provider")
             {
-                exit_code =
-                    librarian_windows_passkey_provider_register() == 0U ?
-                        0U :
-                        operation_failed;
+                exit_code = registration::exit_code(
+                    librarian_windows_passkey_provider_register());
             }
             else if (arguments == L"--unregister-passkey-provider")
             {
-                exit_code =
-                    librarian_windows_passkey_provider_unregister() == 0U ?
-                        0U :
-                        operation_failed;
+                exit_code = registration::exit_code(
+                    librarian_windows_passkey_provider_unregister());
             }
             else if (arguments == L"--passkey-provider-registration-state")
             {
-                constexpr DWORD not_found = 4U;
                 std::uint32_t registered = 0U;
                 std::uint32_t const result =
                     librarian_windows_passkey_provider_registration_state(
                         &registered);
-                exit_code = result != 0U ?
-                                operation_failed :
-                                (registered == 1U ? 0U : not_found);
+                exit_code = result != 0U ? registration::exit_code(result) :
+                    (registered == 1U ? registration::success : registration::not_registered);
             }
             else
             {

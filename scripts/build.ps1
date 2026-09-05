@@ -239,22 +239,9 @@ Invoke-CheckedProcess `
     -WorkingDirectory $repoRoot
 
 Invoke-CheckedProcess `
-    -Label "Extension build" `
-    -FilePath $toolchain.Node `
-    -Arguments @(
-        $typeScript,
-        "--project",
-        "apps\browser-extension\tsconfig.json"
-    ) `
-    -WorkingDirectory $repoRoot
-
-Invoke-CheckedProcess `
-    -Label "Extension protocol tests" `
-    -FilePath $toolchain.Node `
-    -Arguments @(
-        "--test",
-        "apps\browser-extension\tests\native.test.mjs"
-    ) `
+    -Label "Extension build and protocol tests" `
+    -FilePath $toolchain.Npm `
+    -Arguments @("run", "test:extension") `
     -WorkingDirectory $repoRoot
 
 Invoke-CheckedProcess `

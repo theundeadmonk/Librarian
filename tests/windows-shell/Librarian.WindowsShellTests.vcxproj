@@ -52,6 +52,12 @@
     <ClInclude Include="..\..\packaging\windows\identity-launcher\src\NativeHostStartup.h">
       <Link>NativeHostStartup.h</Link>
     </ClInclude>
+    <ClInclude Include="..\..\packaging\windows\identity-launcher\src\LaunchOperation.h">
+      <Link>LaunchOperation.h</Link>
+    </ClInclude>
+    <ClInclude Include="..\..\platform\windows-passkey\include\librarian\windows_passkey\registration.h">
+      <Link>registration.h</Link>
+    </ClInclude>
     <ClInclude Include="..\..\apps\windows\Librarian.Windows\DesktopLaunchArguments.h">
       <Link>DesktopLaunchArguments.h</Link>
     </ClInclude>

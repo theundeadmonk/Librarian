@@ -67,6 +67,8 @@
   <ItemGroup>
     <ClCompile Include="src\main.cpp" />
     <ClInclude Include="src\NativeHostStartup.h" />
+    <ClInclude Include="src\LaunchOperation.h" />
+    <ClInclude Include="..\..\..\platform\windows-passkey\include\librarian\windows_passkey\registration.h" />
     <Manifest Include="app.manifest" />
   </ItemGroup>
   <ItemGroup>

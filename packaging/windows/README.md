@@ -24,18 +24,26 @@ opens `Librarian.Windows.exe`. Chrome and Edge also start this launcher through
 their native-messaging manifests. In that headless mode it performs the same
 identity convergence, preserves the browser's standard-input/output channel
 and documented origin/parent-window arguments, and waits for
-`Librarian.ChromiumNativeHost.exe`.
+`Librarian.ChromiumNativeHost.exe`. Browser activation skips unrelated passkey
+registration, whose activation timeout is longer than the browser probe deadline.
+Installation, payload, and final unique/healthy identity validation still run
+before the native host starts.
 
 The real passkey-provider role is package-identified in the same external
-location. The launcher registers it with Windows only after package identity
-converges, and unregisters it before removing a temporary development identity.
+location. Desktop launch and `--register-only` register it with Windows only
+after package identity converges; `--unregister` unregisters it before removing
+a temporary development identity.
 It invokes narrow, headless command modes on the package-identified desktop
 application, which owns the shared registration API boundary just as Microsoft's
 Passkey Manager sample does. The provider's COM-server application identity is
 reserved exclusively for Windows-initiated passkey operations. If the
 identity-validated command reports that the Windows registration API is
-unavailable, the launcher preserves master-password fallback and continues to
-the desktop or browser host. Every other failure remains fail closed.
+unavailable because API exports are missing or explicitly return `E_NOTIMPL`, the launcher preserves
+master-password fallback and continues to the desktop. The hidden commands use
+exit 0 for success, 4 for a successful state query finding no registration, 12
+for unsupported APIs, and 11 for unexpected operation failures. Only exit 12
+from registration permits fallback; access, invalid-response, update, loading,
+activation, and timeout failures remain fatal. Unregistration requires success.
 
 The WinUI app is built with the Windows App SDK self-contained deployment mode
 and Microsoft's hybrid CRT configuration. Its required Windows App SDK runtime
