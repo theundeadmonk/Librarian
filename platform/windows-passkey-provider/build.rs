@@ -15,7 +15,9 @@ fn main() {
     for path in [
         "include/librarian/windows_passkey/foundation.h",
         "include/librarian/windows_passkey/provider_bridge.h",
+        "include/librarian/windows_passkey/registration.h",
         "src/provider_bridge.cpp",
+        "src/registration.cpp",
     ] {
         println!(
             "cargo:rerun-if-changed={}",
@@ -29,6 +31,7 @@ fn main() {
         .cpp(true)
         .include(native_directory.join("include"))
         .file(native_directory.join("src/provider_bridge.cpp"))
+        .file(native_directory.join("src/registration.cpp"))
         .std("c++20")
         .define("UNICODE", None)
         .define("_UNICODE", None)

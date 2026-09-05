@@ -2,6 +2,10 @@
 #include <bcrypt.h>
 #include <shellapi.h>
 #include <shlobj.h>
+#include <shobjidl_core.h>
+#include "NativeHostStartup.h"
+#include "LaunchOperation.h"
+#include "../../../../platform/windows-passkey/include/librarian/windows_passkey/registration.h"
 
 #include <winrt/Windows.ApplicationModel.h>
 #include <winrt/Windows.Foundation.h>
@@ -22,6 +26,7 @@
 
 namespace
 {
+    using librarian::identity_launcher::operation;
     using winrt::Windows::ApplicationModel::Package;
     using winrt::Windows::ApplicationModel::PackageVersion;
     using winrt::Windows::Foundation::Uri;
@@ -776,13 +781,50 @@ namespace
         validate_external_location(*exact, install_folder);
     }
 
-    void run_provider_registration(
+    std::wstring desktop_application_user_model_id(
         std::filesystem::path const& install_folder,
+        PackageVersion const& expected_version)
+    {
+        PackageManager const manager;
+        std::uint64_t const expected = comparable_version(expected_version);
+        std::wstring application_user_model_id;
+        for (Package const& package : current_user_packages(manager))
+        {
+            if (comparable_version(package.Id().Version()) != expected)
+            {
+                continue;
+            }
+            if (!application_user_model_id.empty() ||
+                !package.Status().VerifyIsOK())
+            {
+                fail(
+                    L"Librarian refused an ambiguous or unhealthy package "
+                    L"identity.");
+            }
+            validate_external_location(package, install_folder);
+            application_user_model_id = package.Id().FamilyName().c_str();
+            application_user_model_id.append(L"!Desktop");
+        }
+        if (application_user_model_id.empty())
+        {
+            fail(L"Librarian could not locate its desktop identity.");
+        }
+        return application_user_model_id;
+    }
+
+    void run_provider_registration(
+        std::wstring_view application_user_model_id,
         bool register_provider);
 
-    void remove_current_user_identity()
+    void remove_current_user_identity(
+        std::filesystem::path const& install_folder,
+        PackageVersion const& expected_version)
     {
-        run_provider_registration(module_path().parent_path(), false);
+        run_provider_registration(
+            desktop_application_user_model_id(
+                install_folder,
+                expected_version),
+            false);
         PackageManager const manager;
         for (Package const& package : current_user_packages(manager))
         {
@@ -858,34 +900,45 @@ namespace
     }
 
     void run_provider_registration(
-        std::filesystem::path const& install_folder,
+        std::wstring_view application_user_model_id,
         bool register_provider)
     {
-        std::filesystem::path const provider =
-            install_folder / L"Librarian.PasskeyProvider.exe";
-        std::wstring command_line = quote_argument(provider.native());
-        command_line.append(
-            register_provider ? L" --register" : L" --unregister");
+        winrt::com_ptr<IApplicationActivationManager> activation_manager;
+        if (FAILED(CoCreateInstance(
+                CLSID_ApplicationActivationManager,
+                nullptr,
+                CLSCTX_INPROC_SERVER,
+                IID_PPV_ARGS(activation_manager.put()))))
+        {
+            fail(
+                L"Librarian could not initialize passkey provider "
+                L"registration.");
+        }
 
-        STARTUPINFOW startup{};
-        startup.cb = sizeof(startup);
-        PROCESS_INFORMATION information{};
-        if (!CreateProcessW(
-                provider.c_str(),
-                command_line.data(),
-                nullptr,
-                nullptr,
-                FALSE,
-                CREATE_NO_WINDOW,
-                nullptr,
-                install_folder.c_str(),
-                &startup,
-                &information))
+        DWORD process_id = 0U;
+        std::wstring const model_id{application_user_model_id};
+        HRESULT const activation_result =
+            activation_manager->ActivateApplication(
+                model_id.c_str(),
+                register_provider ?
+                    L"--register-passkey-provider" :
+                    L"--unregister-passkey-provider",
+                AO_NONE,
+                &process_id);
+        if (FAILED(activation_result) || process_id == 0U)
         {
             fail(L"Librarian could not start passkey provider registration.");
         }
-        file_handle const process{information.hProcess};
-        file_handle const thread{information.hThread};
+
+        file_handle const process{OpenProcess(
+            SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION |
+                PROCESS_TERMINATE,
+            FALSE,
+            process_id)};
+        if (process.value == nullptr)
+        {
+            fail(L"Librarian could not observe passkey provider registration.");
+        }
         DWORD const wait_result = WaitForSingleObject(process.value, 30'000U);
         if (wait_result == WAIT_TIMEOUT)
         {
@@ -898,9 +951,22 @@ namespace
             fail(L"Librarian could not wait for passkey provider registration.");
         }
         DWORD exit_code{};
-        if (!GetExitCodeProcess(process.value, &exit_code) || exit_code != 0U)
+        if (!GetExitCodeProcess(process.value, &exit_code))
         {
             fail(L"Librarian could not update passkey provider registration.");
+        }
+        namespace registration = librarian::windows_passkey::registration_command;
+        // The desktop distinguishes unsupported APIs from operation failures.
+        // Identity, activation, timeout, and unexpected API errors remain fatal.
+        if (!registration::can_continue(exit_code, register_provider))
+        {
+            fail(L"Librarian could not update passkey provider registration.");
+        }
+        if (exit_code == registration::platform_unavailable)
+        {
+            OutputDebugStringW(
+                L"Librarian passkey provider registration is unavailable; "
+                L"continuing with password fallback.");
         }
     }
 
@@ -912,23 +978,23 @@ namespace
         {
             fail(L"Librarian received an invalid native-host request.");
         }
-        for (DWORD const standard_handle_id : {
-                 STD_INPUT_HANDLE,
-                 STD_OUTPUT_HANDLE})
+        HANDLE standard_error = GetStdHandle(STD_ERROR_HANDLE);
+        file_handle null_error;
+        if (standard_error == nullptr || standard_error == INVALID_HANDLE_VALUE)
         {
-            HANDLE const standard_handle =
-                GetStdHandle(standard_handle_id);
-            if (standard_handle == nullptr ||
-                standard_handle == INVALID_HANDLE_VALUE ||
-                !SetHandleInformation(
-                    standard_handle,
-                    HANDLE_FLAG_INHERIT,
-                    HANDLE_FLAG_INHERIT))
-            {
-                fail(
-                    L"Librarian could not preserve the browser messaging "
-                    L"channel.");
-            }
+            // Diagnostics must never be redirected into framed protocol stdout.
+            null_error.value = CreateFileW(
+                L"NUL", GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+            standard_error = null_error.value;
+        }
+        STARTUPINFOW startup{};
+        if (!librarian::identity_launcher::configure_native_host_startup(
+                startup,
+                {GetStdHandle(STD_INPUT_HANDLE),
+                 GetStdHandle(STD_OUTPUT_HANDLE), standard_error}))
+        {
+            fail(L"Librarian could not preserve the browser messaging channel.");
         }
 
         std::filesystem::path const host =
@@ -940,8 +1006,6 @@ namespace
             command_line.append(quote_argument(argument));
         }
 
-        STARTUPINFOW startup{};
-        startup.cb = sizeof(startup);
         PROCESS_INFORMATION information{};
         if (!CreateProcessW(
                 host.c_str(),
@@ -973,14 +1037,6 @@ namespace
                    static_cast<int>(exit_code) :
                    1;
     }
-
-    enum class operation
-    {
-        launch,
-        register_only,
-        unregister,
-        native_host,
-    };
 
     struct launch_request
     {
@@ -1126,27 +1182,22 @@ int WINAPI wWinMain(
             validate_installation();
         payload_manifest const manifest =
             validate_payload(install_folder);
-        if (requested == operation::unregister)
-        {
-            remove_current_user_identity();
-            return 0;
-        }
-
-        ensure_current_user_identity(
-            install_folder,
-            manifest.version);
-        run_provider_registration(install_folder, true);
-        if (requested == operation::launch)
-        {
-            launch_desktop(install_folder);
-        }
-        else if (requested == operation::native_host)
-        {
-            return launch_native_host(
-                install_folder,
-                request.native_host_arguments);
-        }
-        return 0;
+        std::wstring desktop_model_id;
+        return librarian::identity_launcher::dispatch_operation(
+            requested,
+            [&] {
+                ensure_current_user_identity(install_folder, manifest.version);
+                // Preserve the final unique, healthy, exact-version identity
+                // check even when browser startup skips provider registration.
+                desktop_model_id = desktop_application_user_model_id(
+                    install_folder, manifest.version);
+            },
+            [&] { remove_current_user_identity(install_folder, manifest.version); },
+            [&] {
+                run_provider_registration(desktop_model_id, true);
+            },
+            [&] { launch_desktop(install_folder); },
+            [&] { return launch_native_host(install_folder, request.native_host_arguments); });
     }
     catch (validation_error const& error)
     {

@@ -10,10 +10,10 @@ param(
     [string]$ProductVersion,
 
     [ValidatePattern("^[a-p]{32}$")]
-    [string]$ChromeExtensionId = "abcdefghijklmnopabcdefghijklmnop",
+    [string]$ChromeExtensionId = "jiifjoajanfeoabbkmpodkgfmabhikkh",
 
     [ValidatePattern("^[a-p]{32}$")]
-    [string]$EdgeExtensionId = "ponmlkjihgfedcbaponmlkjihgfedcba",
+    [string]$EdgeExtensionId = "jiifjoajanfeoabbkmpodkgfmabhikkh",
 
     [ValidatePattern("^[A-Fa-f0-9]{40}$")]
     [string]$DevelopmentCertificateThumbprint,
@@ -464,7 +464,19 @@ function Set-EmbeddedManifestVersion {
         [string]$RepoRoot
     )
 
-    [xml]$manifest = Get-Content -LiteralPath $ManifestSource -Raw
+    # The compiler merges runtime activation registrations into this resource.
+    # Replacing it with app.manifest strips WinUI's self-contained WinRT classes.
+    $compiledManifestPath = "$RenderedManifest.compiled"
+    Invoke-CheckedProcess `
+        -Label "Extract $(Split-Path $Executable -Leaf) compiled manifest" `
+        -FilePath $ManifestTool `
+        -Arguments @(
+            "-nologo",
+            "-inputresource:$Executable;#1",
+            "-out:$compiledManifestPath"
+        ) `
+        -WorkingDirectory $RepoRoot
+    [xml]$manifest = Get-Content -LiteralPath $compiledManifestPath -Raw
     $namespaceManager = New-Object Xml.XmlNamespaceManager($manifest.NameTable)
     $namespaceManager.AddNamespace(
         "assembly",
@@ -475,7 +487,11 @@ function Set-EmbeddedManifestVersion {
         $namespaceManager
     )
     if (-not $identity) {
-        throw "'$ManifestSource' has no assembly identity to version."
+        throw "'$Executable' has no compiled assembly identity to version."
+    }
+    [xml]$sourceManifest = Get-Content -LiteralPath $ManifestSource -Raw
+    if ($identity.GetAttribute("name") -ne $sourceManifest.assembly.assemblyIdentity.name) {
+        throw "'$Executable' does not match the source assembly identity."
     }
     $identity.SetAttribute("version", $Version)
 

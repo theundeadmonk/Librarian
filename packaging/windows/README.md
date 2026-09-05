@@ -24,16 +24,36 @@ opens `Librarian.Windows.exe`. Chrome and Edge also start this launcher through
 their native-messaging manifests. In that headless mode it performs the same
 identity convergence, preserves the browser's standard-input/output channel
 and documented origin/parent-window arguments, and waits for
-`Librarian.ChromiumNativeHost.exe`.
+`Librarian.ChromiumNativeHost.exe`. Browser activation skips unrelated passkey
+registration, whose activation timeout is longer than the browser probe deadline.
+Installation, payload, and final unique/healthy identity validation still run
+before the native host starts.
 
 The real passkey-provider role is package-identified in the same external
-location. The launcher registers it with Windows only after package identity
-converges, and unregisters it before removing a temporary development identity.
+location. Desktop launch and `--register-only` register it with Windows only
+after package identity converges; `--unregister` unregisters it before removing
+a temporary development identity.
+It invokes narrow, headless command modes on the package-identified desktop
+application, which owns the shared registration API boundary just as Microsoft's
+Passkey Manager sample does. The provider's COM-server application identity is
+reserved exclusively for Windows-initiated passkey operations. If the
+identity-validated command reports that the Windows registration API is
+unavailable because API exports are missing or explicitly return `E_NOTIMPL`, the launcher preserves
+master-password fallback and continues to the desktop. The hidden commands use
+exit 0 for success, 4 for a successful state query finding no registration, 12
+for unsupported APIs, and 11 for unexpected operation failures. Only exit 12
+from registration permits fallback; access, invalid-response, update, loading,
+activation, and timeout failures remain fatal. Unregistration requires success.
 
 The WinUI app is built with the Windows App SDK self-contained deployment mode
 and Microsoft's hybrid CRT configuration. Its required Windows App SDK runtime
 files are installed beside the executable, so the one setup does not require a
-separate Windows App SDK or Visual C++ Redistributable installation. The pinned
+separate Windows App SDK or Visual C++ Redistributable installation. The Rust
+product executables use the target-specific static CRT setting in
+`.cargo/config.toml`; their C/C++ bridges and bundled SQLite inherit that same
+linkage through `cc-rs`. Installer validation inspects all five Librarian
+executables extracted from the MSI and rejects external Visual C++ runtime
+imports, including the Rust roles. The pinned
 runtime currently contributes Microsoft's `RestartAgent.exe`; it is a runtime
 helper, not a fourth Librarian product role or package identity.
 
@@ -42,10 +62,12 @@ features. They are offered only when the corresponding browser is detected.
 The inert, colocated manifests are always installed and included in the
 MSI-bound payload hashes; the optional features publish only their machine
 registry keys, so an unselected browser cannot discover the host. Each manifest
-allows one exact extension origin. Setup never bundles, force-installs, or
-trusts a browser extension; issue
-[#16](https://github.com/theundeadmonk/Librarian/issues/16) owns the real store
-IDs and browser connection.
+allows one exact extension origin. Setup never bundles or force-installs a
+browser extension. The source manifest contains a public-only development key
+whose derived ID is allowed by the default fixture in both browsers. It is not
+a signing key or a published-store identity. Release packaging must replace
+the fixture IDs with the independently assigned Chrome Web Store and Edge
+Add-ons IDs.
 
 The identity-launcher path remains relative to each colocated manifest. Chrome
 and Edge both explicitly support a path relative to the manifest directory on
@@ -89,9 +111,11 @@ Outputs are written below `artifacts\installer\`:
 - `payload\Librarian.Identity.msix`
 - `payload\Librarian.Release.json`
 
-The default Chrome and Edge extension IDs are disposable `[a-p]{32}` fixture
-values. They are not published extension identities. An unsigned fixture must
-never be installed.
+The default Chrome and Edge extension ID is the deterministic development ID
+`jiifjoajanfeoabbkmpodkgfmabhikkh`. It is derived from the public key in
+`apps/browser-extension/manifest.json`, contains no private key material, and
+is not a published extension identity. An unsigned fixture must never be
+installed.
 
 The structural suite decompiles the MSI, extracts the Burn bundle, checks the
 four product roles and launcher boundary, feature conditions, registry

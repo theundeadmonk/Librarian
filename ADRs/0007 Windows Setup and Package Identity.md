@@ -149,6 +149,19 @@ payload validation and current-user identity convergence, and then starts
 channel and original browser arguments. Browser use therefore cannot bypass the
 first-launch or post-upgrade identity boundary.
 
+After identity convergence, the launcher asks the package-identified desktop
+application to register the passkey provider through
+`IApplicationActivationManager::ActivateApplication` and the desktop's exact
+application user model ID. The hidden desktop command validates package and
+installed-payload identity before calling the shared Windows registration API;
+the provider's COM-server identity remains exclusive to Windows-initiated
+operations. This matches Microsoft's Passkey Manager sample, where the main
+application owns registration rather than the COM callback server. Only the
+command's explicit `OperationFailed` result is treated as platform
+unavailability: Librarian keeps master-password fallback, desktop launch, and
+browser status available without registering an alternate provider. Identity,
+activation, timeout, and unexpected failures remain fail closed.
+
 The MSI deliberately does not provision the package for all users or ask a
 System-context custom action to inspect another user's package projection.
 Each user converges independently at first launch. An upgrade leaves dormant

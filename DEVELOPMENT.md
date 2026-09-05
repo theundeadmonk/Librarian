@@ -66,6 +66,12 @@ Rust tests use optimized test code with debug assertions and overflow checks
 enabled. This keeps the vault-agent integration suite's production request
 deadlines representative without relaxing those deadlines.
 
+Windows Rust commands use `--target x86_64-pc-windows-msvc`. The corresponding
+`.cargo/config.toml` setting statically links the CRT into the Rust executables
+and their C/C++ dependencies so a clean Windows PC needs no separate Visual C++
+Redistributable. Linux linkage is unchanged. Installer validation checks the
+actual shipped executable imports, not just the build configuration.
+
 ## Run the current Windows product
 
 After a successful Release build, start a development session without
@@ -94,6 +100,38 @@ over the authenticated local transport. The desktop can create or unlock the
 local vault, manage the current website-account subset, and enroll, use, or
 remove the optional Windows Hello convenience unlock. Use disposable test
 values only; the product remains development-only.
+
+## Test the browser connection
+
+The Release build produces the same minimal Manifest V3 development package
+for Chrome and Edge at:
+
+- `artifacts\browser-extension\unpacked`
+- `artifacts\browser-extension\Librarian.BrowserExtension.zip`
+
+The package has the stable development ID
+`jiifjoajanfeoabbkmpodkgfmabhikkh`. Its public manifest key is not signing or
+credential material. A store release can receive different Chrome and Edge
+IDs, which must be supplied to the signed installer build.
+
+The unsigned installer fixture must not be installed. To test a
+development-signed setup, select the optional Chrome and/or Edge integration,
+start the installed Librarian desktop app, then use **Load unpacked** on
+`chrome://extensions` or `edge://extensions` and select the unpacked artifact
+directory. Verify the displayed extension ID before continuing. Clicking the
+Librarian toolbar action performs one status probe:
+
+- `ON` means the native app is connected and unlocked.
+- `LOCK` means it is connected and must be unlocked in the desktop app.
+- `SET` means first-run vault setup is incomplete.
+- `...` means the agent is temporarily changing state.
+- `!` or `UP` gives a non-secret install, repair, timeout, or compatibility
+  instruction in the action title.
+
+This slice requests no website access, cannot unlock the vault, and cannot
+read or fill a credential. Real credential filling begins only after issue #17
+adds and reviews the exact-origin operation schemas. Use disposable test values
+only.
 
 ## Interactive Windows shell smoke test
 
@@ -159,9 +197,10 @@ hierarchy, master-password unlock, guarded local SQLite ownership, and the
 single website-account CRUD subset from issues #10 and #11. Each mutation
 commits one opaque record envelope and the next encrypted manifest generation
 in the same immediate transaction. Account origins use the pinned WHATWG URL
-parser and are stored as exact normalized HTTP(S) origins. Browser site access
-and native messaging remain disabled until their security gates and
-implementation issues are complete. Vault-backed passkey storage and the
+parser and are stored as exact normalized HTTP(S) origins. Native messaging is
+limited to the issue #16 status protocol; browser site access and credential
+operations remain disabled until their security gates and implementation
+issues are complete. Vault-backed passkey storage and the
 packaged Windows provider are available only for disposable development testing
 until their review and real relying-party validation gates complete. Each
 private-key operation binds the Windows Hello approval to the selected

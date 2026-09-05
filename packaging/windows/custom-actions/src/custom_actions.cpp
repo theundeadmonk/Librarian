@@ -707,6 +707,18 @@ namespace
     std::wstring normalized_security_descriptor(
         PSECURITY_DESCRIPTOR descriptor)
     {
+        // Windows can preserve this bookkeeping bit when a previously
+        // inherited DACL is replaced and protected. It does not change the
+        // effective or inheritable ACEs, and the protected bit remains part
+        // of the comparison below.
+        if (!SetSecurityDescriptorControl(
+                descriptor,
+                SE_DACL_AUTO_INHERITED,
+                0U))
+        {
+            fail(L"Setup could not normalize an installed payload ACL.");
+        }
+
         LPWSTR raw_sddl = nullptr;
         if (!ConvertSecurityDescriptorToStringSecurityDescriptorW(
                 descriptor,
@@ -839,9 +851,10 @@ namespace
 
         std::wstring const directory_sddl{
             L"O:SYG:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)"
-            L"(A;OICI;GRGX;;;BU)"};
+            L"(A;OICI;0x1200a9;;;BU)"};
         std::wstring const file_sddl{
-            L"O:SYG:SYD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;GRGX;;;BU)"};
+            L"O:SYG:SYD:P(A;;FA;;;SY)(A;;FA;;;BA)"
+            L"(A;;0x1200a9;;;BU)"};
         PSECURITY_DESCRIPTOR raw_directory_descriptor = nullptr;
         PSECURITY_DESCRIPTOR raw_file_descriptor = nullptr;
         if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(

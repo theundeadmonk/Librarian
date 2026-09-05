@@ -1,4 +1,8 @@
 #include "../../apps/windows/Librarian.Windows/ShellViewModel.h"
+#include "../../apps/windows/Librarian.Windows/DesktopLaunchArguments.h"
+#include "../../packaging/windows/identity-launcher/src/NativeHostStartup.h"
+#include "../../packaging/windows/identity-launcher/src/LaunchOperation.h"
+#include "../../platform/windows-passkey/include/librarian/windows_passkey/registration.h"
 
 #include <atomic>
 #include <fstream>
@@ -48,6 +52,208 @@ namespace
     private:
         int failures_{ 0 };
     };
+
+    void TestRegistrationResults(TestContext& test)
+    {
+        namespace registration = librarian::windows_passkey::registration_command;
+        test.Check(registration::exit_code(S_OK) == registration::success &&
+            registration::can_continue(registration::success, true) &&
+            registration::can_continue(registration::success, false),
+            "successful provider operations continue");
+        for (HRESULT const result : {HRESULT_FROM_WIN32(ERROR_PROC_NOT_FOUND), E_NOTIMPL})
+        {
+            auto const unavailable = registration::exit_code(static_cast<std::uint32_t>(result));
+            test.Check(unavailable == registration::platform_unavailable &&
+                registration::can_continue(unavailable, true) &&
+                !registration::can_continue(unavailable, false),
+                "only registration with missing or unimplemented APIs permits password fallback");
+        }
+        for (HRESULT const result : {E_ACCESSDENIED, E_UNEXPECTED, E_FAIL, E_INVALIDARG,
+            HRESULT_FROM_WIN32(ERROR_MOD_NOT_FOUND), HRESULT_FROM_WIN32(ERROR_BAD_EXE_FORMAT)})
+        {
+            auto const code = registration::exit_code(static_cast<std::uint32_t>(result));
+            test.Check(code == registration::operation_failed &&
+                !registration::can_continue(code, true) &&
+                !registration::can_continue(code, false),
+                "unexpected registration, update, response, and loader failures remain fatal");
+        }
+        for (std::uint32_t const code : {1U, registration::not_registered, 42U, 0xC0000135U})
+        {
+            test.Check(!registration::can_continue(code, true) &&
+                !registration::can_continue(code, false),
+                "not-registered, rejected activation, and crash exits are not platform fallback");
+        }
+    }
+
+    void TestLaunchOperations(TestContext& test)
+    {
+        using librarian::identity_launcher::dispatch_operation;
+        using librarian::identity_launcher::operation;
+        // Keep injected failures runtime-controlled under MSVC whole-program
+        // optimization so both successful and throwing callback paths exist.
+        volatile bool inject_failure = true;
+        for (auto const& [requested, expected] : std::vector<std::pair<operation, std::string>>{
+            {operation::native_host, "identity host "},
+            {operation::launch, "identity provider desktop "},
+            {operation::register_only, "identity provider "},
+            {operation::unregister, "remove "}})
+        {
+            std::string calls;
+            int const result = dispatch_operation(requested,
+                [&] { calls += "identity "; }, [&] { calls += "remove "; },
+                [&] { calls += "provider "; }, [&] { calls += "desktop "; },
+                [&] { calls += "host "; return 37; });
+            test.Check(calls == expected, "launcher follows the identity-first operation-specific sequence");
+            test.Check(result == (requested == operation::native_host ? 37 : 0),
+                "launcher preserves the native host exit code");
+        }
+        for (operation const requested : {operation::native_host, operation::launch, operation::register_only})
+        {
+            bool child_started = false;
+            bool failed = false;
+            try
+            {
+                dispatch_operation(requested, [&] { if (inject_failure) throw 1; }, [] {},
+                    [&] { child_started = true; }, [&] { child_started = true; },
+                    [&] { child_started = true; return 0; });
+            }
+            catch (int) { failed = true; }
+            test.Check(failed && !child_started, "identity failure prevents all child activation");
+        }
+        bool desktop_started = false;
+        bool failed = false;
+        try
+        {
+            dispatch_operation(operation::launch, [] {}, [] {}, [&] { if (inject_failure) throw 1; },
+                [&] { desktop_started = true; }, [] { return 0; });
+        }
+        catch (int) { failed = true; }
+        test.Check(failed && !desktop_started, "fatal provider failure still prevents desktop launch");
+    }
+
+    struct TestHandle
+    {
+        HANDLE value{};
+        ~TestHandle() { if (value && value != INVALID_HANDLE_VALUE) CloseHandle(value); }
+        void Close() { if (value) CloseHandle(value); value = nullptr; }
+    };
+
+    int EchoNativeHostStreams()
+    {
+        std::array<unsigned char, 5> message{};
+        DWORD read{};
+        DWORD written{};
+        if (!ReadFile(GetStdHandle(STD_INPUT_HANDLE), message.data(),
+                static_cast<DWORD>(message.size()), &read, nullptr) || read != message.size()) return 91;
+        if (!WriteFile(GetStdHandle(STD_OUTPUT_HANDLE), message.data(), read, &written, nullptr) || written != read) return 92;
+        constexpr char diagnostic[] = "fixture-diagnostic";
+        if (!WriteFile(GetStdHandle(STD_ERROR_HANDLE), diagnostic, sizeof(diagnostic), &written, nullptr) ||
+            written != sizeof(diagnostic)) return 93;
+        return 0;
+    }
+
+    void TestNativeHostStreams(TestContext& test)
+    {
+        using librarian::identity_launcher::configure_native_host_startup;
+        STARTUPINFOW startup{};
+        test.Check(!configure_native_host_startup(startup, {nullptr, nullptr, nullptr}),
+            "native-host startup rejects missing standard handles");
+        test.Check(!configure_native_host_startup(startup, {INVALID_HANDLE_VALUE, nullptr, nullptr}),
+            "native-host startup rejects invalid standard handles");
+        TestHandle inputRead, inputWrite, outputRead, outputWrite, errorRead, errorWrite;
+        bool const pipes = CreatePipe(&inputRead.value, &inputWrite.value, nullptr, 0) &&
+            CreatePipe(&outputRead.value, &outputWrite.value, nullptr, 0) &&
+            CreatePipe(&errorRead.value, &errorWrite.value, nullptr, 0);
+        test.Check(pipes, "native-host regression creates isolated anonymous pipes");
+        if (!pipes) return;
+        bool const configured = configure_native_host_startup(startup,
+            {inputRead.value, outputWrite.value, errorWrite.value});
+        test.Check(configured && startup.dwFlags == STARTF_USESTDHANDLES &&
+            startup.hStdInput == inputRead.value && startup.hStdOutput == outputWrite.value &&
+            startup.hStdError == errorWrite.value,
+            "native-host startup explicitly binds three separate standard streams");
+        if (!configured) return;
+        std::array<wchar_t, 32768> path{};
+        DWORD const length = GetModuleFileNameW(nullptr, path.data(), static_cast<DWORD>(path.size()));
+        test.Check(length > 0 && length < path.size(), "native-host regression resolves its own test executable");
+        if (length == 0 || length >= path.size()) return;
+        std::wstring command = L"\"" + std::wstring{path.data(), length} + L"\" --echo-native-host-streams";
+        PROCESS_INFORMATION child{};
+        bool const launched = CreateProcessW(path.data(), command.data(), nullptr, nullptr,
+            TRUE, CREATE_NO_WINDOW, nullptr, nullptr, &startup, &child) != FALSE;
+        test.Check(launched, "native-host regression launches a windowless console child");
+        if (!launched) return;
+        TestHandle process{child.hProcess}, thread{child.hThread};
+        inputRead.Close(); outputWrite.Close(); errorWrite.Close();
+        std::array<unsigned char, 5> const expected{0x00, 0x0A, 0x1A, 0x80, 0xFF};
+        DWORD written{};
+        test.Check(WriteFile(inputWrite.value, expected.data(), static_cast<DWORD>(expected.size()), &written, nullptr) &&
+            written == expected.size(), "native-host regression sends an exact binary payload");
+        inputWrite.Close();
+        DWORD const wait = WaitForSingleObject(process.value, 5000);
+        test.Check(wait == WAIT_OBJECT_0, "native-host child completes without losing its browser pipes");
+        if (wait != WAIT_OBJECT_0)
+        {
+            TerminateProcess(process.value, 94);
+            WaitForSingleObject(process.value, 5000);
+            return;
+        }
+        DWORD code{};
+        test.Check(GetExitCodeProcess(process.value, &code) && code == 0,
+            "native-host child can read stdin and write stdout and stderr");
+        std::array<unsigned char, 64> bytes{};
+        DWORD count{};
+        bool const readOutput = ReadFile(outputRead.value, bytes.data(), static_cast<DWORD>(bytes.size()), &count, nullptr) != FALSE;
+        test.Check(readOutput && count == expected.size() && std::equal(expected.begin(), expected.end(), bytes.begin()),
+            "native-host binary stdout is byte-exact and contains no diagnostics");
+        bool const readError = ReadFile(errorRead.value, bytes.data(), static_cast<DWORD>(bytes.size()), &count, nullptr) != FALSE;
+        test.Check(readError && count == sizeof("fixture-diagnostic") &&
+            std::string_view{reinterpret_cast<char const*>(bytes.data()), count} == std::string_view{"fixture-diagnostic", sizeof("fixture-diagnostic")},
+            "native-host diagnostics remain on their separate stderr channel");
+    }
+
+    void TestDesktopLaunchArguments(TestContext& test)
+    {
+        using librarian::windows::ParseDesktopLaunchArguments;
+        std::wstring const executable = L"\"C:\\Program Files\\Librarian\\Librarian.Windows.exe\"";
+        auto const normal = ParseDesktopLaunchArguments(std::nullopt, executable);
+        test.Check(normal.valid && normal.command.empty(),
+            "direct desktop launch does not mistake the executable path for a command");
+        for (std::wstring_view const command : {
+            L"--register-passkey-provider", L"--unregister-passkey-provider",
+            L"--passkey-provider-registration-state"})
+        {
+            auto const activated = ParseDesktopLaunchArguments(command, executable);
+            auto const direct = ParseDesktopLaunchArguments(
+                std::nullopt, executable + L" \"" + std::wstring{command} + L"\"");
+            test.Check(activated.valid && activated.command == command,
+                "platform hidden command is accepted without raw process arguments");
+            test.Check(direct.valid && direct.command == command,
+                "quoted direct hidden command is parsed exactly once");
+        }
+        auto const empty = ParseDesktopLaunchArguments(std::wstring_view{}, executable + L" -Embedding");
+        test.Check(empty.valid && empty.command.empty(),
+            "empty platform launch is authoritative over broker command-line data");
+        test.Check(!ParseDesktopLaunchArguments(L"--unknown", executable + L" --register-passkey-provider").valid,
+            "invalid platform payload cannot fall back to a valid process command");
+        test.Check(!ParseDesktopLaunchArguments(executable, executable).valid,
+            "an executable path is not a valid platform command payload");
+        for (std::wstring_view const suffix : {
+            L" --unknown", L" --register-passkey-provider extra", L" \"\"",
+            L" --REGISTER-PASSKEY-PROVIDER"})
+        {
+            test.Check(!ParseDesktopLaunchArguments(std::nullopt, executable + std::wstring{suffix}).valid,
+                "unexpected direct command arguments fail closed");
+        }
+        test.Check(!ParseDesktopLaunchArguments(std::nullopt, L"").valid,
+            "an empty process command line fails closed");
+        test.Check(!ParseDesktopLaunchArguments(std::nullopt, std::wstring(32768U, L'a')).valid,
+            "an oversized process command line fails closed");
+        test.Check(!ParseDesktopLaunchArguments(std::nullopt, executable + std::wstring(1, L'\0')).valid,
+            "an embedded null in process arguments fails closed");
+        test.Check(!ParseDesktopLaunchArguments(L"--register-passkey-provider extra", executable).valid,
+            "multiple platform command arguments fail closed");
+    }
 
     class FakeDesktopClient final : public IDesktopClient
     {
@@ -896,7 +1102,12 @@ namespace
 
 int main(int const argc, char const* const* const argv)
 {
+    if (argc == 2 && std::string_view{argv[1]} == "--echo-native-host-streams") return EchoNativeHostStreams();
     TestContext test;
+    TestNativeHostStreams(test);
+    TestDesktopLaunchArguments(test);
+    TestRegistrationResults(test);
+    TestLaunchOperations(test);
     TestInitialStates(test);
     TestUnlockLifecycle(test);
     TestPostUnlockPasskeyRefreshCancellation(test);

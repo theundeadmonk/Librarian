@@ -1,10 +1,15 @@
 #include "pch.h"
 #include "App.xaml.h"
+#include "DesktopLaunchArguments.h"
 #include "MainWindow.xaml.h"
 
+#include "librarian/windows_passkey/registration.h"
+
+#include <shellapi.h>
 #include <shlobj.h>
 
 #include <winrt/Windows.ApplicationModel.h>
+#include <winrt/Windows.ApplicationModel.Activation.h>
 
 #include <array>
 #include <cstdint>
@@ -201,6 +206,43 @@ namespace
             return false;
         }
     }
+
+    librarian::windows::DesktopLaunchRequest read_activation_arguments()
+    {
+        using Windows::ApplicationModel::AppInstance;
+        using Windows::ApplicationModel::Activation::ActivationKind;
+        using Windows::ApplicationModel::Activation::ILaunchActivatedEventArgs;
+
+        try
+        {
+            // Unlike the Windows App SDK wrapper, the platform API does not
+            // synthesize a Launch payload containing the entire command line.
+            auto const activation = AppInstance::GetActivatedEventArgs();
+            if (!activation)
+            {
+                return librarian::windows::ParseDesktopLaunchArguments(
+                    std::nullopt, GetCommandLineW());
+            }
+            if (activation.Kind() != ActivationKind::Launch)
+            {
+                return {};
+            }
+            auto const launch =
+                activation.try_as<ILaunchActivatedEventArgs>();
+            if (!launch)
+            {
+                return {};
+            }
+            winrt::hstring const command = launch.Arguments();
+            return librarian::windows::ParseDesktopLaunchArguments(
+                std::wstring_view{command.c_str(), command.size()},
+                GetCommandLineW());
+        }
+        catch (winrt::hresult_error const&)
+        {
+            return {};
+        }
+    }
 }
 
 namespace winrt::Librarian::Windows::implementation
@@ -219,7 +261,8 @@ namespace winrt::Librarian::Windows::implementation
 #endif
     }
 
-    void App::OnLaunched([[maybe_unused]] LaunchActivatedEventArgs const& event)
+    void App::OnLaunched(
+        [[maybe_unused]] LaunchActivatedEventArgs const& event)
     {
         if (!has_current_product_identity())
         {
@@ -232,6 +275,41 @@ namespace winrt::Librarian::Windows::implementation
                 MB_OK | MB_ICONERROR | MB_SETFOREGROUND);
             Application::Current().Exit();
             return;
+        }
+        auto const request = read_activation_arguments();
+        if (!request.valid)
+        {
+            ExitProcess(1U);
+        }
+        std::wstring const& arguments = request.command;
+        if (!arguments.empty())
+        {
+            namespace registration = librarian::windows_passkey::registration_command;
+            DWORD exit_code = registration::operation_failed;
+            if (arguments == L"--register-passkey-provider")
+            {
+                exit_code = registration::exit_code(
+                    librarian_windows_passkey_provider_register());
+            }
+            else if (arguments == L"--unregister-passkey-provider")
+            {
+                exit_code = registration::exit_code(
+                    librarian_windows_passkey_provider_unregister());
+            }
+            else if (arguments == L"--passkey-provider-registration-state")
+            {
+                std::uint32_t registered = 0U;
+                std::uint32_t const result =
+                    librarian_windows_passkey_provider_registration_state(
+                        &registered);
+                exit_code = result != 0U ? registration::exit_code(result) :
+                    (registered == 1U ? registration::success : registration::not_registered);
+            }
+            else
+            {
+                exit_code = 1U;
+            }
+            ExitProcess(exit_code);
         }
         if (!window)
         {

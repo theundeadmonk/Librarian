@@ -252,8 +252,17 @@ foreach ($applicationId in $expectedApplications.Keys) {
     if ($application.GetAttribute("TrustLevel", $namespaceManager.LookupNamespace("uap10")) -ne "mediumIL") {
         throw "Application '$applicationId' must use mediumIL."
     }
-    if ($application.GetAttribute("RuntimeBehavior", $namespaceManager.LookupNamespace("uap10")) -ne "win32App") {
-        throw "Application '$applicationId' must use win32App runtime behavior."
+    $expectedRuntimeBehavior = "win32App"
+    if (
+        $application.GetAttribute(
+            "RuntimeBehavior",
+            $namespaceManager.LookupNamespace("uap10")
+        ) -ne $expectedRuntimeBehavior
+    ) {
+        throw (
+            "Application '$applicationId' must use " +
+            "$expectedRuntimeBehavior runtime behavior."
+        )
     }
 
     $visualElements = $application.SelectSingleNode("uap:VisualElements", $namespaceManager)
