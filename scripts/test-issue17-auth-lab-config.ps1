@@ -21,3 +21,14 @@ $refused=$false
 try{[void](New-Issue17LabBrowserConfiguration -Stage $stage -PackageName 'TheUndeadMonk.Librarian.Development' -Browser chrome -Batch Initial -Fixtures $fixtures)}catch{$refused=$true}
 if(-not $refused){throw 'Ordinary product configuration was not refused.'}
 Write-Output 'PASS ordinary product configuration refused'
+foreach($case in @(
+    @{Package='TheUndeadMonk.Librarian.Development';Stage=$stage},
+    @{Package=$name;Stage='C:\Program Files\Librarian'},
+    @{Package=$name;Stage=(Join-Path $PSScriptRoot '..\artifacts\wrong-stage')}
+)){
+    $refused=$false
+    try{& (Join-Path $PSScriptRoot 'build-issue17-lab-launcher.ps1') -Stage $case.Stage -PackageName $case.Package -MSBuild 'must-not-launch'}
+    catch{$refused=$_.Exception.Message -ceq 'Unexpected launcher lab scope.'}
+    if(-not $refused){throw 'Lab launcher accepted an ordinary or mismatched scope.'}
+}
+Write-Output 'PASS launcher rejects ordinary identities and mismatched staging paths before writing or building'

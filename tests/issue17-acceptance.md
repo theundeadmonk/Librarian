@@ -5,6 +5,11 @@
 Issue 17 is not yet complete. Local regression has passed; the expanded
 authenticated browser batch and independent review remain gates.
 
+Draft PR: <https://github.com/theundeadmonk/Librarian/pull/44>. Linux CI passed
+for the initial implementation commit; Windows CI and independent Codex review
+were still running at this checkpoint. Do not treat that as a current-head
+CI or review all-clear.
+
 The complete pinned Release pipeline passed on Windows: 273 Rust tests
 (one pre-existing manual Argon2 benchmark ignored), extension unit tests,
 native/runtime component integration, Windows boundary and shell checks, and
@@ -39,6 +44,13 @@ Chrome and Edge both passed the separate action-only self-test. It uses the
 browser's process-owned debugging pipe to dispatch the real extension action
 event to an unambiguous tab target. It does not invoke the handler directly.
 This is automated action coverage, not a physical toolbar click.
+
+The fixture-only transport checks also passed in Chrome and Edge: five Initial
+and fifteen Extended checks per browser. They verify actual HTTPS/HTTP/IDN/port
+document contexts plus data/blob/about pages with exactly two empty fields.
+They load no extension and provide no credential-disclosure evidence. Lab
+configuration serialization and reject-before-write launcher scope checks
+are included in the ordinary Windows CI guard tests.
 
 The expanded authenticated batch adds explicit retry after edits/back/lock,
 same-document worker termination and restart, cross-origin embedded forms,

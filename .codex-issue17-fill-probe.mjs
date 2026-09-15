@@ -244,6 +244,20 @@ async function probe(config, transportOnly = false, contextOnly = false, actionO
       console.log(`PASS ${name}`);
     }
     async function noFill() { await delay(3400); check(await evaluate(noSecrets), 'Unexpected synthetic credential filling'); }
+    async function nonWebPage(scheme) {
+      check(['data','blob','about'].includes(scheme),'Unexpected non-web fixture scheme');
+      let url;
+      if (scheme === 'data') url = 'data:text/html,' + encodeURIComponent(documentBody(login, 'nonweb'));
+      else if (scheme === 'blob') {
+        await page('<main></main>');
+        url = await evaluate(`URL.createObjectURL(new Blob([${JSON.stringify(documentBody(login,'nonweb'))}], {type:'text/html'}))`);
+      } else url = 'about:blank';
+      const navigation = await cdp.call('Page.navigate', {url}, session);
+      check(!navigation.errorText, 'Non-web fixture navigation failed');
+      await until(`location.protocol === ${JSON.stringify(scheme+':')} && document.readyState === 'complete' && typeof fixtureApi !== 'undefined'`);
+      if (scheme === 'about') await evaluate(`document.body.innerHTML = ${JSON.stringify(login)}`);
+      check(await evaluate("document.querySelectorAll('input').length === 2 && Array.from(document.querySelectorAll('input')).every(e => e.value === '')"), 'Non-web fixture fields missing or nonempty');
+    }
     async function explicitFill() {
       try { await cdp.call('Extensions.triggerAction', { id: extensionId, targetId:actionTargetId }); }
       catch (error) {
@@ -274,6 +288,9 @@ async function probe(config, transportOnly = false, contextOnly = false, actionO
         await verify('HTTP intercepted fixture keeps its actual scheme', async () => {
           await page(login, 'http://librarian.test'); check(await evaluate("location.protocol === 'http:'"), 'HTTP fixture upgraded unexpectedly');
         });
+        for (const scheme of ['data','blob','about']) {
+          await verify(`transport only: ${scheme} document has two empty fixture fields`, async () => {await nonWebPage(scheme);});
+        }
         return;
       }
       async function connectWorker() {
@@ -517,16 +534,7 @@ async function probe(config, transportOnly = false, contextOnly = false, actionO
         });
         for (const scheme of ['data', 'blob', 'about']) {
           await verify(`${scheme} document refuses automatic and explicit credential filling`, async () => {
-            let url;
-            if (scheme === 'data') url = 'data:text/html,' + encodeURIComponent(documentBody(login, 'nonweb'));
-            else if (scheme === 'blob') {
-              await page('<main></main>');
-              url = await evaluate(`URL.createObjectURL(new Blob([${JSON.stringify(documentBody(login,'nonweb'))}], {type:'text/html'}))`);
-            } else url = 'about:blank';
-            const navigation = await cdp.call('Page.navigate', {url}, session);
-            check(!navigation.errorText, 'Non-web fixture navigation failed');
-            await until("document.readyState === 'complete' && typeof fixtureApi !== 'undefined'");
-            if (scheme === 'about') await evaluate(`document.body.innerHTML = ${JSON.stringify(login)}`);
+            await nonWebPage(scheme);
             await noFill();
             await cdp.call('Extensions.triggerAction', {id:extensionId,targetId:actionTargetId});
             await noFill();

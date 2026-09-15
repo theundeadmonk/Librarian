@@ -82,6 +82,7 @@ foreach($file in @('.codex-issue17-fill-probe.mjs','.codex-issue17-extended-case
 $inventory=@(Get-ChildItem -LiteralPath $stage -File -Recurse | ForEach-Object {
     @{path=$_.FullName.Substring($stage.Length+1);sha256=(Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash}
 })
-$metadata=[ordered]@{testOnly=$true;packageName=$name;publisher='CN=Librarian Issue17 Test Only';hostName=$hostName;installRoot=$install;launcher='production source with four documented test-only substitutions';sourceCommit=(& git rev-parse HEAD);sourceState='uncommitted Issue17 tree';files=$inventory}
+$sourceState=if(@(& git status --porcelain --untracked-files=no).Count){'uncommitted tracked changes; exact staged-file hashes recorded'}else{'clean tracked files; exact staged-file hashes recorded'}
+$metadata=[ordered]@{testOnly=$true;packageName=$name;publisher='CN=Librarian Issue17 Test Only';hostName=$hostName;installRoot=$install;launcher='production source with four documented test-only substitutions';sourceCommit=(& git rev-parse HEAD);sourceState=$sourceState;files=$inventory}
 $metadata | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $stage 'lab.json') -Encoding UTF8
 [pscustomobject]@{stage=$stage;packageName=$name;hostName=$hostName}
