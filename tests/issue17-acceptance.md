@@ -66,7 +66,7 @@ authenticated VM matrix. All 102 extension unit tests passed. The review
 thread was answered and resolved; [Codex's re-review of the tested code found
 no further issues](https://github.com/theundeadmonk/Librarian/pull/44#issuecomment-5686829503).
 
-The preceding full pinned local Release pipeline passed 273 Rust tests (one
+The preceding full pinned local Release pipeline passed 274 Rust tests (one
 pre-existing manual Argon2 benchmark ignored), extension tests, native/runtime
 component integration, Windows boundary/shell checks, and unsigned installer
 structure/ICE validation. Log:
