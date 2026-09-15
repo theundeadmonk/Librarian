@@ -149,6 +149,13 @@ try {
     await until("fixtureApi.messages.length === 1"); await evaluate("fixtureApi.reply()");
     assert.equal(await evaluate("pass.value"), "DOM-CANARY-PASSWORD");
   });
+  await check("form-less password does not fill an unrelated standalone email field", async () => {
+    await page('<aside><input id="newsletter" type="email" autocomplete="email"></aside><main><input id="pass" type="password" autocomplete="current-password"></main>');
+    assert.equal(await evaluate("fixtureApi.messages.length"), 1);
+    await evaluate("fixtureApi.reply()");
+    assert.deepEqual(await evaluate("[newsletter.value, pass.value, fixtureApi.events]"),
+      ["", "DOM-CANARY-PASSWORD", ["pass"]]);
+  });
   for (const [name, mutation] of [
     ["user edit", "pass.value = 'typed'; pass.dispatchEvent(new Event('input', { bubbles: true }))"],
     ["field replacement", "pass.replaceWith(pass.cloneNode())"],

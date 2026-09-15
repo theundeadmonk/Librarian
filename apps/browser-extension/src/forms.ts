@@ -20,7 +20,10 @@ export function findFillTargets(document: Document): FillTargets | null {
   const password = passwords[0]!;
   if (password.autocomplete.toLowerCase().split(/\s+/u).includes("new-password")) return null;
   const form = password.form;
-  const group = visible.filter((input) => input.form === form);
+  // Null form owners do not establish a relationship between controls. A
+  // standalone current-password box is password-only, never paired with an
+  // unrelated standalone email/username field elsewhere in the document.
+  const group = form === null ? [password] : visible.filter((input) => input.form === form);
   if (group.some((input) => input.autocomplete.toLowerCase().split(/\s+/u).includes("new-password"))) return null;
   const hasCurrentPassword = password.autocomplete.toLowerCase().split(/\s+/u).includes("current-password");
   if (!hasCurrentPassword) {

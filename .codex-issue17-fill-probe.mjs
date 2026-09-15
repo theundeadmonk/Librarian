@@ -323,6 +323,19 @@ async function probe(config, transportOnly = false, contextOnly = false, actionO
       await workerCdp.call('Runtime.enable');
       await workerCdp.call('Runtime.runIfWaitingForDebugger');
       }
+      async function terminateWorker() {
+        const previous = workerTargetId;
+        workerCdp.socket.close(); workerCdp = undefined;
+        const stopped = await cdp.call('Target.closeTarget', {targetId:previous});
+        check(stopped.success, 'Browser did not stop the extension worker');
+        // The command acknowledges the shutdown request; target destruction
+        // is asynchronous. Wait for the browser-owned target to disappear.
+        for (let attempt=0;attempt<100;attempt++) {
+          if (!(await cdp.call('Target.getTargets')).targetInfos.some(t => t.targetId === previous)) return previous;
+          await delay(50);
+        }
+        throw new Error('Old worker target remains after bounded shutdown wait');
+      }
       await connectWorker();
       if (actionOnly) {
         await page();
@@ -330,7 +343,18 @@ async function probe(config, transportOnly = false, contextOnly = false, actionO
         for (let attempt=0;attempt<100;attempt++) {
           if(await workerCdp.evaluate('globalThis.actionCount === 1')) {
             await verify('browser-generated action reached the non-native fixture once',async()=>{});
-            return;
+            const previous = await terminateWorker();
+            await cdp.call('Extensions.triggerAction',{id:extensionId,targetId:actionTargetId});
+            await connectWorker();
+            check(workerTargetId !== previous, 'Browser did not create a fresh fixture worker');
+            for(let retry=0;retry<100;retry++) {
+              if(await workerCdp.evaluate('globalThis.actionCount === 1')) {
+                await verify('browser action starts a fresh fixture worker after observed termination',async()=>{});
+                return;
+              }
+              await delay(50);
+            }
+            throw new Error('Fresh fixture worker did not receive the browser action');
           }
           await delay(50);
         }
@@ -420,6 +444,11 @@ async function probe(config, transportOnly = false, contextOnly = false, actionO
       await verify('password-only current-password step fills', async () => {
         await page('<form action="/session"><input id="pass" type="password" autocomplete="current-password"></form>'); await until(matches);
       });
+      await verify('form-less password fills without changing an unrelated email field', async () => {
+        await page('<aside><input id="newsletter" type="email" autocomplete="email"></aside><main><input id="pass" type="password" autocomplete="current-password"></main>');
+        await until(matches);
+        check(await evaluate("newsletter.value === '' && JSON.stringify(fixtureApi.inputs) === '[\"pass\"]' && JSON.stringify(fixtureApi.changes) === '[\"pass\"]'"), 'Unrelated form-less email field was changed');
+      });
       for (const [name, html] of [
         ['new-password registration', login.replace('current-password', 'new-password')],
         ['ambiguous forms', login + login.replaceAll('id="user"', 'id="user2"').replaceAll('id="pass"', 'id="pass2"')],
@@ -498,11 +527,7 @@ async function probe(config, transportOnly = false, contextOnly = false, actionO
         await verify('browser action explicitly fills again after authenticated unlock', async () => {await explicitFill();});
         await verify('worker termination preserves the document automatic-fill budget', async () => {
           await evaluate("pass.value = ''; pass.dispatchEvent(new Event('input', {bubbles:true})); fixtureApi.restartMarker = 'same-document'");
-          const previous = workerTargetId;
-          workerCdp.socket.close(); workerCdp = undefined;
-          const stopped = await cdp.call('Target.closeTarget', {targetId:previous});
-          check(stopped.success, 'Browser did not stop the extension worker');
-          check(!(await cdp.call('Target.getTargets')).targetInfos.some(t => t.targetId === previous), 'Old worker target remains');
+          await terminateWorker();
           await evaluate("document.body.append(document.createElement('p'))");
           await delay(3400);
           check(await evaluate("pass.value === '' && fixtureApi.restartMarker === 'same-document'"), 'Worker termination reset page or fill budget');
