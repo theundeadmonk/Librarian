@@ -235,6 +235,13 @@ impl AccountFields {
 /// adds a complete schema.
 pub enum OperationRequest {
     Status,
+    ExactOriginMatches {
+        context: crate::BrowserContext,
+    },
+    GetSelectedCredential {
+        context: crate::BrowserContext,
+        selection: crate::BrowserSelection,
+    },
     CreateVault {
         master_password: Zeroizing<String>,
     },
@@ -295,6 +302,8 @@ impl OperationRequest {
     pub const fn operation(&self) -> OperationCode {
         match self {
             Self::Status => OperationCode::Status,
+            Self::ExactOriginMatches { .. } => OperationCode::ExactOriginMatches,
+            Self::GetSelectedCredential { .. } => OperationCode::GetSelectedCredential,
             Self::CreateVault { .. } => OperationCode::CreateVault,
             Self::UnlockMasterPassword { .. } => OperationCode::UnlockMasterPassword,
             Self::Lock => OperationCode::Lock,
@@ -483,10 +492,13 @@ impl OperationRequest {
             | OperationCode::RollbackPasskeyCreation) => {
                 decode_passkey_request(&mut decoder, operation)?
             }
-            OperationCode::ExactOriginMatches
-            | OperationCode::GetSelectedCredential
-            | OperationCode::CaptureCredential
-            | OperationCode::UpdateCredential => return Err(ProtocolError::Unsupported),
+            operation @ (OperationCode::ExactOriginMatches
+            | OperationCode::GetSelectedCredential) => {
+                decode_browser_request(&mut decoder, operation)?
+            }
+            OperationCode::CaptureCredential | OperationCode::UpdateCredential => {
+                return Err(ProtocolError::Unsupported);
+            }
         };
         require_end(&decoder, bytes)?;
         if request.encode()?.as_slice() != bytes {
@@ -516,6 +528,15 @@ impl OperationRequest {
         }
         let mut encoder = Encoder::new(SecretWriter::with_capacity(MAX_PAYLOAD_BYTES));
         match self {
+            Self::ExactOriginMatches { context } => {
+                encode_array(&mut encoder, 1);
+                context.encode_into(&mut encoder);
+            }
+            Self::GetSelectedCredential { context, selection } => {
+                encode_array(&mut encoder, 2);
+                context.encode_into(&mut encoder);
+                selection.encode_into(&mut encoder);
+            }
             Self::Status | Self::Lock | Self::RemoveWindowsHello | Self::ListPasskeys => {
                 encode_array(&mut encoder, 0);
             }
@@ -589,6 +610,24 @@ fn decode_parent_window(decoder: &mut Decoder<'_>) -> Result<u64, ProtocolError>
     (parent_window != 0)
         .then_some(parent_window)
         .ok_or(ProtocolError::InvariantViolation)
+}
+
+fn decode_browser_request(
+    decoder: &mut Decoder<'_>,
+    operation: OperationCode,
+) -> Result<OperationRequest, ProtocolError> {
+    if operation == OperationCode::ExactOriginMatches {
+        expect_array(decoder, 1)?;
+        Ok(OperationRequest::ExactOriginMatches {
+            context: crate::BrowserContext::decode_from(decoder)?,
+        })
+    } else {
+        expect_array(decoder, 2)?;
+        Ok(OperationRequest::GetSelectedCredential {
+            context: crate::BrowserContext::decode_from(decoder)?,
+            selection: crate::BrowserSelection::decode_from(decoder)?,
+        })
+    }
 }
 
 fn decode_passkey_request_proof(

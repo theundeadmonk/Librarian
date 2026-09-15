@@ -539,10 +539,12 @@ version = "0.1.0"
 dependencies = [
  "getrandom",
  "librarian-agent-protocol",
+ "librarian-vault-agent",
  "librarian-windows-ipc",
  "serde",
  "serde_json",
  "sha2",
+ "url",
  "zeroize",
 ]
 

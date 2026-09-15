@@ -47,6 +47,7 @@ namespace winrt::Librarian::Windows::implementation
             case ShellState::Saving:
                 return L"Saving account";
             case ShellState::Unlocked:
+            case ShellState::Refreshing:
                 return L"Accounts";
             case ShellState::Error:
                 return L"Librarian needs attention";
@@ -118,12 +119,15 @@ namespace winrt::Librarian::Windows::implementation
     {
         auto const was_active = is_active_;
         is_active_ = event.WindowActivationState() != WindowActivationState::Deactivated;
-        if (is_active_)
+        if (is_active_ && !was_active)
         {
-            QueueFocusForActivation();
-            if (is_loaded_ && !was_active)
+            if (is_loaded_)
             {
                 RefreshAfterActivation();
+            }
+            else
+            {
+                QueueFocusForActivation();
             }
         }
     }
@@ -141,7 +145,7 @@ namespace winrt::Librarian::Windows::implementation
         }
         ClearSetupPasswords();
         MasterPasswordBox().Password(L"");
-        AccountPasswordBox().Password(L"");
+        ClearAccountEditor();
     }
 
     fire_and_forget MainWindow::OnCreateVaultClicked(
@@ -478,6 +482,10 @@ namespace winrt::Librarian::Windows::implementation
     {
         auto lifetime = get_strong();
         auto const dispatcher = DispatcherQueue();
+        if (!view_model_.BeginSaveAccount())
+        {
+            co_return;
+        }
         librarian::windows::SecretText password{ AccountPasswordBox().Password() };
         AccountPasswordBox().Password(L"");
 
@@ -487,11 +495,6 @@ namespace winrt::Librarian::Windows::implementation
             std::wstring{ UsernameTextBox().Text() },
             std::move(password),
         };
-
-        if (!view_model_.BeginSaveAccount())
-        {
-            co_return;
-        }
 
         Render();
         co_await resume_background();
@@ -588,12 +591,15 @@ namespace winrt::Librarian::Windows::implementation
         }
     }
 
-    void MainWindow::Render()
+    void MainWindow::Render(bool const focus_current_state)
     {
         using librarian::windows::ShellState;
 
         auto const state = view_model_.State();
-        StateTitleTextBlock().Text(TitleFor(state));
+        auto const is_editing = view_model_.IsAccountEditorVisible();
+        auto const is_refreshing = state == ShellState::Refreshing;
+        auto const show_unlocked_page = state == ShellState::Unlocked || is_refreshing;
+        StateTitleTextBlock().Text(is_editing && show_unlocked_page ? L"Add account" : TitleFor(state));
         StateDescriptionTextBlock().Text(view_model_.Message());
         StateDescriptionTextBlock().Visibility(
             VisibleWhen(!view_model_.Message().empty()));
@@ -603,14 +609,25 @@ namespace winrt::Librarian::Windows::implementation
         auto const is_working =
             state == ShellState::Unlocking || state == ShellState::Saving;
         UnlockingPanel().Visibility(VisibleWhen(is_working));
-        UnlockedPanel().Visibility(VisibleWhen(state == ShellState::Unlocked));
+        UnlockedPanel().Visibility(VisibleWhen(show_unlocked_page && !is_editing));
+        AddAccountButton().IsEnabled(!is_refreshing);
+        LockButton().IsEnabled(!is_refreshing);
+        WindowsHelloEnrollButton().IsEnabled(!is_refreshing);
+        WindowsHelloRemoveButton().IsEnabled(!is_refreshing);
+        DeletePasskeyButton().IsEnabled(!is_refreshing);
+        PreviousAccountPageButton().IsEnabled(!is_refreshing);
+        NextAccountPageButton().IsEnabled(!is_refreshing);
         ErrorPanel().Visibility(VisibleWhen(state == ShellState::Error));
         AgentUnavailablePanel().Visibility(
             VisibleWhen(state == ShellState::AgentUnavailable));
 
         UnlockingProgressRing().IsActive(is_working);
         AccountEditorPanel().Visibility(
-            VisibleWhen(view_model_.IsAccountEditorVisible()));
+            VisibleWhen(show_unlocked_page && is_editing));
+        // Draft fields remain editable, including during VM clipboard delivery.
+        // Vault operations wait for verification; Cancel remains explicit.
+        SaveAccountButton().IsEnabled(state == ShellState::Unlocked);
+        LockFromAccountEditorButton().IsEnabled(state == ShellState::Unlocked);
 
         if (state == ShellState::Error)
         {
@@ -626,10 +643,19 @@ namespace winrt::Librarian::Windows::implementation
         {
             AccountsListView().Items().Clear();
             PasskeysListView().Items().Clear();
+        }
+
+        // Rendering and focus changes do not own the draft's lifetime. Clear it
+        // only when the model leaves editing (save, cancel, lock, or failure).
+        if (!is_editing)
+        {
             ClearAccountEditor();
         }
 
-        QueueFocusCurrentState();
+        if (focus_current_state && !is_refreshing)
+        {
+            QueueFocusCurrentState();
+        }
     }
 
     void MainWindow::RenderPasskeys()
@@ -731,6 +757,8 @@ namespace winrt::Librarian::Windows::implementation
         case ShellState::Unlocking:
         case ShellState::Saving:
             return UnlockingProgressRing().Focus(FocusState::Programmatic);
+        case ShellState::Refreshing:
+            return false;
         case ShellState::Unlocked:
             if (view_model_.IsAccountEditorVisible())
             {
@@ -876,10 +904,11 @@ namespace winrt::Librarian::Windows::implementation
         auto const dispatcher = DispatcherQueue();
         if (!view_model_.BeginRefresh())
         {
+            QueueFocusForActivation();
             co_return;
         }
 
-        Render();
+        Render(false);
         co_await resume_background();
         if (lifetime->is_closed_.load(std::memory_order_acquire))
         {
@@ -898,7 +927,8 @@ namespace winrt::Librarian::Windows::implementation
                 return;
             }
             lifetime->view_model_.CompleteRefresh(std::move(*outcome));
-            lifetime->RenderSecurityTransitionIfOpen();
+            lifetime->Render(false);
+            lifetime->QueueFocusForActivation();
         }))
         {
             co_return;

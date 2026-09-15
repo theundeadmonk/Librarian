@@ -1,0 +1,6 @@
+# TEST ONLY: public dummy values, never production credentials.
+Issue 17 test	https://librarian.test	issue17-test-user	Issue17-Test-Only!2026
+Issue 17 port	https://ports.librarian.test:8443	issue17-port-user	Issue17-Port-Only!2026
+Issue 17 IDN	https://bücher.librarian.test	issue17-idn-user	Issue17-IDN-Only!2026
+Issue 17 duplicate A	https://duplicates.librarian.test	issue17-duplicate-a	Issue17-Duplicate-A!2026
+Issue 17 duplicate B	https://duplicates.librarian.test	issue17-duplicate-b	Issue17-Duplicate-B!2026

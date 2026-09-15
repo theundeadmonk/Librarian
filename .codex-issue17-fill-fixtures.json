@@ -1,0 +1,58 @@
+{
+  "purpose": "Synthetic account setup for the next installed-chain test; not a test result or a real credential",
+  "guestComputer": "LIBRARIAN-TEST",
+  "installedVersion": "0.1.12.0",
+  "setupStatus": "Single synthetic account verified by installed Edge and Chrome filling in desktop-20260905-212851; full acceptance pending",
+  "masterPassword": "User chooses privately; never collected by the harness",
+  "automaticSetup": {
+    "status": "Passed in isolated host and VM vaults; user requested no manual testing at this stage",
+    "runner": ".codex-run-issue17-synthetic.ps1",
+    "accountCount": 5,
+    "runtimeChecksPerRun": 43,
+    "hostEvidence": "artifacts/issue17-synthetic-20260914-162856-70ef98bc48614a3d88b8c279854e6984/report.json",
+    "vmEvidence": "artifacts/issue17-synthetic-vm-20260914-162912-3139d60bff2d423f947891b4a2a52b58/guest-report.json",
+    "isolation": "Separate new encrypted vault, fixed public dummy master password, no installed-vault access; accounts were not added to the user's existing vault",
+    "evidenceScope": "Production runtime and storage exercised in-process with synthetic connection identities; not installed browser or UI acceptance"
+  },
+  "accounts": [
+    {
+      "serviceName": "Issue 17 test",
+      "origin": "https://librarian.test",
+      "username": "issue17-test-user",
+      "password": "Issue17-Test-Only!2026"
+    }
+  ],
+  "extended": {
+    "setupStatus": "Not yet user confirmed; 0.1.12.0 upgrade and connection smoke passed; verify Add Account page persistence manually before creating these",
+    "accounts": [
+      {"serviceName":"Issue 17 port","origin":"https://ports.librarian.test:8443","username":"issue17-port-user","password":"Issue17-Port-Only!2026"},
+      {"serviceName":"Issue 17 IDN","origin":"https://b\u00fccher.librarian.test","username":"issue17-idn-user","password":"Issue17-IDN-Only!2026"},
+      {"serviceName":"Issue 17 duplicate A","origin":"https://duplicates.librarian.test","username":"issue17-duplicate-a","password":"Issue17-Duplicate-A!2026"},
+      {"serviceName":"Issue 17 duplicate B","origin":"https://duplicates.librarian.test","username":"issue17-duplicate-b","password":"Issue17-Duplicate-B!2026"}
+    ],
+    "requiredTests": [
+      "baseline single account still fills",
+      "exact non-default HTTPS port fills its own account",
+      "zero-padded matching port canonicalizes",
+      "omitted port does not match the saved non-default port",
+      "explicit default port does not match the saved non-default port",
+      "different non-default port receives no credential",
+      "HTTP with the saved numeric port receives no credential",
+      "Unicode IDN fills its own account",
+      "punycode spelling fills the same IDN account",
+      "ASCII lookalike of the IDN receives no credential",
+      "IDN subdomain receives no credential",
+      "IDN at a different port receives no credential",
+      "two accounts at the exact origin cause no fill",
+      "another path cannot select one of two matching accounts",
+      "duplicate-account origin at a different port receives no credential"
+    ]
+  },
+  "constraints": [
+    "Create exactly one account for this origin for the initial single-match tests",
+    "Use only an intercepted local fixture, never a live website or a submitted login",
+    "Never report the master password or dump native credential responses",
+    "Record only booleans for expected field matches and scan bounded product logs for synthetic canary leaks",
+    "Ports, IDN positive matches, duplicate accounts, and lock races need additional matrix steps; one successful fill is not completion of issue 17"
+  ]
+}

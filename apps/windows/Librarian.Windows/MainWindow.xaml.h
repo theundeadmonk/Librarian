@@ -61,7 +61,7 @@ namespace winrt::Librarian::Windows::implementation
             Microsoft::UI::Xaml::RoutedEventArgs const&);
 
     private:
-        void Render();
+        void Render(bool focus_current_state = true);
         void RenderAccounts();
         void RenderPasskeys();
         void OnSecurityTimerTick();

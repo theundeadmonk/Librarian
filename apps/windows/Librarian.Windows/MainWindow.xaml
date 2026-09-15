@@ -247,58 +247,67 @@
                                 Content="Next"
                                 TabIndex="7" />
                         </StackPanel>
-
-                        <Border
-                            x:Name="AccountEditorPanel"
-                            BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
-                            BorderThickness="1"
-                            CornerRadius="8"
-                            Padding="16"
-                            Visibility="Collapsed">
-                            <StackPanel Spacing="12">
-                                <TextBlock
-                                    AutomationProperties.HeadingLevel="Level3"
-                                    Style="{StaticResource BodyStrongTextBlockStyle}"
-                                    Text="New website account" />
-                                <TextBox
-                                    x:Name="ServiceNameTextBox"
-                                    AutomationProperties.Name="Service name"
-                                    Header="Service name"
-                                    TabIndex="8" />
-                                <TextBox
-                                    x:Name="OriginTextBox"
-                                    AutomationProperties.Name="Website origin"
-                                    Header="Website origin"
-                                    PlaceholderText="https://example.com"
-                                    TabIndex="9" />
-                                <TextBox
-                                    x:Name="UsernameTextBox"
-                                    AutomationProperties.Name="Username"
-                                    Header="Username"
-                                    TabIndex="10" />
-                                <PasswordBox
-                                    x:Name="AccountPasswordBox"
-                                    AutomationProperties.Name="Account password"
-                                    Header="Password"
-                                    PasswordRevealMode="Hidden"
-                                    TabIndex="11" />
-                                <StackPanel Spacing="8">
-                                    <Button
-                                        AutomationProperties.Name="Save website account"
-                                        Click="OnSaveAccountClicked"
-                                        Content="Save"
-                                        HorizontalAlignment="Left"
-                                        TabIndex="12" />
-                                    <Button
-                                        AutomationProperties.Name="Cancel account editing"
-                                        Click="OnCancelAccountClicked"
-                                        Content="Cancel"
-                                        HorizontalAlignment="Left"
-                                        TabIndex="13" />
-                                </StackPanel>
-                            </StackPanel>
-                        </Border>
                     </StackPanel>
+
+                    <!-- A persistent page, not a flyout or a light-dismiss popup. -->
+                    <Border
+                        x:Name="AccountEditorPanel"
+                        BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                        BorderThickness="1"
+                        CornerRadius="8"
+                        Padding="16"
+                        Visibility="Collapsed">
+                        <StackPanel Spacing="12">
+                            <TextBlock
+                                AutomationProperties.HeadingLevel="Level3"
+                                Style="{StaticResource BodyStrongTextBlockStyle}"
+                                Text="New website account" />
+                            <TextBox
+                                x:Name="ServiceNameTextBox"
+                                AutomationProperties.Name="Service name"
+                                Header="Service name"
+                                TabIndex="1" />
+                            <TextBox
+                                x:Name="OriginTextBox"
+                                AutomationProperties.Name="Website origin"
+                                Header="Website origin"
+                                PlaceholderText="https://example.com"
+                                TabIndex="2" />
+                            <TextBox
+                                x:Name="UsernameTextBox"
+                                AutomationProperties.Name="Username"
+                                Header="Username"
+                                TabIndex="3" />
+                            <PasswordBox
+                                x:Name="AccountPasswordBox"
+                                AutomationProperties.Name="Account password"
+                                Header="Password"
+                                PasswordRevealMode="Hidden"
+                                TabIndex="4" />
+                            <StackPanel Spacing="8">
+                                <Button
+                                    x:Name="SaveAccountButton"
+                                    AutomationProperties.Name="Save website account"
+                                    Click="OnSaveAccountClicked"
+                                    Content="Save"
+                                    HorizontalAlignment="Left"
+                                    TabIndex="5" />
+                                <Button
+                                    AutomationProperties.Name="Cancel account editing"
+                                    Click="OnCancelAccountClicked"
+                                    Content="Cancel"
+                                    HorizontalAlignment="Left"
+                                    TabIndex="6" />
+                                <Button
+                                    x:Name="LockFromAccountEditorButton"
+                                    AutomationProperties.Name="Lock local vault and discard draft"
+                                    Click="OnLockClicked"
+                                    Content="Lock vault"
+                                    HorizontalAlignment="Left"
+                                    TabIndex="7" />
+                            </StackPanel>
+                        </StackPanel>
+                    </Border>
 
                     <StackPanel
                         x:Name="ErrorPanel"

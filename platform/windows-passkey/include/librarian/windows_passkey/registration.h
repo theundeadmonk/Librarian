@@ -17,9 +17,19 @@ namespace librarian::windows_passkey::registration_command
         // registration. Other failures must not use the platform fallback.
         constexpr std::uint32_t api_not_found = 0x8007007FU;
         constexpr std::uint32_t not_implemented = 0x80004001U;
-        return result == 0U ? success :
-            (result == api_not_found || result == not_implemented ?
-                platform_unavailable : operation_failed);
+        if (result == 0U)
+        {
+            return success;
+        }
+        if (result == api_not_found || result == not_implemented)
+        {
+            return platform_unavailable;
+        }
+        // Preserve failing HRESULT bits across the hidden process boundary so
+        // the launcher can explain an actual API error. Only the two explicit
+        // unavailable results above allow fallback. Unexpected success/status
+        // values must not alias one of our small process exit codes.
+        return (result & 0x80000000U) != 0U ? result : operation_failed;
     }
 
     constexpr bool can_continue(std::uint32_t code, bool registering) noexcept

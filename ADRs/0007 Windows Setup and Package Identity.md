@@ -157,10 +157,46 @@ installed-payload identity before calling the shared Windows registration API;
 the provider's COM-server identity remains exclusive to Windows-initiated
 operations. This matches Microsoft's Passkey Manager sample, where the main
 application owns registration rather than the COM callback server. Only the
-command's explicit `OperationFailed` result is treated as platform
+command's explicit `PlatformUnavailable` result is treated as platform
 unavailability: Librarian keeps master-password fallback, desktop launch, and
 browser status available without registering an alternate provider. Identity,
 activation, timeout, and unexpected failures remain fail closed.
+
+Unexpected Windows registration HRESULTs are preserved as failing process exit
+codes and included in the launcher's error message. They do not enable password
+fallback. Only missing API exports or an explicitly unimplemented API yield
+`PlatformUnavailable`; diagnostics must not classify a generic registration
+failure as an unsupported platform.
+
+The registration request supplies `librarian.invalid` as the plugin's own
+relying-party identifier. Although the API reference labels `pwszPluginRpId`
+optional, Windows `webauthn.dll` 10.0.26100.8117 rejects a null value with
+`NTE_INVALID_PARAMETER` (`0x80090027`). The reserved `.invalid` identifier is
+local metadata, not a network endpoint or an actual website credential origin.
+Librarian does not currently make nested WebAuthn calls using it. This field is
+separate from the supported-website RP list, which remains zero/null to service
+all relying parties. Exact-origin browser matching and consent are unchanged.
+The regression test exercises the same options builder as production and keeps
+invalid-parameter errors fatal. The signed 0.1.9.0 Home VM test confirmed
+registration and the package-identified registration-state probe succeed;
+full desktop-to-agent and browser acceptance remain separate gates.
+
+The desktop treats a fully validated discovery descriptor from a strictly older
+version of its exact package identity as stale runtime state. It activates only
+its own registered `!VaultAgent` AUMID, retries discovery within the existing
+startup deadline, and never connects using the old descriptor. Package names
+are parsed with `PackageIdFromFullName(PACKAGE_INFORMATION_BASIC)` so recovery
+does not depend on the old package remaining installed. Reconstructing the
+current identity with only its version changed must exactly match the old full
+name; different names, publishers, architectures, resource IDs, newer versions,
+noncanonical names, and malformed metadata still fail closed. Descriptor path,
+owner, schema, and file-identity checks precede recovery. Fresh endpoints still
+require the unchanged process, token, package, path, and handshake authorization.
+Regression tests exercise the production decoder and bounded retry policy;
+the signed 0.1.9.0-to-0.1.10.0 Home VM upgrade subsequently passed normal
+desktop/agent startup and real Edge/Chrome native-host status probes. Both
+browsers reached the uninitialized-vault state. Credential-fill acceptance
+and independent review remain separate, incomplete gates.
 
 The MSI deliberately does not provision the package for all users or ask a
 System-context custom action to inspect another user's package projection.

@@ -912,6 +912,67 @@ namespace librarian::windows
             });
         }
 
+        token_buffer parse_package_id(std::wstring const& full_name)
+        {
+            if (full_name.empty() || full_name.size() > 256U ||
+                full_name.find(L'\0') != std::wstring::npos)
+            {
+                fail(transport_error::invalid);
+            }
+            UINT32 length = 0U;
+            // BASIC parses identity without requiring the old package to remain
+            // installed. FULL would make normal post-upgrade recovery fail.
+            if (PackageIdFromFullName(full_name.c_str(), PACKAGE_INFORMATION_BASIC,
+                    &length, nullptr) != ERROR_INSUFFICIENT_BUFFER ||
+                length < sizeof(PACKAGE_ID) || length > maximum_descriptor_bytes)
+            {
+                fail(transport_error::invalid);
+            }
+            token_buffer bytes{length};
+            if (PackageIdFromFullName(full_name.c_str(), PACKAGE_INFORMATION_BASIC,
+                    &length, static_cast<BYTE*>(bytes.data())) != ERROR_SUCCESS ||
+                length < sizeof(PACKAGE_ID) || length > bytes.size())
+            {
+                fail(transport_error::invalid);
+            }
+            return bytes;
+        }
+
+        bool is_older_package_version(
+            std::wstring const& candidate,
+            std::wstring const& expected)
+        {
+            auto const candidate_bytes = parse_package_id(candidate);
+            auto const expected_bytes = parse_package_id(expected);
+            auto const& candidate_id = token_value<PACKAGE_ID>(candidate_bytes);
+            auto expected_id = token_value<PACKAGE_ID>(expected_bytes);
+            if (candidate_id.version.Version >= expected_id.version.Version)
+            {
+                return false;
+            }
+
+            // Reconstruct the trusted identity with ONLY its version changed.
+            // Exact comparison also rejects alternate spellings, foreign names,
+            // publishers, architectures, and resource IDs. No cache field is
+            // ever used to select the application that Windows activates.
+            expected_id.version = candidate_id.version;
+            UINT32 length = 0U;
+            if (PackageFullNameFromId(&expected_id, &length, nullptr) !=
+                    ERROR_INSUFFICIENT_BUFFER || length <= 1U || length > 257U)
+            {
+                fail(transport_error::invalid);
+            }
+            std::wstring reconstructed(length, L'\0');
+            if (PackageFullNameFromId(&expected_id, &length, reconstructed.data()) !=
+                    ERROR_SUCCESS || length <= 1U || length > reconstructed.size() ||
+                reconstructed[length - 1U] != L'\0')
+            {
+                fail(transport_error::invalid);
+            }
+            reconstructed.resize(length - 1U);
+            return candidate == reconstructed;
+        }
+
         endpoint_descriptor decode_descriptor(
             std::span<std::uint8_t const> const bytes,
             std::wstring const& expected_package)
@@ -930,7 +991,7 @@ namespace librarian::windows
             auto const startup_nonce = reader.bytes(32U);
             reader.finish();
             if (process_id == 0U || process_id > MAXDWORD || creation_time == 0U ||
-                package_full_name != expected_package || minimum_major == 0U ||
+                minimum_major == 0U ||
                 minimum_major > protocol_major || maximum_major < protocol_major ||
                 startup_nonce.size() != 32U || !nonzero(startup_nonce) ||
                 !pipe_name.starts_with(pipe_prefix))
@@ -948,6 +1009,15 @@ namespace librarian::windows
                 }))
             {
                 fail(transport_error::invalid);
+            }
+            if (package_full_name != expected_package)
+            {
+                // A fully validated descriptor from an older version of this
+                // exact identity is stale discovery, not an authorized endpoint.
+                // Trigger bounded activation/rediscovery only after every other
+                // schema and metadata check; never connect using the old file.
+                fail(is_older_package_version(package_full_name, expected_package) ?
+                    transport_error::unavailable : transport_error::invalid);
             }
             return {
                 pipe_name,
@@ -1640,15 +1710,17 @@ namespace librarian::windows
             }
         }
 
-        template<typename RegisterPipe, typename ClearPipe>
-        pipe_connection connect_agent(
-            packaged_context const& context,
+        // Keep the bounded activation/retry policy independent of Windows I/O
+        // so tests exercise the real policy without starting product processes.
+        template<typename Attempt, typename Activate, typename Expired, typename Pause>
+        auto retry_agent_connection(
             std::atomic_bool const& closed,
-            RegisterPipe&& register_pipe,
-            ClearPipe&& clear_pipe)
+            Attempt&& attempt,
+            Activate&& activate,
+            Expired&& expired,
+            Pause&& pause) -> decltype(attempt())
         {
             bool activated = false;
-            auto const deadline = std::chrono::steady_clock::now() + std::chrono::seconds{5};
             for (;;)
             {
                 if (closed.load(std::memory_order_acquire))
@@ -1657,22 +1729,7 @@ namespace librarian::windows
                 }
                 try
                 {
-                    auto endpoint = load_descriptor(
-                        context.endpoint_path,
-                        context.current.package_full_name,
-                        context.current.user_sid);
-                    auto connection = connect_pipe(context, endpoint);
-                    register_pipe(connection.pipe.get());
-                    try
-                    {
-                        negotiate(context, connection);
-                    }
-                    catch (...)
-                    {
-                        clear_pipe(connection.pipe.get());
-                        throw;
-                    }
-                    return connection;
+                    return attempt();
                 }
                 catch (transport_exception const& error)
                 {
@@ -1684,15 +1741,50 @@ namespace librarian::windows
                 }
                 if (!activated)
                 {
-                    activate_agent(context.current.package_family_name);
+                    activate();
                     activated = true;
                 }
-                if (std::chrono::steady_clock::now() >= deadline)
+                if (expired())
                 {
                     fail(transport_error::unavailable);
                 }
-                std::this_thread::sleep_for(std::chrono::milliseconds{50});
+                pause();
             }
+        }
+
+        template<typename RegisterPipe, typename ClearPipe>
+        pipe_connection connect_agent(
+            packaged_context const& context,
+            std::atomic_bool const& closed,
+            RegisterPipe&& register_pipe,
+            ClearPipe&& clear_pipe)
+        {
+            auto const deadline = std::chrono::steady_clock::now() + std::chrono::seconds{5};
+            return retry_agent_connection(closed, [&] {
+                auto endpoint = load_descriptor(
+                    context.endpoint_path,
+                    context.current.package_full_name,
+                    context.current.user_sid);
+                auto connection = connect_pipe(context, endpoint);
+                register_pipe(connection.pipe.get());
+                try
+                {
+                    negotiate(context, connection);
+                }
+                catch (...)
+                {
+                    clear_pipe(connection.pipe.get());
+                    throw;
+                }
+                return connection;
+            }, [&] {
+                // Never take the activation identity from the discovery file.
+                activate_agent(context.current.package_family_name);
+            }, [&] {
+                return std::chrono::steady_clock::now() >= deadline;
+            }, [] {
+                std::this_thread::sleep_for(std::chrono::milliseconds{50});
+            });
         }
 
         enum class operation : std::uint16_t

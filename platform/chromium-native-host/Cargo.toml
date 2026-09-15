@@ -11,10 +11,21 @@ repository.workspace = true
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.151"
 zeroize = { version = "=1.9.0", features = ["std"] }
+librarian-agent-protocol = { path = "../../crates/agent-protocol" }
+url = "=2.5.8"
+
+[dev-dependencies]
+librarian-vault-agent = { path = "../../crates/vault-agent" }
+getrandom = "=0.4.3"
+
+# Explicit test-only stdio fixture; never part of the product/installer payload.
+[[example]]
+name = "issue17-stdio"
+path = "examples/issue17_stdio.rs"
+test = true
 
 [target.'cfg(windows)'.dependencies]
 getrandom = "=0.4.3"
-librarian-agent-protocol = { path = "../../crates/agent-protocol" }
 librarian-windows-ipc = { path = "../windows-ipc" }
 sha2 = "=0.11.0"
 

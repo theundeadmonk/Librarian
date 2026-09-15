@@ -58,6 +58,9 @@
     <ClInclude Include="..\..\platform\windows-passkey\include\librarian\windows_passkey\registration.h">
       <Link>registration.h</Link>
     </ClInclude>
+    <ClInclude Include="..\..\platform\windows-passkey\include\librarian\windows_passkey\registration_options.h">
+      <Link>registration_options.h</Link>
+    </ClInclude>
     <ClInclude Include="..\..\apps\windows\Librarian.Windows\DesktopLaunchArguments.h">
       <Link>DesktopLaunchArguments.h</Link>
     </ClInclude>
@@ -76,9 +79,7 @@
     <ClCompile Include="..\..\apps\windows\Librarian.Windows\DesktopClient.cpp">
       <Link>DesktopClient.cpp</Link>
     </ClCompile>
-    <ClCompile Include="..\..\apps\windows\Librarian.Windows\DesktopTransport.cpp">
-      <Link>DesktopTransport.cpp</Link>
-    </ClCompile>
+    <ClCompile Include="DesktopTransportTests.cpp" />
     <ClCompile Include="..\..\apps\windows\Librarian.Windows\ShellViewModel.cpp">
       <Link>ShellViewModel.cpp</Link>
     </ClCompile>

@@ -6,6 +6,7 @@
 
 #![forbid(unsafe_code)]
 
+mod browser;
 mod cbor;
 mod events;
 mod frame;
@@ -14,6 +15,7 @@ mod operations;
 mod session;
 mod types;
 
+pub use browser::{BrowserContext, BrowserCredential, BrowserSelection};
 pub use events::{AgentEvent, EventQueue, EventQueueOverflow};
 pub use frame::{Frame, FrameError, FrameHeader, MessageKind};
 pub use message::{
@@ -62,7 +64,7 @@ pub const PASSKEY_TIMEOUT_MS: u32 = 120_000;
 /// Oldest protocol revision accepted by this agent.
 pub const MINIMUM_VERSION: Version = Version::new(1, 0);
 /// Current trusted-protocol version.
-pub const CURRENT_VERSION: Version = Version::new(1, 2);
+pub const CURRENT_VERSION: Version = Version::new(1, 3);
 /// First protocol revision that defines agent-owned Windows Hello operations.
 pub const WINDOWS_HELLO_VERSION: Version = Version::new(1, 1);
 /// Explicit feature grant required for every Windows Hello operation.
@@ -71,3 +73,7 @@ pub const FEATURE_WINDOWS_HELLO: u16 = 1;
 pub const FEATURE_PASSKEY_PROVIDER: u16 = 2;
 /// First protocol revision that defines vault-backed passkey schemas.
 pub const PASSKEY_PROVIDER_VERSION: Version = Version::new(1, 2);
+/// First revision defining exact-origin browser credential operations.
+pub const BROWSER_FILL_VERSION: Version = Version::new(1, 3);
+/// Explicit grant required for exact-origin browser fill.
+pub const FEATURE_BROWSER_FILL: u16 = 3;

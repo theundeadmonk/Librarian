@@ -3,11 +3,14 @@ use std::{
     time::Duration,
 };
 
+use librarian_agent_protocol::{BrowserContext as AgentBrowserContext, BrowserCredential};
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
 pub const BROWSER_PROTOCOL_VERSION: u16 = 1;
 pub const MAX_BROWSER_MESSAGE_BYTES: usize = 16 * 1024;
+pub const FILL_PROTOCOL_VERSION: u16 = 2;
+const MAX_BROWSER_RESPONSE_BYTES: usize = 128 * 1024;
 const MIN_TIMEOUT_MS: u32 = 100;
 const MAX_TIMEOUT_MS: u32 = 5_000;
 
@@ -16,6 +19,9 @@ pub enum BridgeFailure {
     AgentUnavailable,
     Incompatible,
     OperationFailed,
+    Locked,
+    Cancelled,
+    TimedOut,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -30,7 +36,7 @@ pub enum AgentStatus {
     ShuttingDown,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct BrowserRequest {
     protocol_version: u16,
@@ -44,27 +50,44 @@ struct BrowserRequest {
 #[serde(rename_all = "camelCase")]
 enum BrowserOperation {
     Status,
+    FillSingle,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct BrowserContext {
-    kind: BrowserContextKind,
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
-#[serde(rename_all = "camelCase")]
-enum BrowserContextKind {
+#[derive(Deserialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
+)]
+enum BrowserContext {
     None,
+    ExactHttps {
+        tab_id: u32,
+        frame_id: u32,
+        document_id: String,
+        top_level_origin: String,
+        frame_origin: String,
+    },
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Serialize)]
 #[serde(
     tag = "status",
     rename_all = "camelCase",
     rename_all_fields = "camelCase"
 )]
 enum BrowserResponse<'a> {
+    Credential {
+        protocol_version: u16,
+        request_id: &'a str,
+        username: &'a str,
+        password: &'a str,
+    },
+    NoCredential {
+        protocol_version: u16,
+        request_id: &'a str,
+    },
     Ok {
         protocol_version: u16,
         request_id: &'a str,
@@ -84,6 +107,9 @@ enum BrowserError {
     Incompatible,
     AgentUnavailable,
     OperationFailed,
+    Locked,
+    Cancelled,
+    TimedOut,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -100,17 +126,34 @@ enum ReadFrame {
 struct ValidRequest {
     request_id: String,
     timeout: Duration,
+    fill_context: Option<AgentBrowserContext>,
 }
 
 struct RequestFailure {
     request_id: Option<String>,
     error: BrowserError,
+    version: u16,
 }
 
+#[cfg(test)]
 pub fn serve_once(
     reader: &mut impl Read,
     writer: &mut impl Write,
     status: impl FnOnce(Duration) -> Result<AgentStatus, BridgeFailure>,
+) -> Result<(), ServeError> {
+    serve_with_fill(reader, writer, status, |_, _| {
+        Err(BridgeFailure::OperationFailed)
+    })
+}
+
+pub fn serve_with_fill(
+    reader: &mut impl Read,
+    writer: &mut impl Write,
+    status: impl FnOnce(Duration) -> Result<AgentStatus, BridgeFailure>,
+    fill: impl FnOnce(
+        &AgentBrowserContext,
+        Duration,
+    ) -> Result<Option<BrowserCredential>, BridgeFailure>,
 ) -> Result<(), ServeError> {
     let bytes = match read_frame(reader) {
         Ok(ReadFrame::EndOfStream) => return Ok(()),
@@ -133,7 +176,7 @@ pub fn serve_once(
             write_response(
                 writer,
                 &BrowserResponse::Error {
-                    protocol_version: BROWSER_PROTOCOL_VERSION,
+                    protocol_version: failure.version,
                     request_id: failure.request_id.as_deref(),
                     error: failure.error,
                 },
@@ -141,6 +184,34 @@ pub fn serve_once(
             return Ok(());
         }
     };
+    if let Some(context) = &request.fill_context {
+        let result = fill(context, request.timeout);
+        let response = match &result {
+            Ok(Some(credential)) => BrowserResponse::Credential {
+                protocol_version: FILL_PROTOCOL_VERSION,
+                request_id: &request.request_id,
+                username: credential.username(),
+                password: credential.password(),
+            },
+            Ok(None) => BrowserResponse::NoCredential {
+                protocol_version: FILL_PROTOCOL_VERSION,
+                request_id: &request.request_id,
+            },
+            Err(error) => BrowserResponse::Error {
+                protocol_version: FILL_PROTOCOL_VERSION,
+                request_id: Some(&request.request_id),
+                error: match error {
+                    BridgeFailure::AgentUnavailable => BrowserError::AgentUnavailable,
+                    BridgeFailure::Incompatible => BrowserError::Incompatible,
+                    BridgeFailure::Locked => BrowserError::Locked,
+                    BridgeFailure::Cancelled => BrowserError::Cancelled,
+                    BridgeFailure::TimedOut => BrowserError::TimedOut,
+                    BridgeFailure::OperationFailed => BrowserError::OperationFailed,
+                },
+            },
+        };
+        return write_response(writer, &response);
+    }
     let response = match status(request.timeout) {
         Ok(agent_status) => BrowserResponse::Ok {
             protocol_version: BROWSER_PROTOCOL_VERSION,
@@ -153,7 +224,10 @@ pub fn serve_once(
             error: match error {
                 BridgeFailure::AgentUnavailable => BrowserError::AgentUnavailable,
                 BridgeFailure::Incompatible => BrowserError::Incompatible,
-                BridgeFailure::OperationFailed => BrowserError::OperationFailed,
+                BridgeFailure::OperationFailed
+                | BridgeFailure::Locked
+                | BridgeFailure::Cancelled
+                | BridgeFailure::TimedOut => BrowserError::OperationFailed,
             },
         },
     };
@@ -164,28 +238,94 @@ fn validate_request(bytes: &[u8]) -> Result<ValidRequest, RequestFailure> {
     let request: BrowserRequest = serde_json::from_slice(bytes).map_err(|_| RequestFailure {
         request_id: None,
         error: BrowserError::InvalidRequest,
+        version: BROWSER_PROTOCOL_VERSION,
     })?;
     let request_id = valid_request_id(&request.request_id).then(|| request.request_id.clone());
-    if request.protocol_version != BROWSER_PROTOCOL_VERSION {
+    let version = match request.operation {
+        BrowserOperation::Status => BROWSER_PROTOCOL_VERSION,
+        BrowserOperation::FillSingle => FILL_PROTOCOL_VERSION,
+    };
+    if request.protocol_version != version {
         return Err(RequestFailure {
             request_id,
             error: BrowserError::Incompatible,
+            version,
         });
     }
-    if request_id.is_none()
-        || request.operation != BrowserOperation::Status
-        || request.context.kind != BrowserContextKind::None
-        || !(MIN_TIMEOUT_MS..=MAX_TIMEOUT_MS).contains(&request.timeout_ms)
-    {
+    if request_id.is_none() || !(MIN_TIMEOUT_MS..=MAX_TIMEOUT_MS).contains(&request.timeout_ms) {
         return Err(RequestFailure {
             request_id,
             error: BrowserError::InvalidRequest,
+            version,
         });
     }
+    let fill_context = match (request.operation, request.context) {
+        (BrowserOperation::Status, BrowserContext::None) => Some(None),
+        (
+            BrowserOperation::FillSingle,
+            BrowserContext::ExactHttps {
+                tab_id,
+                frame_id,
+                document_id,
+                top_level_origin,
+                frame_origin,
+            },
+        ) => parse_hex_id(&request.request_id)
+            .zip(parse_document_id(&document_id))
+            .filter(|_| canonical_origin(&top_level_origin) && canonical_origin(&frame_origin))
+            .and_then(|(id, document)| {
+                AgentBrowserContext::new(
+                    id,
+                    tab_id,
+                    frame_id,
+                    document,
+                    &top_level_origin,
+                    &frame_origin,
+                )
+                .ok()
+            })
+            .map(Some),
+        _ => None,
+    }
+    .ok_or_else(|| RequestFailure {
+        request_id: Some(request.request_id.clone()),
+        error: BrowserError::InvalidRequest,
+        version,
+    })?;
     Ok(ValidRequest {
         request_id: request.request_id,
         timeout: Duration::from_millis(u64::from(request.timeout_ms)),
+        fill_context,
     })
+}
+
+fn canonical_origin(value: &str) -> bool {
+    value.len() <= 2048
+        && url::Url::parse(value)
+            .is_ok_and(|url| url.scheme() == "https" && url.origin().ascii_serialization() == value)
+}
+
+fn parse_hex_id(value: &str) -> Option<[u8; 16]> {
+    if !valid_request_id(value) {
+        return None;
+    }
+    let mut result = [0; 16];
+    for (index, byte) in result.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&value[index * 2..index * 2 + 2], 16).ok()?;
+    }
+    Some(result)
+}
+
+fn parse_document_id(value: &str) -> Option<[u8; 16]> {
+    if value.len() != 36
+        || !value.is_ascii()
+        || [8, 13, 18, 23]
+            .into_iter()
+            .any(|index| value.as_bytes()[index] != b'-')
+    {
+        return None;
+    }
+    parse_hex_id(&value.replace('-', ""))
 }
 
 fn valid_request_id(value: &str) -> bool {
@@ -220,13 +360,32 @@ fn write_response(
     writer: &mut impl Write,
     response: &BrowserResponse<'_>,
 ) -> Result<(), ServeError> {
-    let bytes = serde_json::to_vec(response).map_err(|_| ServeError::Output)?;
+    let mut buffer = JsonBuffer(Zeroizing::new(Vec::with_capacity(
+        MAX_BROWSER_RESPONSE_BYTES,
+    )));
+    serde_json::to_writer(&mut buffer, response).map_err(|_| ServeError::Output)?;
+    let bytes = buffer.0;
     let length = u32::try_from(bytes.len()).map_err(|_| ServeError::Output)?;
     writer
         .write_all(&length.to_ne_bytes())
         .and_then(|()| writer.write_all(&bytes))
         .and_then(|()| writer.flush())
         .map_err(|_| ServeError::Output)
+}
+
+struct JsonBuffer(Zeroizing<Vec<u8>>);
+
+impl Write for JsonBuffer {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        if bytes.len() > MAX_BROWSER_RESPONSE_BYTES - self.0.len() {
+            return Err(io::Error::other("browser response exceeds bound"));
+        }
+        self.0.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -258,6 +417,144 @@ mod tests {
         format!(
             r#"{{"protocolVersion":1,"requestId":"{REQUEST_ID}","operation":"status","context":{{"kind":"none"}},"timeoutMs":1000{overrides}}}"#
         )
+    }
+
+    fn fill_request() -> Value {
+        serde_json::json!({ "protocolVersion": 2, "requestId": REQUEST_ID,
+            "operation": "fillSingle", "timeoutMs": 2000,
+            "context": { "kind": "exactHttps", "tabId": 7, "frameId": 0,
+                "documentId": "12345678-1234-4234-8234-123456789abc",
+                "topLevelOrigin": "https://example.com", "frameOrigin": "https://example.com" } })
+    }
+
+    #[test]
+    fn fill_has_a_closed_credential_response_and_bounded_json_escaping() {
+        let username = "\0".repeat(1024);
+        let password = "\0".repeat(16384);
+        let mut output = Vec::new();
+        serve_with_fill(
+            &mut Cursor::new(frame(&fill_request().to_string())),
+            &mut output,
+            |_| panic!("fill must not dispatch status"),
+            |context, timeout| {
+                assert_eq!(timeout, Duration::from_secs(2));
+                assert_eq!(context.top_origin(), "https://example.com");
+                Ok(Some(BrowserCredential::new(&username, &password).unwrap()))
+            },
+        )
+        .unwrap();
+        assert!(output.len() < MAX_BROWSER_RESPONSE_BYTES);
+        assert_eq!(
+            response(&output),
+            serde_json::json!({ "protocolVersion": 2,
+            "requestId": REQUEST_ID, "status": "credential", "username": username, "password": password })
+        );
+    }
+
+    #[test]
+    fn fill_rejects_bad_contexts_and_extended_fields_before_agent_access() {
+        let replacements = [
+            ("topLevelOrigin", serde_json::json!("https://other.test")),
+            ("frameOrigin", serde_json::json!("https://sub.example.com")),
+            ("frameId", serde_json::json!(1)),
+            ("tabId", serde_json::json!(2_147_483_648_u32)),
+            (
+                "documentId",
+                serde_json::json!("00000000-0000-0000-0000-000000000000"),
+            ),
+            (
+                "documentId",
+                serde_json::json!("1234567-81234-4234-8234-123456789abc"),
+            ),
+            ("unexpected", serde_json::json!(true)),
+        ];
+        for (key, value) in replacements {
+            let mut request = fill_request();
+            request["context"][key] = value;
+            let mut output = Vec::new();
+            serve_with_fill(
+                &mut Cursor::new(frame(&request.to_string())),
+                &mut output,
+                |_| panic!("invalid context reached status"),
+                |_, _| panic!("invalid context reached agent"),
+            )
+            .unwrap();
+            assert_eq!(response(&output)["error"], "invalidRequest");
+        }
+        for origin in [
+            "http://example.com",
+            "https://EXAMPLE.COM",
+            "https://example.com:443",
+            "https://example.com/",
+            "https://example.com@evil.test",
+            "blob:https://example.com/id",
+        ] {
+            let mut request = fill_request();
+            request["context"]["topLevelOrigin"] = serde_json::json!(origin);
+            request["context"]["frameOrigin"] = serde_json::json!(origin);
+            let mut output = Vec::new();
+            serve_with_fill(
+                &mut Cursor::new(frame(&request.to_string())),
+                &mut output,
+                |_| panic!("invalid origin reached status"),
+                |_, _| panic!("invalid origin reached agent"),
+            )
+            .unwrap();
+            assert_eq!(response(&output)["error"], "invalidRequest");
+        }
+    }
+
+    #[test]
+    fn fill_returns_no_selection_or_detail_free_failures() {
+        let failures = [
+            (BridgeFailure::Locked, "locked"),
+            (BridgeFailure::Cancelled, "cancelled"),
+            (BridgeFailure::TimedOut, "timedOut"),
+            (BridgeFailure::Incompatible, "incompatible"),
+            (BridgeFailure::AgentUnavailable, "agentUnavailable"),
+            (BridgeFailure::OperationFailed, "operationFailed"),
+        ];
+        for (failure, expected) in failures {
+            let mut output = Vec::new();
+            serve_with_fill(
+                &mut Cursor::new(frame(&fill_request().to_string())),
+                &mut output,
+                |_| panic!("unexpected status"),
+                |_, _| Err(failure),
+            )
+            .unwrap();
+            assert_eq!(
+                response(&output),
+                serde_json::json!({ "protocolVersion": 2, "requestId": REQUEST_ID,
+                "status": "error", "error": expected })
+            );
+        }
+        let mut output = Vec::new();
+        serve_with_fill(
+            &mut Cursor::new(frame(&fill_request().to_string())),
+            &mut output,
+            |_| panic!("unexpected status"),
+            |_, _| Ok(None),
+        )
+        .unwrap();
+        assert_eq!(
+            response(&output),
+            serde_json::json!({ "protocolVersion": 2, "requestId": REQUEST_ID, "status": "noCredential" })
+        );
+    }
+
+    #[test]
+    fn host_matches_the_shared_canonical_origin_corpus() {
+        let corpus = include_str!("../../../tests/fixtures/browser-origin-policy.tsv");
+        for line in corpus.lines().filter(|line| !line.starts_with('#')) {
+            let fields: Vec<_> = line.split('\t').collect();
+            assert_eq!(
+                canonical_origin(fields[1]),
+                fields[2] != "-",
+                "{}",
+                fields[0]
+            );
+        }
     }
 
     #[test]

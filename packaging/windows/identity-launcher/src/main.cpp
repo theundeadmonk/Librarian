@@ -5,6 +5,7 @@
 #include <shobjidl_core.h>
 #include "NativeHostStartup.h"
 #include "LaunchOperation.h"
+#include "RegistrationFailure.h"
 #include "../../../../platform/windows-passkey/include/librarian/windows_passkey/registration.h"
 
 #include <winrt/Windows.ApplicationModel.h>
@@ -953,14 +954,14 @@ namespace
         DWORD exit_code{};
         if (!GetExitCodeProcess(process.value, &exit_code))
         {
-            fail(L"Librarian could not update passkey provider registration.");
+            fail(L"Librarian could not read the passkey provider registration result.");
         }
         namespace registration = librarian::windows_passkey::registration_command;
         // The desktop distinguishes unsupported APIs from operation failures.
         // Identity, activation, timeout, and unexpected API errors remain fatal.
         if (!registration::can_continue(exit_code, register_provider))
         {
-            fail(L"Librarian could not update passkey provider registration.");
+            fail(librarian::identity_launcher::registration_failure_message(exit_code));
         }
         if (exit_code == registration::platform_unavailable)
         {

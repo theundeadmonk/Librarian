@@ -1,4 +1,5 @@
 #include "librarian/windows_passkey/registration.h"
+#include "librarian/windows_passkey/registration_options.h"
 
 #include <windows.h>
 #include <webauthn.h>
@@ -118,16 +119,9 @@ extern "C" std::uint32_t librarian_windows_passkey_provider_register() noexcept
     HRESULT result = api.get_state(provider_clsid, &state);
     if (result == NTE_NOT_FOUND)
     {
-        WEBAUTHN_PLUGIN_ADD_AUTHENTICATOR_OPTIONS const options{
-            L"Librarian",
-            provider_clsid,
-            nullptr,
-            nullptr,
-            nullptr,
-            static_cast<DWORD>(std::size(authenticator_info)),
-            authenticator_info,
-            0U,
-            nullptr};
+        auto const options =
+            librarian::windows_passkey::registration_metadata::make_add_options(
+                provider_clsid, authenticator_info);
         PWEBAUTHN_PLUGIN_ADD_AUTHENTICATOR_RESPONSE response{};
         result = api.add(&options, &response);
         if (FAILED(result))

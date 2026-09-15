@@ -221,6 +221,14 @@ impl Connection {
         {
             return Err(ConnectionError::UnsupportedFeature);
         }
+        if hello
+            .required_features()
+            .binary_search(&crate::FEATURE_BROWSER_FILL)
+            .is_ok()
+            && selected_version < crate::BROWSER_FILL_VERSION
+        {
+            return Err(ConnectionError::UnsupportedFeature);
+        }
         if authenticated_process_id == 0 || server_nonce == [0; 32] || connection_id == [0; 16] {
             return Err(ConnectionError::InvalidRandomValue);
         }

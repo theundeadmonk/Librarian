@@ -556,6 +556,31 @@ impl VaultAgent {
         Ok(account)
     }
 
+    pub(crate) fn unique_browser_account_with_check(
+        &mut self,
+        origin: &librarian_vault_core::BrowserOrigin,
+        should_cancel: impl FnMut() -> bool,
+    ) -> Result<Option<WebsiteAccount>, AccountError> {
+        let permit = self.require_operation()?;
+        let snapshot = self.load_authenticated_snapshot()?;
+        let result = self
+            .session
+            .as_ref()
+            .ok_or(AccountError::Locked)?
+            .unique_browser_account_with_check(
+                &snapshot.header,
+                &snapshot.manifest,
+                &snapshot.records,
+                origin,
+                should_cancel,
+            );
+        let account = self.map_read(result)?;
+        if !self.operation_is_authorized(permit) {
+            return Err(AccountError::Locked);
+        }
+        Ok(account)
+    }
+
     pub(crate) fn get_website_account_with_check(
         &mut self,
         id: RecordId,

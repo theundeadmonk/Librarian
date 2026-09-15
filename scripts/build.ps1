@@ -139,6 +139,18 @@ Invoke-CheckedProcess `
     -WorkingDirectory $repoRoot
 
 Invoke-CheckedProcess `
+    -Label "Isolated Issue 17 fixture report guards" `
+    -FilePath $powerShellHost `
+    -Arguments @(
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        "scripts\test-issue17-fixture-guards.ps1"
+    ) `
+    -WorkingDirectory $repoRoot
+
+Invoke-CheckedProcess `
     -Label "Rust formatting" `
     -FilePath $toolchain.Cargo `
     -Arguments @("fmt", "--all", "--", "--check") `
@@ -242,6 +254,17 @@ Invoke-CheckedProcess `
     -Label "Extension build and protocol tests" `
     -FilePath $toolchain.Npm `
     -Arguments @("run", "test:extension") `
+    -WorkingDirectory $repoRoot
+
+Invoke-CheckedProcess `
+    -Label "Isolated extension/native/runtime component integration" `
+    -FilePath $powerShellHost `
+    -Arguments @(
+        "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
+        (Join-Path $PSScriptRoot "test-issue17-native-runtime.ps1"),
+        "-NodePath", $toolchain.Node, "-CargoPath", $toolchain.Cargo,
+        "-NpmPath", $toolchain.Npm
+    ) `
     -WorkingDirectory $repoRoot
 
 Invoke-CheckedProcess `
