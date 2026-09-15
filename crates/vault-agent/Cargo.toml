@@ -30,5 +30,16 @@ same-file = "=1.0.6"
 [dev-dependencies]
 p256 = { version = "=0.14.0", features = ["ecdsa"] }
 
+# Explicit test tool, never a production binary or installer payload.
+[[example]]
+name = "issue17-fixture"
+path = "examples/issue17_fixture.rs"
+test = true
+
+[[example]]
+name = "issue17-auth-client"
+path = "examples/issue17_auth_client.rs"
+test = true
+
 [lints]
 workspace = true

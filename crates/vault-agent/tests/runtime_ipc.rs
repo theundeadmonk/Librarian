@@ -193,6 +193,310 @@ fn different_fields() -> librarian_agent_protocol::AccountFields {
     .expect("bounded account fields")
 }
 
+fn browser_context(origin: &str, marker: u8) -> librarian_agent_protocol::BrowserContext {
+    librarian_agent_protocol::BrowserContext::new([marker; 16], 7, 0, [9; 16], origin, origin)
+        .unwrap()
+}
+
+fn browser_connection(runtime: &AgentRuntime, marker: u8) -> Connection {
+    let feature = librarian_agent_protocol::FEATURE_BROWSER_FILL;
+    let hello = ClientHello::new(
+        [marker; 32],
+        CURRENT_VERSION,
+        CURRENT_VERSION,
+        ClientRole::NativeHost,
+        BUILD_ID,
+        vec![feature],
+    )
+    .unwrap();
+    Connection::negotiate(
+        ClientRole::NativeHost,
+        17,
+        BUILD_ID,
+        &hello,
+        &[feature],
+        [marker.wrapping_add(1); 32],
+        [marker.wrapping_add(2); 16],
+        runtime.state(),
+        runtime.unlock_epoch(),
+        ConnectionLimits::default(),
+    )
+    .unwrap()
+    .0
+}
+
+fn browser_fixture(directory: &TestDirectory) -> (AgentRuntime, Connection, [u8; 16]) {
+    let runtime = AgentRuntime::start(directory.vault_path()).unwrap();
+    let desktop = connection(ClientRole::Desktop, &runtime, 10);
+    dispatch_success(
+        &runtime,
+        &desktop,
+        1,
+        &create("BROWSER-MASTER-NEVER-DISCLOSE"),
+        Some([1; 16]),
+    );
+    let added = dispatch_success(
+        &runtime,
+        &desktop,
+        2,
+        &OperationRequest::AddAccount { fields: fields() },
+        Some([2; 16]),
+    );
+    let id = decode_account_id(added.body());
+    (runtime, desktop, id)
+}
+
+fn browser_select(runtime: &AgentRuntime, client: &Connection) -> ResponseEnvelope {
+    dispatch_success(
+        runtime,
+        client,
+        1,
+        &OperationRequest::ExactOriginMatches {
+            context: browser_context("https://runtime.example", 1),
+        },
+        None,
+    )
+}
+
+fn selected_request(response: &ResponseEnvelope, origin: &str, marker: u8) -> OperationRequest {
+    OperationRequest::GetSelectedCredential {
+        context: browser_context(origin, marker),
+        selection: librarian_agent_protocol::BrowserSelection::decode_optional(response.body())
+            .unwrap()
+            .unwrap(),
+    }
+}
+
+#[test]
+fn browser_fill_discloses_only_one_selected_credential_once() {
+    let directory = TestDirectory::new();
+    let (runtime, desktop, _) = browser_fixture(&directory);
+    dispatch_success(
+        &runtime,
+        &desktop,
+        3,
+        &OperationRequest::AddAccount {
+            fields: different_fields(),
+        },
+        Some([3; 16]),
+    );
+    let client = browser_connection(&runtime, 30);
+    let matched = browser_select(&runtime, &client);
+    assert!(matched.body().len() <= 64);
+    let result = dispatch_success(
+        &runtime,
+        &client,
+        2,
+        &selected_request(&matched, "https://runtime.example", 1),
+        None,
+    );
+    let credential = librarian_agent_protocol::BrowserCredential::decode(result.body()).unwrap();
+    assert_eq!(credential.username(), fields().username());
+    assert_eq!(credential.password(), fields().password());
+    for forbidden in [
+        "BROWSER-MASTER-NEVER-DISCLOSE",
+        "Different Runtime Example",
+        "DIFFERENT-RUNTIME-PASSWORD-CANARY-7A13D2",
+        "https://runtime.example",
+    ] {
+        assert!(
+            !result
+                .body()
+                .windows(forbidden.len())
+                .any(|bytes| bytes == forbidden.as_bytes())
+        );
+    }
+    let replay = dispatch(
+        &runtime,
+        &client,
+        3,
+        &selected_request(&matched, "https://runtime.example", 1),
+        None,
+    );
+    assert_eq!(replay.error(), Some(PublicErrorCode::InvalidRequest));
+    assert!(replay.body().is_empty());
+    let again = dispatch(
+        &runtime,
+        &client,
+        4,
+        &OperationRequest::ExactOriginMatches {
+            context: browser_context("https://runtime.example", 2),
+        },
+        None,
+    );
+    assert_eq!(again.error(), Some(PublicErrorCode::InvalidRequest));
+}
+
+#[test]
+fn browser_selection_is_bound_to_connection_and_full_request_context() {
+    let directory = TestDirectory::new();
+    let (runtime, _, _) = browser_fixture(&directory);
+    let client = browser_connection(&runtime, 30);
+    let other = browser_connection(&runtime, 40);
+    let matched = browser_select(&runtime, &client);
+    assert_eq!(
+        dispatch(
+            &runtime,
+            &other,
+            1,
+            &selected_request(&matched, "https://runtime.example", 1),
+            None
+        )
+        .error(),
+        Some(PublicErrorCode::InvalidRequest)
+    );
+    assert_eq!(
+        dispatch(
+            &runtime,
+            &client,
+            2,
+            &selected_request(&matched, "https://runtime.example", 2),
+            None
+        )
+        .error(),
+        Some(PublicErrorCode::InvalidRequest)
+    );
+    // A wrong context consumes the lease instead of offering another guess.
+    assert_eq!(
+        dispatch(
+            &runtime,
+            &client,
+            3,
+            &selected_request(&matched, "https://runtime.example", 1),
+            None
+        )
+        .error(),
+        Some(PublicErrorCode::InvalidRequest)
+    );
+}
+
+#[test]
+fn browser_selection_is_invalidated_by_account_mutations() {
+    for change in 0..3 {
+        let directory = TestDirectory::new();
+        let (runtime, desktop, id) = browser_fixture(&directory);
+        let client = browser_connection(&runtime, 30);
+        let matched = browser_select(&runtime, &client);
+        let mutation = match change {
+            0 => OperationRequest::UpdateAccount {
+                id,
+                fields: fields(),
+            },
+            1 => OperationRequest::DeleteAccount { id },
+            _ => OperationRequest::AddAccount { fields: fields() },
+        };
+        dispatch_success(&runtime, &desktop, 3, &mutation, Some([3; 16]));
+        let result = dispatch(
+            &runtime,
+            &client,
+            2,
+            &selected_request(&matched, "https://runtime.example", 1),
+            None,
+        );
+        assert_eq!(result.error(), Some(PublicErrorCode::Conflict));
+        assert!(result.body().is_empty());
+    }
+}
+
+#[test]
+fn browser_lookup_rejects_noncanonical_origins_and_never_widens_matches() {
+    let directory = TestDirectory::new();
+    let (runtime, desktop, _) = browser_fixture(&directory);
+    for origin in [
+        "http://runtime.example",
+        "https://RUNTIME.EXAMPLE",
+        "https://runtime.example:443",
+        "https://runtime.example/",
+        "https://runtime.example@evil.test",
+        "blob:https://runtime.example/id",
+    ] {
+        let client = browser_connection(&runtime, 30);
+        let result = dispatch(
+            &runtime,
+            &client,
+            1,
+            &OperationRequest::ExactOriginMatches {
+                context: browser_context(origin, 1),
+            },
+            None,
+        );
+        assert_eq!(result.error(), Some(PublicErrorCode::InvalidRequest));
+        assert!(result.body().is_empty());
+        runtime.disconnect(&client).unwrap();
+    }
+    for origin in [
+        "https://login.runtime.example",
+        "https://runtime.example.evil.test",
+        "https://runtime.example:8443",
+        "https://runtime.example.",
+        "https://runt1me.example",
+    ] {
+        let client = browser_connection(&runtime, 30);
+        let result = dispatch_success(
+            &runtime,
+            &client,
+            1,
+            &OperationRequest::ExactOriginMatches {
+                context: browser_context(origin, 1),
+            },
+            None,
+        );
+        assert!(
+            librarian_agent_protocol::BrowserSelection::decode_optional(result.body())
+                .unwrap()
+                .is_none()
+        );
+        runtime.disconnect(&client).unwrap();
+    }
+    dispatch_success(
+        &runtime,
+        &desktop,
+        3,
+        &OperationRequest::AddAccount { fields: fields() },
+        Some([3; 16]),
+    );
+    let client = browser_connection(&runtime, 40);
+    let result = browser_select(&runtime, &client);
+    assert!(
+        librarian_agent_protocol::BrowserSelection::decode_optional(result.body())
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
+fn browser_fill_loses_to_lock_cancellation_and_disconnect_after_admission() {
+    for interrupt in 0..3 {
+        let directory = TestDirectory::new();
+        let (runtime, desktop, _) = browser_fixture(&directory);
+        let client = browser_connection(&runtime, 30);
+        let matched = browser_select(&runtime, &client);
+        let operation = selected_request(&matched, "https://runtime.example", 1);
+        let (request, header) = request_parts(&runtime, &client, 2, &operation, None);
+        let result = runtime
+            .dispatch_with_admission(
+                &client,
+                &header,
+                &request,
+                || match interrupt {
+                    0 => {
+                        dispatch_success(&runtime, &desktop, 3, &OperationRequest::Lock, None);
+                    }
+                    1 => {
+                        assert!(runtime.cancel_request(*client.connection_id(), 2).unwrap());
+                    }
+                    _ => {
+                        runtime.disconnect(&client).unwrap();
+                    }
+                },
+                copy_response,
+            )
+            .unwrap();
+        assert!(result.error().is_some());
+        assert!(result.body().is_empty());
+    }
+}
+
 fn decode_account_id(body: &[u8]) -> [u8; 16] {
     let mut decoder = Decoder::new(body);
     assert_eq!(decoder.array().expect("array"), Some(1));

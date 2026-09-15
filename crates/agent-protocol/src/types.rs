@@ -217,6 +217,9 @@ impl OperationCode {
     #[must_use]
     pub const fn required_feature(self) -> Option<u16> {
         match self {
+            Self::ExactOriginMatches | Self::GetSelectedCredential => {
+                Some(crate::FEATURE_BROWSER_FILL)
+            }
             Self::EnrollWindowsHello | Self::RemoveWindowsHello | Self::UnlockWindowsHello => {
                 Some(crate::FEATURE_WINDOWS_HELLO)
             }

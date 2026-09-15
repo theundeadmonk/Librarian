@@ -11,8 +11,9 @@ use std::{
 
 use hmac::{Hmac, KeyInit, Mac};
 use librarian_agent_protocol::{
-    AccountView, AgentState, BeginRequestError, Connection, ConnectionError, CorrelationId,
-    FrameHeader, MAX_IN_FLIGHT_GLOBAL, OperationCode, OperationRequest, PasskeyAssertionView,
+    AccountView, AgentState, BeginRequestError, BrowserContext, BrowserCredential,
+    BrowserSelection, Connection, ConnectionError, CorrelationId, FrameHeader,
+    MAX_IN_FLIGHT_GLOBAL, OperationCode, OperationRequest, PasskeyAssertionView,
     PasskeyCredentialView, PasskeyManagementSummaryView, PasskeyRequestProof, PasskeySummaryView,
     PasskeyTransactionProof, ProtocolError, PublicErrorCode, RequestCompletion, RequestEnvelope,
     RequestPermit, ResponseEnvelope, RetryCategory, encode_account, encode_account_id,
@@ -200,6 +201,19 @@ struct RequestRegistration {
     coordinator: Arc<Coordinator>,
     key: RequestKey,
     cancellation: Arc<CancellationFlag>,
+}
+
+enum BrowserLeaseAdmission {
+    Ready(Option<BrowserLease>),
+    Rejected(ExecutionOutcome),
+}
+
+struct BrowserLease {
+    context: BrowserContext,
+    selection: BrowserSelection,
+    epoch: u64,
+    accounts_generation: u64,
+    expires: Instant,
 }
 
 struct DispatchContext<'a> {
@@ -424,6 +438,9 @@ pub struct AgentRuntime {
     state: AtomicU8,
     coordinator: Arc<Coordinator>,
     idempotency: Mutex<IdempotencyState>,
+    // One transaction per native connection; None is a consumed tombstone.
+    browser_leases: Mutex<BTreeMap<[u8; 16], Option<BrowserLease>>>,
+    accounts_generation: AtomicU64,
     pending_passkey_creations: Mutex<BTreeMap<PendingPasskeyCreationKey, PendingPasskeyCreation>>,
     passkey_cleanup_gate: Mutex<()>,
     idempotency_fingerprint_key: Zeroizing<[u8; 32]>,
@@ -547,6 +564,8 @@ impl AgentRuntime {
             state: AtomicU8::new(state as u8),
             coordinator: Arc::new(Coordinator::new()),
             idempotency: Mutex::new(IdempotencyState::new()),
+            browser_leases: Mutex::new(BTreeMap::new()),
+            accounts_generation: AtomicU64::new(1),
             pending_passkey_creations: Mutex::new(BTreeMap::new()),
             passkey_cleanup_gate: Mutex::new(()),
             idempotency_fingerprint_key,
@@ -633,6 +652,7 @@ impl AgentRuntime {
             let _commit = lock(&self.coordinator.commit_gate)?;
             connection.close();
             self.coordinator.cancel_connection(connection_id)?;
+            lock(&self.browser_leases)?.remove(&connection_id);
             lock(&self.pending_passkey_creations)?.retain(|key, pending| {
                 if key.connection_id != connection_id {
                     return true;
@@ -956,6 +976,8 @@ impl AgentRuntime {
                         replayed: true,
                         holds_lock_transition: false,
                         committed: false,
+                        browser_generation: None,
+                        browser_deadline: None,
                     }),
                 )
             } else {
@@ -1053,6 +1075,27 @@ impl AgentRuntime {
                 }
             }
         }
+        if outcome
+            .browser_deadline
+            .is_some_and(|deadline| Instant::now() >= deadline)
+        {
+            outcome = ExecutionOutcome::deadline();
+        }
+        if outcome.browser_generation.is_some_and(|generation| {
+            generation == u64::MAX || generation != self.accounts_generation.load(Ordering::Acquire)
+        }) {
+            outcome = ExecutionOutcome::failure(PublicErrorCode::Conflict, RetryCategory::Never);
+        }
+        if outcome.error.is_some()
+            && matches!(
+                context.permit.operation(),
+                OperationCode::ExactOriginMatches | OperationCode::GetSelectedCredential
+            )
+            && let Some(slot) =
+                lock(&self.browser_leases)?.get_mut(context.connection.connection_id())
+        {
+            *slot = None;
+        }
         if outcome.error.is_none()
             && matches!(
                 context.permit.operation(),
@@ -1110,6 +1153,10 @@ impl AgentRuntime {
         }
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "Keep the closed operation dispatcher exhaustive and in one place"
+    )]
     fn execute(
         &self,
         operation: OperationRequest,
@@ -1127,6 +1174,16 @@ impl AgentRuntime {
         }
         match operation {
             OperationRequest::Status => Ok(ExecutionOutcome::success(Zeroizing::new(Vec::new()))),
+            OperationRequest::ExactOriginMatches { context } => {
+                self.browser_fill(context, None, request_epoch, registration, deadline)
+            }
+            OperationRequest::GetSelectedCredential { context, selection } => self.browser_fill(
+                context,
+                Some(selection),
+                request_epoch,
+                registration,
+                deadline,
+            ),
             OperationRequest::CreateVault { master_password } => {
                 self.create_vault(&master_password, registration, deadline)
             }
@@ -2478,6 +2535,162 @@ impl AgentRuntime {
         Ok(map_account_error(error))
     }
 
+    fn claim_browser_lease(
+        &self,
+        context: &BrowserContext,
+        selection: Option<BrowserSelection>,
+        request_epoch: u64,
+        connection_id: [u8; 16],
+    ) -> Result<BrowserLeaseAdmission, DispatchError> {
+        // Consume a submitted lease even if its context or selected ID is wrong.
+        let required = if let Some(selection) = selection {
+            let Some(lease) = lock(&self.browser_leases)?
+                .get_mut(&connection_id)
+                .and_then(Option::take)
+            else {
+                return Ok(BrowserLeaseAdmission::Rejected(ExecutionOutcome::invalid()));
+            };
+            if !lease.context.matches(context)
+                || !lease.selection.matches(&selection)
+                || lease.epoch != request_epoch
+            {
+                return Ok(BrowserLeaseAdmission::Rejected(ExecutionOutcome::invalid()));
+            }
+            Some(lease)
+        } else {
+            let mut leases = lock(&self.browser_leases)?;
+            if leases.contains_key(&connection_id) {
+                return Ok(BrowserLeaseAdmission::Rejected(ExecutionOutcome::invalid()));
+            }
+            if leases.len() >= librarian_agent_protocol::MAX_CONNECTIONS {
+                return Ok(BrowserLeaseAdmission::Rejected(ExecutionOutcome::busy()));
+            }
+            leases.insert(connection_id, None);
+            None
+        };
+        Ok(BrowserLeaseAdmission::Ready(required))
+    }
+
+    fn browser_fill(
+        &self,
+        context: BrowserContext,
+        selection: Option<BrowserSelection>,
+        request_epoch: u64,
+        registration: &RequestRegistration,
+        deadline: Instant,
+    ) -> Result<ExecutionOutcome, DispatchError> {
+        let connection_id = registration.key.connection_id;
+        let required =
+            match self.claim_browser_lease(&context, selection, request_epoch, connection_id)? {
+                BrowserLeaseAdmission::Ready(required) => required,
+                BrowserLeaseAdmission::Rejected(outcome) => return Ok(outcome),
+            };
+        let Ok(origin) = librarian_vault_core::BrowserOrigin::parse(context.top_origin()) else {
+            return Ok(ExecutionOutcome::invalid());
+        };
+        let Ok(frame_origin) = librarian_vault_core::BrowserOrigin::parse(context.frame_origin())
+        else {
+            return Ok(ExecutionOutcome::invalid());
+        };
+        if origin.as_str() != frame_origin.as_str() {
+            return Ok(ExecutionOutcome::invalid());
+        }
+        let deadline = required
+            .as_ref()
+            .map_or(deadline, |lease| deadline.min(lease.expires));
+        if let Some(outcome) = self.pre_secret_operation(request_epoch, registration, deadline) {
+            return Ok(outcome);
+        }
+        let mut vault = lock(&self.vault)?;
+        if let Some(outcome) = self.pre_secret_operation(request_epoch, registration, deadline) {
+            return Ok(outcome);
+        }
+        let generation = self.accounts_generation.load(Ordering::Acquire);
+        if generation == u64::MAX
+            || required
+                .as_ref()
+                .is_some_and(|lease| lease.accounts_generation != generation)
+        {
+            return Ok(ExecutionOutcome::failure(
+                PublicErrorCode::Conflict,
+                RetryCategory::Never,
+            ));
+        }
+        let account = match vault.unique_browser_account_with_check(&origin, || {
+            self.secret_operation_should_abort(request_epoch, registration, deadline)
+        }) {
+            Ok(account) => account,
+            Err(AccountError::Aborted) => {
+                return self.abort_after_core(&mut vault, request_epoch, registration, deadline);
+            }
+            Err(error) => {
+                return self.authenticated_read_error_after_core(
+                    vault,
+                    error,
+                    request_epoch,
+                    registration,
+                    deadline,
+                );
+            }
+        };
+        if let Some(outcome) =
+            self.post_secret_operation(&mut vault, request_epoch, registration, deadline)
+        {
+            return Ok(outcome);
+        }
+        let body = if let Some(lease) = required {
+            let Some(account) = account else {
+                return Ok(ExecutionOutcome::failure(
+                    PublicErrorCode::NotFound,
+                    RetryCategory::Never,
+                ));
+            };
+            if account.id().as_bytes() != &lease.selection.record_id()
+                || account.revision() != lease.selection.revision()
+            {
+                return Ok(ExecutionOutcome::failure(
+                    PublicErrorCode::Conflict,
+                    RetryCategory::Never,
+                ));
+            }
+            BrowserCredential::new(account.username(), account.password())?.encode()
+        } else if let Some(account) = account {
+            let mut token = [0; 16];
+            getrandom::fill(&mut token).map_err(|_| DispatchError::Internal)?;
+            let selection =
+                BrowserSelection::new(token, *account.id().as_bytes(), account.revision())?;
+            let body = BrowserSelection::encode_optional(Some(&selection));
+            let mut leases = lock(&self.browser_leases)?;
+            let Some(slot) = leases.get_mut(&connection_id) else {
+                return Ok(ExecutionOutcome::cancelled());
+            };
+            *slot = Some(BrowserLease {
+                context,
+                selection,
+                epoch: request_epoch,
+                accounts_generation: generation,
+                expires: deadline,
+            });
+            body
+        } else {
+            BrowserSelection::encode_optional(None)
+        };
+        let mut outcome = ExecutionOutcome::success(body);
+        outcome.browser_generation = Some(generation);
+        outcome.browser_deadline = Some(deadline);
+        Ok(outcome)
+    }
+
+    // Called while the vault and durable-commit gates are held. Saturation
+    // permanently disables browser disclosure rather than allowing wraparound.
+    fn accounts_changed(&self) {
+        let next = self
+            .accounts_generation
+            .load(Ordering::Acquire)
+            .saturating_add(1);
+        self.accounts_generation.store(next, Ordering::Release);
+    }
+
     fn list_accounts(
         &self,
         offset: u32,
@@ -2610,9 +2823,12 @@ impl AgentRuntime {
         );
         release_failed_commit_guard(&result, &mut commit_guard);
         match result {
-            Ok(id) => Ok(ExecutionOutcome::success(encode_account_id(
-                *id.as_bytes(),
-            )?)),
+            Ok(id) => {
+                self.accounts_changed();
+                Ok(ExecutionOutcome::success(encode_account_id(
+                    *id.as_bytes(),
+                )?))
+            }
             Err(AccountError::Aborted) => {
                 self.abort_after_core(&mut vault, request_epoch, registration, deadline)
             }
@@ -2674,7 +2890,10 @@ impl AgentRuntime {
         );
         release_failed_commit_guard(&result, &mut commit_guard);
         match result {
-            Ok(()) => Ok(ExecutionOutcome::success(encode_empty_result()?)),
+            Ok(()) => {
+                self.accounts_changed();
+                Ok(ExecutionOutcome::success(encode_empty_result()?))
+            }
             Err(AccountError::Aborted) => {
                 self.abort_after_core(&mut vault, request_epoch, registration, deadline)
             }
@@ -2731,7 +2950,10 @@ impl AgentRuntime {
         );
         release_failed_commit_guard(&result, &mut commit_guard);
         match result {
-            Ok(()) => Ok(ExecutionOutcome::success(encode_empty_result()?)),
+            Ok(()) => {
+                self.accounts_changed();
+                Ok(ExecutionOutcome::success(encode_empty_result()?))
+            }
             Err(AccountError::Aborted) => {
                 self.abort_after_core(&mut vault, request_epoch, registration, deadline)
             }
@@ -3496,6 +3718,8 @@ struct ExecutionOutcome {
     replayed: bool,
     holds_lock_transition: bool,
     committed: bool,
+    browser_generation: Option<u64>,
+    browser_deadline: Option<Instant>,
 }
 
 impl ExecutionOutcome {
@@ -3507,6 +3731,8 @@ impl ExecutionOutcome {
             replayed: false,
             holds_lock_transition: false,
             committed: false,
+            browser_generation: None,
+            browser_deadline: None,
         }
     }
 
@@ -3518,6 +3744,8 @@ impl ExecutionOutcome {
             replayed: false,
             holds_lock_transition: false,
             committed: false,
+            browser_generation: None,
+            browser_deadline: None,
         }
     }
 
@@ -7564,6 +7792,162 @@ mod tests {
         assert_eq!(retry.retry, RetryCategory::Never);
         assert_eq!(provider.removed(), vec![vec![0xA0, 0], vec![0xA0, 1]]);
         assert!(state.is_empty());
+    }
+
+    #[test]
+    fn browser_terminal_commit_suppresses_expired_changed_locked_and_cancelled_secrets() {
+        let directory = TestDirectory::new();
+        let runtime = AgentRuntime::start(directory.vault_path()).expect("runtime");
+        for marker in 1..=4 {
+            runtime
+                .state
+                .store(AgentState::Unlocked as u8, Ordering::Release);
+            let client = browser_test_connection(&runtime, marker);
+            let operation = OperationRequest::GetSelectedCredential {
+                context: browser_test_context(),
+                selection: BrowserSelection::new([1; 16], [2; 16], 1).expect("selection"),
+            };
+            let (_, _, permit) = admitted_request(&runtime, &client, 1, &operation);
+            let registration = runtime
+                .coordinator
+                .register(RequestKey {
+                    connection_id: *client.connection_id(),
+                    request_id: 1,
+                })
+                .expect("registration");
+            let mut outcome = ExecutionOutcome::success(
+                BrowserCredential::new("USER-CANARY", "TERMINAL-PASSWORD-CANARY")
+                    .expect("credential")
+                    .encode(),
+            );
+            outcome.browser_generation = Some(runtime.accounts_generation.load(Ordering::Acquire));
+            outcome.browser_deadline = Some(Instant::now() + Duration::from_secs(10));
+            let expected = match marker {
+                1 => {
+                    outcome.browser_deadline = Some(Instant::now());
+                    PublicErrorCode::DeadlineExceeded
+                }
+                2 => {
+                    runtime.accounts_changed();
+                    PublicErrorCode::Conflict
+                }
+                3 => {
+                    runtime
+                        .state
+                        .store(AgentState::Locked as u8, Ordering::Release);
+                    PublicErrorCode::Locked
+                }
+                _ => {
+                    let cancel = FrameHeader::new(
+                        MessageKind::Cancel,
+                        CURRENT_VERSION,
+                        0,
+                        *client.connection_id(),
+                        1,
+                    )
+                    .expect("cancel");
+                    client.cancel(&cancel).expect("cancel request");
+                    PublicErrorCode::Cancelled
+                }
+            };
+            let response = runtime
+                .finish_dispatch(
+                    DispatchContext {
+                        connection: &client,
+                        permit,
+                        registration,
+                        _global: CounterPermit::acquire(
+                            &runtime.coordinator.global_in_flight,
+                            MAX_IN_FLIGHT_GLOBAL,
+                        )
+                        .expect("global permit"),
+                        deadline: Instant::now() + Duration::from_secs(10),
+                        correlation: CorrelationId::new([marker; 16]),
+                    },
+                    outcome,
+                    copy_response,
+                )
+                .expect("terminal response");
+            assert_eq!(response.error(), Some(expected));
+            assert!(response.body().is_empty());
+        }
+    }
+
+    fn browser_test_context() -> BrowserContext {
+        BrowserContext::new(
+            [1; 16],
+            7,
+            0,
+            [3; 16],
+            "https://example.test",
+            "https://example.test",
+        )
+        .expect("browser context")
+    }
+
+    fn browser_test_connection(runtime: &AgentRuntime, marker: u8) -> Connection {
+        let feature = librarian_agent_protocol::FEATURE_BROWSER_FILL;
+        let hello = ClientHello::new(
+            [marker; 32],
+            CURRENT_VERSION,
+            CURRENT_VERSION,
+            ClientRole::NativeHost,
+            TEST_BUILD_ID,
+            vec![feature],
+        )
+        .expect("hello");
+        Connection::negotiate(
+            ClientRole::NativeHost,
+            17,
+            TEST_BUILD_ID,
+            &hello,
+            &[feature],
+            [marker.wrapping_add(1); 32],
+            [marker.wrapping_add(2); 16],
+            runtime.state(),
+            runtime.unlock_epoch(),
+            ConnectionLimits::default(),
+        )
+        .expect("browser connection")
+        .0
+    }
+
+    #[test]
+    fn browser_expired_lease_is_consumed_before_vault_access() {
+        let directory = TestDirectory::new();
+        let runtime = AgentRuntime::start(directory.vault_path()).expect("runtime");
+        runtime
+            .state
+            .store(AgentState::Unlocked as u8, Ordering::Release);
+        let registration = test_registration(&runtime, 7);
+        lock(&runtime.browser_leases).expect("leases").insert(
+            [7; 16],
+            Some(BrowserLease {
+                context: browser_test_context(),
+                selection: BrowserSelection::new([1; 16], [2; 16], 1).expect("selection"),
+                epoch: runtime.unlock_epoch(),
+                accounts_generation: 1,
+                expires: Instant::now(),
+            }),
+        );
+        let outcome = runtime
+            .browser_fill(
+                browser_test_context(),
+                Some(BrowserSelection::new([1; 16], [2; 16], 1).expect("selection")),
+                runtime.unlock_epoch(),
+                &registration,
+                Instant::now() + Duration::from_secs(10),
+            )
+            .expect("expired outcome");
+        assert_eq!(outcome.error, Some(PublicErrorCode::DeadlineExceeded));
+        assert!(outcome.body.is_empty());
+        assert!(
+            lock(&runtime.browser_leases)
+                .expect("leases")
+                .get(&[7; 16])
+                .expect("tombstone")
+                .is_none()
+        );
     }
 
     #[test]

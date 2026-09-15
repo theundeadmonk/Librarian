@@ -13,6 +13,8 @@ namespace librarian::windows
             L"Unlock Librarian with your master password.";
         constexpr wchar_t UnlockingMessage[] =
             L"Librarian is completing a security-sensitive request.";
+        constexpr wchar_t RefreshingMessage[] =
+            L"Checking vault status.";
         constexpr wchar_t WindowsHelloMessage[] =
             L"Complete the Windows Hello prompt to continue.";
         constexpr wchar_t WindowsHelloFallbackMessage[] =
@@ -555,11 +557,18 @@ namespace librarian::windows
 
         resume_state_ = state_;
         pending_action_ = action;
-        account_editor_visible_ = false;
+        bool const refreshing = action == PendingAction::RefreshStatus &&
+            state_ == ShellState::Unlocked;
+        // Activation verifies access, but is not a request to leave Add Account.
+        // Only the existing UI controls retain the unsaved draft during this check.
+        if (!refreshing)
+        {
+            account_editor_visible_ = false;
+        }
         accounts_.clear();
         passkeys_.clear();
-        state_ = ShellState::Unlocking;
-        message_ = UnlockingMessage;
+        state_ = refreshing ? ShellState::Refreshing : ShellState::Unlocking;
+        message_ = refreshing ? RefreshingMessage : UnlockingMessage;
         return true;
     }
 
@@ -603,8 +612,26 @@ namespace librarian::windows
             return;
         }
 
+        bool const keep_editor = action == PendingAction::RefreshStatus &&
+            resume_state_ == ShellState::Unlocked && account_editor_visible_ &&
+            outcome.request.error == ClientError::None &&
+            outcome.request.status == VaultStatus::Unlocked &&
+            outcome.accounts.has_value() && outcome.accounts->error == ClientError::None &&
+            outcome.passkeys.has_value() &&
+            (outcome.passkeys->error == ClientError::None ||
+                outcome.passkeys->error == ClientError::Cancelled);
         pending_action_ = PendingAction::None;
+        account_editor_visible_ = false;
+        // A canceled status check is not confirmation that access is still safe.
+        // The user-canceled unlock/Hello paths retain their separate fallback rules.
+        if (outcome.request.error == ClientError::Cancelled ||
+            outcome.request.error == ClientError::WindowsHelloUnavailable)
+        {
+            ApplyError(ClientError::Unexpected);
+            return;
+        }
         Apply(std::move(outcome));
+        account_editor_visible_ = keep_editor && state_ == ShellState::Unlocked;
     }
 
     bool ShellViewModel::BeginLockRequest()

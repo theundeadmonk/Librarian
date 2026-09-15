@@ -1,4 +1,5 @@
 import { probeNativeStatus, type NativeStatusResult } from "./native.js";
+import { installFillController, type FillPresentation } from "./fill-controller.js";
 
 const COLORS = Object.freeze({
   available: "#137333",
@@ -14,7 +15,7 @@ interface ActionPresentation {
 }
 
 export const foundationStatus = Object.freeze({
-  credentialAccessImplemented: false,
+  credentialAccessImplemented: true,
   nativeMessagingImplemented: true,
 });
 
@@ -94,6 +95,31 @@ chrome.runtime.onInstalled.addListener(() => {
 chrome.runtime.onStartup.addListener(() => {
   void refreshConnectionStatus().catch(() => undefined);
 });
-chrome.action.onClicked.addListener(() => {
-  void refreshConnectionStatus().catch(() => undefined);
+const fill = installFillController(chrome, globalThis.crypto, (status, tabId) => {
+  void presentFill(status, tabId).catch(() => undefined);
+});
+
+async function presentFill(status: FillPresentation, tabId: number): Promise<void> {
+  const messages: Record<FillPresentation, string> = {
+    credential: "Librarian supplied the saved account. Filling is skipped if the page or fields changed.",
+    noCredential: "No single account matches this exact website. Check the accounts in Librarian.",
+    noForm: "No supported sign-in form is available on this page.",
+    locked: "Unlock Librarian in the desktop app, then click here to fill.",
+    cancelled: "Filling was cancelled. Click here to try again.",
+    timedOut: "Librarian did not respond in time. Click here to try again.",
+    unavailable: "The Librarian app is unavailable. Install, start, or repair it.",
+    incompatible: "Update or repair Librarian and its browser extension together.",
+    protocolError: "Librarian could not verify the fill request. Repair Librarian.",
+    operationFailed: "Librarian could not fill this account. Click here to try again.",
+  };
+  await Promise.all([
+    chrome.action.setTitle({ tabId, title: messages[status] }),
+    chrome.action.setBadgeText({ tabId, text: status === "credential" ? "" : status === "locked" ? "LOCK" : "!" }),
+    chrome.action.setBadgeBackgroundColor({ tabId, color: status === "credential" ? COLORS.available : COLORS.attention }),
+  ]);
+}
+
+chrome.action.onClicked.addListener((tab) => {
+  void fill.explicit(tab).then((handled) => handled ? undefined : refreshConnectionStatus())
+    .catch(() => refreshConnectionStatus().catch(() => undefined));
 });

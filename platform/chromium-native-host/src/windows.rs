@@ -8,12 +8,14 @@ use std::{
 };
 
 use librarian_agent_protocol::{
-    AgentState, CURRENT_VERSION, ClientHello, ClientRole, Frame, FrameHeader, MessageKind,
+    AgentEvent, AgentState, BrowserContext as BrowserFillContext, BrowserCredential,
+    BrowserSelection, CURRENT_VERSION, ClientHello, ClientRole, FEATURE_BROWSER_FILL, Frame,
+    FrameHeader, MessageKind, OperationRequest, PublicErrorCode, RequestEnvelope, ResponseEnvelope,
     ServerHello, Version,
 };
 use librarian_windows_ipc::{
     ComponentRole, EndpointDescriptorStore, PeerObservation, PeerPolicy, PipeConnection,
-    current_process_observation,
+    TransportError, current_process_observation,
 };
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -21,7 +23,7 @@ use zeroize::Zeroizing;
 
 use crate::{
     chromium_arguments::{valid_extension_origin, valid_parent_window},
-    protocol::{AgentStatus, BridgeFailure, serve_once},
+    protocol::{AgentStatus, BridgeFailure, serve_with_fill},
 };
 
 const HOST_EXECUTABLE: &str = "Librarian.ChromiumNativeHost.exe";
@@ -43,6 +45,7 @@ pub enum HostError {
     Protocol,
     Input,
     Output,
+    Timeout,
 }
 
 struct AgentContext {
@@ -50,6 +53,13 @@ struct AgentContext {
     policy: PeerPolicy,
     package_full_name: String,
     build_id: [u8; 32],
+}
+
+struct AgentSession {
+    pipe: PipeConnection,
+    server: ServerHello,
+    connection_id: [u8; 16],
+    deadline: Instant,
 }
 
 #[derive(Deserialize)]
@@ -86,9 +96,12 @@ pub fn run() -> Result<(), HostError> {
         package_full_name: package_full_name.to_owned(),
         build_id: sha256_file(&observation.image_path)?,
     };
-    serve_once(&mut stdin().lock(), &mut stdout().lock(), |timeout| {
-        context.status(timeout).map_err(map_bridge_error)
-    })
+    serve_with_fill(
+        &mut stdin().lock(),
+        &mut stdout().lock(),
+        |timeout| context.status(timeout).map_err(map_bridge_error),
+        |request, timeout| context.fill(request, timeout),
+    )
     .map_err(|error| match error {
         crate::protocol::ServeError::Input => HostError::Input,
         crate::protocol::ServeError::Output => HostError::Output,
@@ -97,6 +110,44 @@ pub fn run() -> Result<(), HostError> {
 
 impl AgentContext {
     fn status(&self, timeout: Duration) -> Result<AgentStatus, HostError> {
+        Ok(map_agent_state(
+            self.connect(timeout, false)?.server.agent_state(),
+        ))
+    }
+
+    fn fill(
+        &self,
+        context: &BrowserFillContext,
+        timeout: Duration,
+    ) -> Result<Option<BrowserCredential>, BridgeFailure> {
+        let session = self.connect(timeout, true).map_err(map_bridge_error)?;
+        if session.server.agent_state() != AgentState::Unlocked {
+            return Err(BridgeFailure::Locked);
+        }
+        let matched = session.request(
+            1,
+            OperationRequest::ExactOriginMatches {
+                context: context.clone(),
+            },
+        )?;
+        let Some(selection) = BrowserSelection::decode_optional(matched.body())
+            .map_err(|_| BridgeFailure::OperationFailed)?
+        else {
+            return Ok(None);
+        };
+        let credential = session.request(
+            2,
+            OperationRequest::GetSelectedCredential {
+                context: context.clone(),
+                selection,
+            },
+        )?;
+        BrowserCredential::decode(credential.body())
+            .map(Some)
+            .map_err(|_| BridgeFailure::OperationFailed)
+    }
+
+    fn connect(&self, timeout: Duration, fill: bool) -> Result<AgentSession, HostError> {
         let deadline = Instant::now()
             .checked_add(timeout)
             .ok_or(HostError::Transport)?;
@@ -114,7 +165,7 @@ impl AgentContext {
             &self.policy,
             remaining(deadline)?,
         )
-        .map_err(|_| HostError::Transport)?;
+        .map_err(map_transport_error)?;
         let mut nonce = [0_u8; 32];
         getrandom::fill(&mut nonce).map_err(|_| HostError::Transport)?;
         let hello = ClientHello::new(
@@ -123,7 +174,11 @@ impl AgentContext {
             CURRENT_VERSION,
             ClientRole::NativeHost,
             self.build_id,
-            Vec::new(),
+            if fill {
+                vec![FEATURE_BROWSER_FILL]
+            } else {
+                Vec::new()
+            },
         )
         .map_err(|_| HostError::Protocol)?;
         let payload = Zeroizing::new(hello.encode());
@@ -139,10 +194,10 @@ impl AgentContext {
             &Frame::new(header, payload).map_err(|_| HostError::Protocol)?,
             remaining(deadline)?,
         )
-        .map_err(|_| HostError::Transport)?;
+        .map_err(map_transport_error)?;
         let frame = pipe
             .read_frame(remaining(deadline)?)
-            .map_err(|_| HostError::Transport)?;
+            .map_err(map_transport_error)?;
         if frame.header().kind() != MessageKind::ServerHello {
             return Err(HostError::Protocol);
         }
@@ -150,12 +205,113 @@ impl AgentContext {
         if server.selected_version() != CURRENT_VERSION
             || frame.header().version() != CURRENT_VERSION
             || server.derived_role() != ClientRole::NativeHost
-            || !server.granted_features().is_empty()
+            || server.granted_features()
+                != if fill {
+                    &[FEATURE_BROWSER_FILL][..]
+                } else {
+                    &[]
+                }
             || frame.header().connection_id() == &[0; 16]
         {
             return Err(HostError::Protocol);
         }
-        Ok(map_agent_state(server.agent_state()))
+        let connection_id = *frame.header().connection_id();
+        Ok(AgentSession {
+            pipe,
+            server,
+            connection_id,
+            deadline,
+        })
+    }
+}
+
+impl AgentSession {
+    fn request(
+        &self,
+        request_id: u64,
+        operation: OperationRequest,
+    ) -> Result<ResponseEnvelope, BridgeFailure> {
+        let budget = remaining(self.deadline).map_err(map_bridge_error)?;
+        let timeout =
+            u32::try_from(budget.as_millis()).map_err(|_| BridgeFailure::OperationFailed)?;
+        if timeout == 0 {
+            return Err(BridgeFailure::TimedOut);
+        }
+        let request = RequestEnvelope::new(
+            operation.operation(),
+            self.server.unlock_epoch(),
+            timeout,
+            None,
+            operation
+                .encode()
+                .map_err(|_| BridgeFailure::OperationFailed)?,
+        )
+        .map_err(|_| BridgeFailure::OperationFailed)?;
+        drop(operation);
+        let payload = request
+            .encode()
+            .map_err(|_| BridgeFailure::OperationFailed)?;
+        if payload.len() > self.server.maximum_payload_bytes() as usize {
+            return Err(BridgeFailure::OperationFailed);
+        }
+        let header = FrameHeader::new(
+            MessageKind::Request,
+            self.server.selected_version(),
+            payload.len(),
+            self.connection_id,
+            request_id,
+        )
+        .map_err(|_| BridgeFailure::OperationFailed)?;
+        self.pipe
+            .write_frame(
+                &Frame::new(header, payload).map_err(|_| BridgeFailure::OperationFailed)?,
+                remaining(self.deadline).map_err(map_bridge_error)?,
+            )
+            .map_err(|error| map_bridge_error(map_transport_error(error)))?;
+        for _ in 0..=librarian_agent_protocol::MAX_EVENT_QUEUE {
+            let frame = self
+                .pipe
+                .read_frame(remaining(self.deadline).map_err(map_bridge_error)?)
+                .map_err(|error| map_bridge_error(map_transport_error(error)))?;
+            if frame.header().connection_id() != &self.connection_id
+                || frame.header().version() != self.server.selected_version()
+                || frame.payload().len() > self.server.maximum_payload_bytes() as usize
+            {
+                return Err(BridgeFailure::OperationFailed);
+            }
+            if frame.header().kind() == MessageKind::Event {
+                let event = AgentEvent::decode(frame.payload())
+                    .map_err(|_| BridgeFailure::OperationFailed)?;
+                if event.state() != AgentState::Unlocked
+                    || event.unlock_epoch() != self.server.unlock_epoch()
+                {
+                    return Err(BridgeFailure::Locked);
+                }
+                continue;
+            }
+            if frame.header().kind() != MessageKind::Response
+                || frame.header().request_id() != request_id
+            {
+                return Err(BridgeFailure::OperationFailed);
+            }
+            let response = ResponseEnvelope::decode(frame.payload())
+                .map_err(|_| BridgeFailure::OperationFailed)?;
+            return match response.error() {
+                None => Ok(response),
+                Some(PublicErrorCode::Locked) => Err(BridgeFailure::Locked),
+                Some(PublicErrorCode::Cancelled) => Err(BridgeFailure::Cancelled),
+                Some(PublicErrorCode::DeadlineExceeded) => Err(BridgeFailure::TimedOut),
+                Some(_) => Err(BridgeFailure::OperationFailed),
+            };
+        }
+        Err(BridgeFailure::OperationFailed)
+    }
+}
+
+const fn map_transport_error(error: TransportError) -> HostError {
+    match error {
+        TransportError::Timeout => HostError::Timeout,
+        _ => HostError::Transport,
     }
 }
 
@@ -272,7 +428,7 @@ fn remaining(deadline: Instant) -> Result<Duration, HostError> {
     deadline
         .checked_duration_since(Instant::now())
         .filter(|remaining| !remaining.is_zero())
-        .ok_or(HostError::Transport)
+        .ok_or(HostError::Timeout)
 }
 
 const fn map_agent_state(state: AgentState) -> AgentStatus {
@@ -289,6 +445,7 @@ const fn map_agent_state(state: AgentState) -> AgentStatus {
 
 const fn map_bridge_error(error: HostError) -> BridgeFailure {
     match error {
+        HostError::Timeout => BridgeFailure::TimedOut,
         HostError::Discovery | HostError::Transport => BridgeFailure::AgentUnavailable,
         HostError::Identity | HostError::Protocol | HostError::Manifest => {
             BridgeFailure::Incompatible

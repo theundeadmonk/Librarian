@@ -49,6 +49,7 @@
   <ItemGroup>
     <ClInclude Include="include\librarian\windows_passkey\foundation.h" />
     <ClInclude Include="include\librarian\windows_passkey\registration.h" />
+    <ClInclude Include="include\librarian\windows_passkey\registration_options.h" />
     <ClCompile Include="src\foundation.cpp" />
     <ClCompile Include="src\registration.cpp" />
   </ItemGroup>

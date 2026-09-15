@@ -574,6 +574,40 @@ impl UnlockedVault {
         found.ok_or(RecordOperationError::NotFound)
     }
 
+    /// Authenticates every record but retains at most one exact-origin account.
+    /// Zero and multiple matches are deliberately indistinguishable.
+    ///
+    /// # Errors
+    /// Returns `Cancelled` when authority is revoked, and `Failed` for any
+    /// snapshot integrity error, including one after a matching record.
+    pub fn unique_browser_account_with_check(
+        &self,
+        header_bytes: &[u8],
+        manifest_envelope_bytes: &[u8],
+        records: &[EncryptedRecord],
+        origin: &crate::BrowserOrigin,
+        should_cancel: impl FnMut() -> bool,
+    ) -> Result<Option<WebsiteAccount>, RecordOperationError> {
+        self.authenticate_snapshot_metadata(header_bytes, manifest_envelope_bytes)?;
+        let mut found = None;
+        let mut ambiguous = false;
+        visit_authenticated_records(self, records, should_cancel, |record| {
+            if let DecryptedRecord::WebsiteAccount(account) = record
+                && account.permitted_origin() == origin.as_str()
+                && !ambiguous
+            {
+                if found.is_some() {
+                    found = None;
+                    ambiguous = true;
+                } else {
+                    found = Some(account);
+                }
+            }
+        })
+        .map_err(map_snapshot_operation_error)?;
+        Ok(found)
+    }
+
     /// Prepares an encrypted insert and the matching next manifest.
     ///
     /// # Errors

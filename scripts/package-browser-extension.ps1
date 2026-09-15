@@ -22,9 +22,23 @@ $permissions = @($manifest.permissions)
 if ($manifest.manifest_version -ne 3 -or
     $manifest.background.service_worker -cne "dist/background.js" -or
     $manifest.background.type -cne "module" -or
-    $permissions.Count -ne 1 -or
-    $permissions[0] -cne "nativeMessaging") {
+    $permissions.Count -ne 2 -or
+    $permissions[0] -cne "nativeMessaging" -or
+    $permissions[1] -cne "webNavigation" -or
+    $manifest.minimum_chrome_version -cne "106" -or
+    @($manifest.host_permissions).Count -ne 1 -or
+    $manifest.host_permissions[0] -cne "https://*/*" -or
+    @($manifest.content_scripts).Count -ne 1) {
     throw "The browser-extension manifest has an unexpected privilege surface."
+}
+$content = $manifest.content_scripts[0]
+if (@($content.matches).Count -ne 1 -or $content.matches[0] -cne "https://*/*" -or
+    @($content.js).Count -ne 1 -or $content.js[0] -cne "dist/content.js" -or
+    $content.run_at -cne "document_start" -or $content.all_frames -ne $false -or
+    $content.match_about_blank -ne $false -or $content.world -cne "ISOLATED" -or
+    @($content.PSObject.Properties.Name).Count -ne 6 -or
+    @($manifest.PSObject.Properties.Name).Count -ne 11) {
+    throw "The browser content script has an unexpected privilege surface."
 }
 
 $publicKey = [Convert]::FromBase64String($manifest.key)
@@ -53,8 +67,8 @@ $packageFiles = @(
         Relative = "dist\background.js"
     },
     [PSCustomObject]@{
-        Source = Join-Path $sourceRoot "dist\native.js"
-        Relative = "dist\native.js"
+        Source = Join-Path $sourceRoot "dist\content.js"
+        Relative = "dist\content.js"
     }
 )
 foreach ($file in $packageFiles) {

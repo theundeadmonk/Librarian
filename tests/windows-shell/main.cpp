@@ -2,7 +2,9 @@
 #include "../../apps/windows/Librarian.Windows/DesktopLaunchArguments.h"
 #include "../../packaging/windows/identity-launcher/src/NativeHostStartup.h"
 #include "../../packaging/windows/identity-launcher/src/LaunchOperation.h"
+#include "../../packaging/windows/identity-launcher/src/RegistrationFailure.h"
 #include "../../platform/windows-passkey/include/librarian/windows_passkey/registration.h"
+#include "../../platform/windows-passkey/include/librarian/windows_passkey/registration_options.h"
 
 #include <atomic>
 #include <fstream>
@@ -53,6 +55,28 @@ namespace
         int failures_{ 0 };
     };
 
+    void TestRegistrationOptions(TestContext& test)
+    {
+        namespace metadata = librarian::windows_passkey::registration_metadata;
+        CLSID const provider{0x68fe5df7, 0x9fe6, 0x4145,
+            {0xbb, 0xa0, 0x95, 0x01, 0x0f, 0x43, 0xbf, 0xbe}};
+        constexpr std::uint8_t info[]{0xa2, 0x01, 0x81, 0x68,
+            'F', 'I', 'D', 'O', '_', '2', '_', '1', 0x03, 0x50,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+        auto const options = metadata::make_add_options(provider, info);
+        test.Check(options.pwszPluginRpId != nullptr &&
+            std::wstring_view{options.pwszPluginRpId} == L"librarian.invalid",
+            "registration supplies the nonempty reserved plugin RP ID required by Windows");
+        test.Check(options.cSupportedRpIds == 0U && options.ppwszSupportedRpIds == nullptr,
+            "the plugin identity does not restrict the supported website RP list");
+        test.Check(&options.rclsid == &provider &&
+            std::wstring_view{options.pwszAuthenticatorName} == L"Librarian" &&
+            options.cbAuthenticatorInfo == sizeof(info) && options.pbAuthenticatorInfo == info,
+            "registration preserves provider identity and the exact authenticator payload");
+        test.Check(options.pwszLightThemeLogoSvg == nullptr && options.pwszDarkThemeLogoSvg == nullptr,
+            "registration leaves unrelated optional logos unchanged");
+    }
+
     void TestRegistrationResults(TestContext& test)
     {
         namespace registration = librarian::windows_passkey::registration_command;
@@ -69,14 +93,30 @@ namespace
                 "only registration with missing or unimplemented APIs permits password fallback");
         }
         for (HRESULT const result : {E_ACCESSDENIED, E_UNEXPECTED, E_FAIL, E_INVALIDARG,
+            NTE_NOT_FOUND, NTE_NOT_SUPPORTED, NTE_INVALID_PARAMETER,
             HRESULT_FROM_WIN32(ERROR_MOD_NOT_FOUND), HRESULT_FROM_WIN32(ERROR_BAD_EXE_FORMAT)})
         {
             auto const code = registration::exit_code(static_cast<std::uint32_t>(result));
+            test.Check(code == static_cast<std::uint32_t>(result) &&
+                !registration::can_continue(code, true) &&
+                !registration::can_continue(code, false),
+                "unexpected registration, update, response, and loader HRESULTs remain exact and fatal");
+        }
+        for (std::uint32_t const result : {1U, 4U, 11U, 12U, 127U})
+        {
+            auto const code = registration::exit_code(result);
             test.Check(code == registration::operation_failed &&
                 !registration::can_continue(code, true) &&
                 !registration::can_continue(code, false),
-                "unexpected registration, update, response, and loader failures remain fatal");
+                "unexpected positive statuses cannot alias success or unsupported-platform exits");
         }
+        using librarian::identity_launcher::registration_failure_message;
+        test.Check(registration_failure_message(0x80070057U) ==
+            L"Librarian could not update passkey provider registration (exit code 0x80070057).",
+            "launcher reports the exact unsigned HRESULT in its bounded error message");
+        test.Check(registration_failure_message(11U) ==
+            L"Librarian could not update passkey provider registration (exit code 0x0000000B).",
+            "launcher preserves legacy small failure codes with fixed-width formatting");
         for (std::uint32_t const code : {1U, registration::not_registered, 42U, 0xC0000135U})
         {
             test.Check(!registration::can_continue(code, true) &&
@@ -589,6 +629,105 @@ namespace
             "lifecycle agent shutdown remains fail closed after reactivation");
     }
 
+    void TestAccountEditorSurvivesActivation(TestContext& test)
+    {
+        auto client = ClientWithStatus(VaultStatus::Unlocked);
+        client->list_result.accounts.push_back(
+            { L"record", L"Example", L"https://example.com", L"person" });
+        ShellViewModel model{ client };
+        InitializeModel(model);
+        model.ShowAccountEditor();
+
+        for (int activation = 0; activation < 3; ++activation)
+        {
+            test.Check(model.BeginRefresh(), "editing permits an activation status check");
+            test.Check(model.State() == ShellState::Refreshing,
+                "activation uses an in-place refresh, not an unlock navigation");
+            test.Check(model.IsAccountEditorVisible(),
+                "activation keeps Add Account selected while checking status");
+            test.Check(model.State() != ShellState::Unlocked && model.Accounts().empty() &&
+                model.Passkeys().empty(), "refresh hides cached vault data until verified");
+            test.Check(!model.BeginSaveAccount() && !model.BeginRefresh() &&
+                !model.BeginWindowsHelloEnrollment() && !model.BeginDeletePasskey(),
+                "refresh cannot overlap a save, status check, or vault mutation");
+            model.CompleteRefresh(model.ExecuteStatusRequest());
+            test.Check(model.State() == ShellState::Unlocked && model.IsAccountEditorVisible(),
+                "successful reactivation returns to the same Add Account page");
+            test.Check(model.Accounts().size() == 1U, "reactivation still refreshes vault data");
+        }
+        test.Check(client->status_calls == 4 && client->save_calls == 0,
+            "reactivation verifies status every time without implicitly saving");
+
+        client->passkey_list_result.error = ClientError::Cancelled;
+        test.Check(model.BeginRefresh(), "editing permits a partial passkey-list refresh");
+        model.CompleteRefresh(model.ExecuteStatusRequest());
+        test.Check(model.State() == ShellState::Unlocked && model.IsAccountEditorVisible(),
+            "nonfatal passkey-list cancellation does not discard a verified unlocked draft");
+        client->passkey_list_result.error = ClientError::None;
+
+        test.Check(model.BeginRefresh(), "status check begins before explicit cancel");
+        model.CancelAccountEditor();
+        model.CompleteRefresh(model.ExecuteStatusRequest());
+        test.Check(!model.IsAccountEditorVisible(), "refresh completion never reverses explicit cancel");
+        test.Check(model.BeginRefresh(), "account overview can also refresh");
+        model.CompleteRefresh(model.ExecuteStatusRequest());
+        test.Check(!model.IsAccountEditorVisible(), "overview refresh never opens an editor");
+
+        model.ShowAccountEditor();
+        test.Check(model.BeginLock(), "explicit lock still works from Add Account");
+        test.Check(!model.IsAccountEditorVisible(), "explicit lock immediately dismisses the editor");
+        model.CompleteLock(model.ExecuteLockRequest());
+        test.Check(model.BeginRefresh(), "locked page can refresh");
+        model.CompleteRefresh(model.ExecuteStatusRequest());
+        test.Check(!model.IsAccountEditorVisible(), "later unlocked status never resurrects a locked draft");
+    }
+
+    void TestAccountEditorRefreshFailures(TestContext& test)
+    {
+        using librarian::windows::ShellRequestOutcome;
+        std::vector<ShellRequestOutcome> outcomes;
+        for (auto const status : { VaultStatus::Locked, VaultStatus::FirstRun })
+        {
+            outcomes.push_back({ { ClientError::None, status }, std::nullopt, std::nullopt });
+        }
+        for (auto const error : { ClientError::AgentUnavailable, ClientError::Busy,
+            ClientError::Cancelled, ClientError::InvalidCredentials,
+            ClientError::WindowsHelloUnavailable, ClientError::Locked, ClientError::Unexpected })
+        {
+            outcomes.push_back({ { error, VaultStatus::Unlocked }, std::nullopt, std::nullopt });
+        }
+        outcomes.push_back({ { ClientError::None, VaultStatus::Unlocked }, std::nullopt, std::nullopt });
+        for (auto const error : { ClientError::Locked, ClientError::AgentUnavailable,
+            ClientError::Cancelled, ClientError::Unexpected })
+        {
+            outcomes.push_back({ { ClientError::None, VaultStatus::Unlocked },
+                AccountListResult{ error, {} }, PasskeyListResult{} });
+            if (error != ClientError::Cancelled)
+            {
+                outcomes.push_back({ { ClientError::None, VaultStatus::Unlocked },
+                    AccountListResult{}, PasskeyListResult{ error, {} } });
+            }
+        }
+        for (auto& outcome : outcomes)
+        {
+            auto client = ClientWithStatus(VaultStatus::Unlocked);
+            ShellViewModel model{ client };
+            InitializeModel(model);
+            model.ShowAccountEditor();
+            test.Check(model.BeginRefresh(), "refresh failure regression starts with a draft");
+            auto const request_failed = outcome.request.error != ClientError::None;
+            model.CompleteRefresh(std::move(outcome));
+            test.Check(!request_failed || model.State() != ShellState::Unlocked,
+                "an unverified status response cannot resume unlocked access");
+            test.Check(!model.IsAccountEditorVisible(),
+                "lock or incomplete status verification never restores a draft");
+            test.Check(model.BeginRefresh(), "status may be checked after a failed refresh");
+            model.CompleteRefresh(model.ExecuteStatusRequest());
+            test.Check(!model.IsAccountEditorVisible(),
+                "reconnection never resurrects a discarded sensitive draft");
+        }
+    }
+
     void TestAccountPagingIsBounded(TestContext& test)
     {
         auto client = ClientWithStatus(VaultStatus::Unlocked);
@@ -1047,6 +1186,16 @@ namespace
         test.Check(
             xaml.find(" Password=\"") == std::string::npos,
             "XAML never embeds or binds a password value");
+        test.Check(xaml.find("<Flyout") == std::string::npos &&
+            xaml.find("<Popup") == std::string::npos &&
+            xaml.find("LostFocus=") == std::string::npos &&
+            xaml.find("Tapped=") == std::string::npos &&
+            xaml.find("PointerPressed=") == std::string::npos,
+            "blank-space clicks and focus loss have no dismiss or navigation handler");
+        test.Check(xaml.find("Click=\"OnCancelAccountClicked\"") != std::string::npos &&
+            xaml.find("Click=\"OnSaveAccountClicked\"") != std::string::npos &&
+            xaml.find("Lock local vault and discard draft") != std::string::npos,
+            "Add Account provides explicit Save, Cancel, and Lock actions");
     }
 
     void TestWindowSourceContract(TestContext& test, std::string const& path)
@@ -1089,6 +1238,12 @@ namespace
             "fire_and_forget MainWindow::OnRetryClicked",
             "fire_and_forget MainWindow::OnSaveAccountClicked",
             "fire_and_forget MainWindow::NavigateAccountPage",
+            "VisibleWhen(show_unlocked_page && !is_editing)",
+            "VisibleWhen(show_unlocked_page && is_editing)",
+            "SaveAccountButton().IsEnabled(state == ShellState::Unlocked)",
+            "LockFromAccountEditorButton().IsEnabled(state == ShellState::Unlocked)",
+            "if (is_active_ && !was_active)",
+            "lifetime->QueueFocusForActivation();",
         };
 
         for (auto const fragment : required)
@@ -1097,15 +1252,34 @@ namespace
                 source.find(fragment) != std::string::npos,
                 std::string{ "window source contains " } + std::string{ fragment });
         }
+
+        auto const render_start = source.find("void MainWindow::Render(");
+        auto const render_end = source.find("void MainWindow::RenderPasskeys", render_start);
+        auto const render = source.substr(render_start, render_end - render_start);
+        auto const clear_guard = render.find("if (!is_editing)");
+        test.Check(clear_guard != std::string::npos &&
+            render.find("ClearAccountEditor();") > clear_guard,
+            "rendering retains the existing draft controls until editing explicitly ends");
+        test.Check(render.find("AccountEditorPanel().IsEnabled(") == std::string::npos,
+            "a status refresh does not disable fields or drop clipboard typing");
+        auto const save_start = source.find("fire_and_forget MainWindow::OnSaveAccountClicked");
+        auto const save_end = source.find("fire_and_forget MainWindow::OnPreviousAccountPageClicked", save_start);
+        auto const save = source.substr(save_start, save_end - save_start);
+        test.Check(save.find("BeginSaveAccount()") < save.find("AccountPasswordBox().Password()"),
+            "a blocked save never reads or clears the password field");
     }
 }
+
+bool TestDesktopDiscovery();
 
 int main(int const argc, char const* const* const argv)
 {
     if (argc == 2 && std::string_view{argv[1]} == "--echo-native-host-streams") return EchoNativeHostStreams();
     TestContext test;
+    test.Check(TestDesktopDiscovery(), "desktop discovery and activation regressions");
     TestNativeHostStreams(test);
     TestDesktopLaunchArguments(test);
+    TestRegistrationOptions(test);
     TestRegistrationResults(test);
     TestLaunchOperations(test);
     TestInitialStates(test);
@@ -1113,6 +1287,8 @@ int main(int const argc, char const* const* const argv)
     TestPostUnlockPasskeyRefreshCancellation(test);
     TestPasskeyDeletionLifecycle(test);
     TestActivationRefreshFailsClosed(test);
+    TestAccountEditorSurvivesActivation(test);
+    TestAccountEditorRefreshFailures(test);
     TestAccountPagingIsBounded(test);
     TestUnlockFailuresAreSafe(test);
     TestWindowsHelloLifecycle(test);

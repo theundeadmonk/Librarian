@@ -26,7 +26,10 @@ use librarian_vault_format::{
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
+mod browser_origin;
 mod records;
+
+pub use browser_origin::{BrowserOrigin, BrowserOriginError};
 
 pub use records::{
     EncryptedRecord, PasskeyAssertion, PasskeyCredential, PasskeyInput, PasskeyInputError,

@@ -6,11 +6,13 @@
   "license": "MIT",
   "type": "module",
   "scripts": {
-    "build": "tsc --project tsconfig.json",
-    "check": "tsc --project tsconfig.json --noEmit",
-    "test": "npm run build && node --test tests/native.test.mjs"
+    "build": "tsc --project tsconfig.json && tsc --project tsconfig.content.json && node build.mjs",
+    "check": "tsc --project tsconfig.json --noEmit && tsc --project tsconfig.content.json --noEmit",
+    "test": "npm run build && node --test tests/*.test.mjs",
+    "test:browser-dom": "npm run build && node tests/browser-dom.mjs"
   },
   "devDependencies": {
+    "esbuild": "0.28.2",
     "typescript": "7.0.2"
   }
 }

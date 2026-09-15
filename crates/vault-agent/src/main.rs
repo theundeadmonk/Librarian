@@ -395,7 +395,9 @@ fn negotiate_connection(runtime: &AgentRuntime, pipe: &PipeConnection) -> Option
             &[FEATURE_WINDOWS_HELLO, FEATURE_PASSKEY_PROVIDER][..]
         }
         librarian_agent_protocol::ClientRole::PasskeyProvider => &[FEATURE_PASSKEY_PROVIDER][..],
-        librarian_agent_protocol::ClientRole::NativeHost => &[],
+        librarian_agent_protocol::ClientRole::NativeHost => {
+            &[librarian_agent_protocol::FEATURE_BROWSER_FILL][..]
+        }
     };
     let (connection, server_hello) = Connection::negotiate(
         role,

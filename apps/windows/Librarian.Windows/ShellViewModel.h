@@ -16,6 +16,7 @@ namespace librarian::windows
         Unlocking,
         Saving,
         Unlocked,
+        Refreshing,
         Error,
         AgentUnavailable,
     };
